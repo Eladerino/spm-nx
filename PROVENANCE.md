@@ -98,6 +98,8 @@ These are not binary blobs, but the audit's "derived from binaries" question cov
 
 ## Not covered here
 
-- `screenshots/` and `wiicompiled/docs/screenshots/` are captures of the games running (Nintendo artwork on
-  screen). They are a separate decision and are not removed yet.
+- `screenshots/` holds captures of the game running (Nintendo artwork on screen). The upstream release-note
+  folders `v1.0.2/` and `v1.0.3/` were removed because nothing referenced them. The 5 README shots stay until
+  Switch captures replace them. They remain in git history, as they do in upstream's public repo.
+  `wiicompiled/docs/screenshots/` (WiiCompiled's own README images) is untouched.
 - Game assets (`main.dol`, the disc) are never in the repository. The player supplies their own disc.
