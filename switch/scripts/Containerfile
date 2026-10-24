@@ -1,0 +1,13 @@
+# Build image for the Switch NRO (switch/scripts/build-switch.sh): devkitA64 at the digest SwitchWaker
+# pins (GCC 15.2, libnx 4.12, deko3d 0.5, uam 1.1), plus clang 19 for the WiiCompiled sources and a
+# CMake new enough for the runtime (3.25+).
+FROM docker.io/devkitpro/devkita64@sha256:1fc388c3a0d34bd2045a6dadcb1020e069d5f876a187fd705de14b4440c00282
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        cmake=3.31.6-2~bpo12+1 \
+        ninja-build=1.11.1-2~deb12u1 \
+        pkg-config=1.8.1-1 \
+        clang-19=1:19.1.7-3~deb12u1 \
+        rsync \
+    && rm -rf /var/lib/apt/lists/*
