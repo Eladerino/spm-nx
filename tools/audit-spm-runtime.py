@@ -200,7 +200,9 @@ def main():
     proofs = sdk_evidence(dol, wc)
     verified = {(r['file'], int(r['address'], 16)): r['evidence'] for r in proofs if r['passed']}
     (out / 'sdk-verification.json').write_text(json.dumps(proofs, indent=2), encoding='utf-8')
-    nsmbw = load_names(wc / 'projects/nsmbw/MAP.txt')
+    # The NSMBW map only annotates leftover NSMBW function addresses; it is not kept in this fork.
+    nsmbw_map = wc / 'projects/nsmbw/MAP.txt'
+    nsmbw = load_names(nsmbw_map) if nsmbw_map.exists() else {}
     mapped = {int(k, 16): (int(v[0], 16), v[1], v[2]) for k, v in
               json.loads((wc / 'projects/spm/datamap.json').read_text()).items()}
     inherited = collections.defaultdict(list)
