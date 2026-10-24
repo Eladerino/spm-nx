@@ -46,7 +46,8 @@ std::optional<std::filesystem::path> ExecutableDirectory() noexcept {
     std::error_code ec;
     const auto resolved = std::filesystem::weakly_canonical(path, ec);
     return (ec ? std::filesystem::path(path) : resolved).parent_path();
-#elif defined(__ANDROID__)
+#elif defined(__ANDROID__) || defined(__SWITCH__)
+    // Switch: the NRO's entry point (switch/source) names both directories under sdmc:/switch/.
     // The game is a library inside an APK, so there is no executable directory. The app unpacks
     // the files a desktop build keeps beside its executable (DSP ROM, pipeline cache, Wii
     // bootstrap NAND, CA bundle) and names that directory before SDL starts the game.
@@ -74,7 +75,7 @@ std::filesystem::path ApplicationDataDirectory(std::string_view applicationName)
     if (const passwd* user = getpwuid(getuid()); user && user->pw_dir && *user->pw_dir) {
         return std::filesystem::path(user->pw_dir) / "Library" / "Application Support" / applicationName;
     }
-#elif defined(__ANDROID__)
+#elif defined(__ANDROID__) || defined(__SWITCH__)
     // The app's own storage (its external files directory, which a PC can reach over USB) already
     // belongs to this game alone, so it is used as-is rather than gaining an application subfolder.
     (void)applicationName;
