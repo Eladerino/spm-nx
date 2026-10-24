@@ -1154,7 +1154,7 @@ void InstallSehLogger() {
         SetUnhandledExceptionFilter(UnhandledSehFilter);
     }
 }
-#else
+#elif !defined(__SWITCH__)
 // POSIX counterpart to SehLogger above. Unlike Windows' AddVectoredExceptionHandler, which lets
 // GuestFlat and this module each install their own handler and defensively re-check each other,
 // sigaction only allows one handler per signal - the second registration replaces the first
@@ -1254,6 +1254,10 @@ void InstallPosixMemoryFaultHandler() {
     // handler costs nothing and avoids a silent gap if it ever isn't.
     sigaction(SIGBUS, &action, nullptr);
 }
+#else
+// Horizon has no signals. Faults reach libnx's exception handler instead, which the Switch entry
+// point (switch/source) installs; GuestFlat needs no fault interception in its checked mode.
+void InstallPosixMemoryFaultHandler() {}
 #endif
 
 void AbortSignalHandler(int signum) {
@@ -1528,6 +1532,10 @@ int RuntimeMain(int argc, char** argv) {
 #elif defined(_WIN32)
         static constexpr std::array<GraphicsBackendEntry, 3> kGraphicsBackends{{
             {"auto", BACKEND_AUTO}, {"d3d12", BACKEND_D3D12}, {"vulkan", BACKEND_VULKAN},
+        }};
+#elif defined(__SWITCH__)
+        static constexpr std::array<GraphicsBackendEntry, 1> kGraphicsBackends{{
+            {"auto", BACKEND_AUTO},
         }};
 
 #endif
