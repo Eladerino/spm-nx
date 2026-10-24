@@ -111,7 +111,7 @@ Full credits and licenses ship in the release as `CREDITS.txt`, `LICENSE.txt` an
 
 ## License
 
-GPLv3, see [`wiicompiled/LICENSE`](wiicompiled/LICENSE). Bundled third-party components keep their own licenses.
+GPLv3, see [`LICENSE`](LICENSE). Bundled third-party components keep their own licenses.
 
 Super Paper Mario and all related characters are trademarks and copyrights of Nintendo. This is an unofficial fan
 project, not affiliated with or endorsed by Nintendo. This repository contains no game code or data; the release
