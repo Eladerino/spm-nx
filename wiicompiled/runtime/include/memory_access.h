@@ -616,25 +616,42 @@ MKW_MEMORY_FORCE_INLINE void FlatWriteFloat64(uint32_t address, double value) {
 // of flat stores), skipping the MMIO mask/compare that's pure overhead there. Still safe if that proof were ever wrong: the flat view maps
 // 0xCC000000..0xCDFFFFFF PAGE_NOACCESS, so a stray MMIO store faults into the same handler and diagnostic as the checked path, just reported
 // instead of dispatched inline. Never use these for an address the translator hasn't proven.
+// The Switch build's bring-up mode has no flat view mapped at all (switch/runtime/guest_flat_memory_horizon.cpp), so
+// there these defer to the checked path whenever RequiresCheckedAccess() is on, like every other flat helper does.
 
 MKW_MEMORY_FORCE_INLINE void FlatWriteRam8(uint32_t address, uint8_t value) {
+#if defined(__SWITCH__)
+    if (GuestFlat::RequiresCheckedAccess()) { Memory::Write8(address, value); return; }
+#endif
     FlatStore<uint8_t>(address, value);
 }
 
 MKW_MEMORY_FORCE_INLINE void FlatWriteRam16(uint32_t address, uint16_t value) {
+#if defined(__SWITCH__)
+    if (GuestFlat::RequiresCheckedAccess()) { Memory::Write16(address, value); return; }
+#endif
     FlatStore<uint16_t>(address, value);
 }
 
 MKW_MEMORY_FORCE_INLINE void FlatWriteRam32(uint32_t address, uint32_t value) {
+#if defined(__SWITCH__)
+    if (GuestFlat::RequiresCheckedAccess()) { Memory::Write32(address, value); return; }
+#endif
     FlatStore<uint32_t>(address, value);
 }
 
 
 MKW_MEMORY_FORCE_INLINE void FlatWriteRamFloat32(uint32_t address, double value) {
+#if defined(__SWITCH__)
+    if (GuestFlat::RequiresCheckedAccess()) { Memory::WriteFloat32(address, value); return; }
+#endif
     FlatStore<uint32_t>(address, ConvertPpcDoubleToSingleBits(value));
 }
 
 MKW_MEMORY_FORCE_INLINE void FlatWriteRamFloat64(uint32_t address, double value) {
+#if defined(__SWITCH__)
+    if (GuestFlat::RequiresCheckedAccess()) { Memory::WriteFloat64(address, value); return; }
+#endif
     uint64_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
     FlatStore<uint64_t>(address, bits);

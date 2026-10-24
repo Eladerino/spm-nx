@@ -10,7 +10,10 @@ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
 endif()
 project(mkw_recompiled)
 
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+# The Switch build keeps devkitA64's GCC as CMake's compiler (it links with libnx's specs) and compiles
+# through clang (switch/cmake/SpmSwitch.cmake).
+if((NOT CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" AND NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+   OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "WiiCompiled requires a 64-bit Clang toolchain")
 endif()
 
@@ -39,12 +42,18 @@ elseif(ANDROID AND CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
     # Cross-built with the NDK. The game is a shared library (libmain.so) that SDL's Android
     # activity loads; see cmake/PublicProducts.cmake.
     set(MKW_PLATFORM_ANDROID TRUE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+    # Horizon homebrew with devkitPro's toolchain; everything Switch-specific lives in ../../switch.
+    set(MKW_PLATFORM_SWITCH TRUE)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|aarch64|arm64|ARM64)$")
     set(MKW_PLATFORM_LINUX TRUE)
 else()
     message(FATAL_ERROR
         "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, native Linux x86_64/aarch64, "
         "Apple Clang on macOS x86_64/arm64, or the NDK for Android arm64-v8a")
+endif()
+if(MKW_PLATFORM_SWITCH)
+    include("${CMAKE_CURRENT_LIST_DIR}/../../switch/cmake/SpmSwitch.cmake")
 endif()
 
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -221,7 +230,9 @@ set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/ppc_quantized.cpp" APPEND PRO
 # ----------------------------------------------------------------------
 # Third-party: aurora-main (provides SDL3 + GPU backends)
 # ----------------------------------------------------------------------
-if(MKW_NATIVE_PREBUILT_DIR)
+if(MKW_PLATFORM_SWITCH AND SPM_SWITCH_AUDIT)
+    message(STATUS "Switch audit: Aurora is not configured")
+elseif(MKW_NATIVE_PREBUILT_DIR)
     # Precompiled aurora + third-party archives. The source trees are still
     # present (the runtime includes aurora headers directly), they are simply
     # not compiled here.
@@ -241,6 +252,8 @@ else()
         set(DAWN_ENABLE_VULKAN OFF CACHE BOOL "" FORCE)
         set(DAWN_ENABLE_METAL ON CACHE BOOL "" FORCE)
         set(TINT_BUILD_HLSL_WRITER OFF CACHE BOOL "" FORCE)
+    elseif(MKW_PLATFORM_SWITCH)
+        spm_switch_dawn_backends()
     else()
         set(DAWN_ENABLE_D3D12 OFF CACHE BOOL "" FORCE)
         set(DAWN_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
@@ -328,6 +341,9 @@ endif()
 if(MKW_PROJECT_COMPILE_DEFINITIONS)
     add_compile_definitions(${MKW_PROJECT_COMPILE_DEFINITIONS})
 endif()
+if(MKW_PLATFORM_SWITCH)
+    spm_switch_enter_project_scope()
+endif()
 
 # Runtime sources. CONFIGURE_DEPENDS costs one glob re-check per build (measured
 # at ~55 ms across the 100+ globs this build already re-verifies for SDL), and it
@@ -352,6 +368,9 @@ else()
         # spelling (and without touching x18, the thread's shadow-call-stack register).
         enable_language(ASM)
         list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/platform/android/co_switch.S")
+    endif()
+    if(MKW_PLATFORM_SWITCH)
+        spm_switch_runtime_sources(SOURCES)
     endif()
 endif()
 set(MKW_PLATFORM_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/platform/host_platform.cpp")
@@ -521,6 +540,9 @@ if(MKW_BUILD_PRODUCTS)
 
     set(MKW_RUNTIME_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}")
     include("${CMAKE_CURRENT_LIST_DIR}/cmake/PublicProducts.cmake")
+    if(MKW_PLATFORM_SWITCH)
+        spm_switch_configure_products()
+    endif()
 else()
     if(MKW_PLATFORM_MACOS)
         # Compile-only audit of native runtime sources. It deliberately avoids
@@ -549,6 +571,9 @@ else()
             target_compile_options(mkw_macos_native_compile PRIVATE -march=x86-64-v3)
         endif()
         set_target_properties(mkw_macos_native_compile PROPERTIES UNITY_BUILD OFF)
+    endif()
+    if(MKW_PLATFORM_SWITCH)
+        spm_switch_add_audit_target("${SOURCES}")
     endif()
     add_custom_target(mkw_platform_paths_check DEPENDS mkw_platform)
     message(STATUS "Translated product targets disabled (MKW_BUILD_PRODUCTS=OFF)")

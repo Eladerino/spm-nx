@@ -19,6 +19,12 @@ inline constexpr size_t kGuestPageSize = 0x1000;
 // 16 TiB: clear of the Windows ASan shadow (32 TiB) and of the usual image/heap
 // placement.
 inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'1000'0000'0000ull;
+#elif defined(__SWITCH__)
+// Horizon randomizes where its heap, alias and stack regions land in the 39-bit address space, so
+// no address is guaranteed free. The Switch build starts on the checked path (RequiresCheckedAccess,
+// switch/runtime/guest_flat_memory_horizon.cpp) and only reserves this window when the flat path is
+// enabled; 64 GiB, as on other AArch64 targets, is checked against those regions at that point.
+inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0010'0000'0000ull;
 #elif defined(__aarch64__) && defined(__APPLE__)
 // Keep this well above the low address ranges that Darwin's ASLR may use for
 // a PIE executable and its shared cache. Apple Silicon's user VA is wider

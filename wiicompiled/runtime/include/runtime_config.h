@@ -184,6 +184,9 @@ inline bool IsSupportedGraphicsApi(std::string_view value) {
     static constexpr std::array<std::string_view, 2> values{"auto", "vulkan"};
 #elif defined(_WIN32)
     static constexpr std::array<std::string_view, 3> values{"auto", "d3d12", "vulkan"};
+#elif defined(__SWITCH__)
+    // deko3d is the only renderer and is chosen by the build, not by config.
+    static constexpr std::array<std::string_view, 1> values{"auto"};
 #endif
     return std::find(values.begin(), values.end(), value) != values.end();
 }
@@ -214,7 +217,7 @@ inline std::optional<std::filesystem::path> ExecutableDirectory() {
         }
         buffer.resize(buffer.size() * 2);
     }
-#elif defined(__APPLE__) || defined(__ANDROID__)
+#elif defined(__APPLE__) || defined(__ANDROID__) || defined(__SWITCH__)
     return RuntimePlatform::ExecutableDirectory();
 #else
     // /proc/self/exe is a Linux-specific magic symlink to the running executable; readlink()
