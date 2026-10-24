@@ -45,17 +45,19 @@ if [[ $audit == 0 ]]; then
     fi
 fi
 
-products=ON; target=WiiCompiled_nro; extra=()
+# Separate build folders: CMake caches SPM_SWITCH_AUDIT, so a full build in the audit's folder would
+# still skip Dawn and Aurora.
+products=ON; target=WiiCompiled_nro; build=build; extra=(-DSPM_SWITCH_AUDIT=OFF)
 if [[ $audit == 1 ]]; then
-    products=OFF; target=mkw_switch_audit; extra=(-DSPM_SWITCH_AUDIT=ON)
+    products=OFF; target=mkw_switch_audit; build=build-audit; extra=(-DSPM_SWITCH_AUDIT=ON)
 fi
 
 "$engine" run --rm -v "$work:/work" -w /work "$image" bash -c "
     set -e
-    cmake -S wiicompiled/runtime -B build -G Ninja \
+    cmake -S wiicompiled/runtime -B $build -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake -DCMAKE_BUILD_TYPE=Release \
-        -DMKW_BUILD_PRODUCTS=$products -DMKW_TRANSLATED_COMPILE_JOBS=$jobs ${extra[*]:-}
-    cmake --build build --target $target --parallel $jobs
+        -DMKW_BUILD_PRODUCTS=$products -DMKW_TRANSLATED_COMPILE_JOBS=$jobs ${extra[*]}
+    cmake --build $build --target $target --parallel $jobs
 "
 if [[ $audit == 1 ]]; then
     echo "DONE: runtime compiles for Horizon"
