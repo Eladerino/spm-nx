@@ -151,11 +151,13 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
         "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp")
     # The runtime's precompiled header is C++ (mkw_pch.h); these are the only C files in its targets.
+    # They also stay out of its unity build: CMake would merge them into a generated unity_*_c.c
+    # file that still gets the PCH, whatever these files' own SKIP_PRECOMPILE_HEADERS says.
     set_source_files_properties(
         "${SPM_SWITCH_DIR}/runtime/horizon_mman.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_net.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
-        PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
     set(${list_var} ${_sources} PARENT_SCOPE)
 endfunction()
 
