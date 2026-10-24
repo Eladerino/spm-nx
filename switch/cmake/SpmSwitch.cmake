@@ -107,6 +107,19 @@ macro(spm_switch_enter_project_scope)
         endforeach()
         target_link_libraries(aurora_core PUBLIC nx)
     endif()
+    # sqlite (Aurora's caches), as SwitchWaker builds it: no WAL or memory-mapped files (Horizon has
+    # no mmap, and these drop sqlite's <sys/mman.h> use), exclusive locking in one process, temp files
+    # in memory, and aurora/sqlite_horizon.c for the lock-free VFS and the POSIX calls newlib lacks.
+    if(TARGET sqlite3)
+        target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_WAL=1 SQLITE_MAX_MMAP_SIZE=0
+            SQLITE_OMIT_LOAD_EXTENSION=1 SQLITE_THREADSAFE=1 SQLITE_DEFAULT_LOCKING_MODE=1
+            SQLITE_TEMP_STORE=3)
+        target_sources(sqlite3 PRIVATE "${SPM_SWITCH_DIR}/aurora/sqlite_horizon.c")
+        get_target_property(_spm_sqlite_sources sqlite3 SOURCES)
+        list(GET _spm_sqlite_sources 0 _spm_sqlite_amalgamation)
+        get_filename_component(_spm_sqlite_dir "${_spm_sqlite_amalgamation}" DIRECTORY)
+        target_include_directories(sqlite3 PRIVATE "${_spm_sqlite_dir}")
+    endif()
 endmacro()
 
 # The runtime's source list on Horizon: the Horizon guest-memory layer replaces the desktop one, and
