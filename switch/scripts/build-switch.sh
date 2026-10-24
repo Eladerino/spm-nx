@@ -57,7 +57,7 @@ fi
     cmake -S wiicompiled/runtime -B $build -G Ninja \
         -DCMAKE_TOOLCHAIN_FILE=/opt/devkitpro/cmake/Switch.cmake -DCMAKE_BUILD_TYPE=Release \
         -DMKW_BUILD_PRODUCTS=$products -DMKW_TRANSLATED_COMPILE_JOBS=$jobs ${extra[*]}
-    cmake --build $build --target $target --parallel $jobs
+    cmake --build $build --target $target --parallel $jobs -- -k 0
 "
 if [[ $audit == 1 ]]; then
     echo "DONE: runtime compiles for Horizon"

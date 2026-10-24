@@ -9,6 +9,7 @@ is under the repository's GPLv3 license.
 | `sdl3_shim/sdl3_shim_wiicompiled.c` | this fork | GPLv3 |
 | `dawn/dawn.cmake` | SwitchWaker `switch/dawn/dawn.cmake` at `92307ff`, unchanged | MIT (`licenses/SwitchWaker-MIT.txt`) |
 | `dawn/patches/` | SwitchWaker `switch/dawn/patches/` at `92307ff`, unchanged; patches to Dawn, Tint and abseil | same as what they patch: BSD-3-Clause (Dawn, Tint), Apache-2.0 (abseil) |
+| `aurora/sqlite_horizon.c` | SwitchWaker `switch/aurora/sqlite_horizon.c` at `92307ff`, prefix renamed | MIT (`licenses/SwitchWaker-MIT.txt`) |
 | `cmake/clang-launcher.sh` | SwitchWaker `switch/native/clang-launcher.sh` at `92307ff`, adapted (compiler override variables, extra flag filtering) | MIT (`licenses/SwitchWaker-MIT.txt`) |
 | `scripts/Containerfile` | based on SwitchWaker `scripts/switch/Containerfile.native` (same image digest and packages, plus rsync) | MIT (`licenses/SwitchWaker-MIT.txt`) |
 
