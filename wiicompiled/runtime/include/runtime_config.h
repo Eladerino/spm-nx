@@ -1185,7 +1185,15 @@ inline std::string DvdRoot(std::string fallback = "") {
 inline std::filesystem::path ResolveRelativeTo(const std::filesystem::path& base,
                                                const std::string& value) {
     std::filesystem::path path = PathFromUtf8(value);
+#if defined(__SWITCH__)
+    // Horizon paths start with a device ("sdmc:/..."), which std::filesystem calls relative.
+    const std::string generic = path.generic_string();
+    const size_t colon = generic.find(':');
+    const bool hasDevice = colon != std::string::npos && colon > 0 && generic.find('/') == colon + 1;
+    if (path.is_relative() && !hasDevice) {
+#else
     if (path.is_relative()) {
+#endif
         path = base / path;
     }
     return path.lexically_normal();
