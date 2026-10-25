@@ -162,6 +162,7 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_net.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_pthread.c"
         "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp")
     # The runtime's precompiled header is C++ (mkw_pch.h); these are the only C files in its targets.
     # They also stay out of its unity build: CMake would merge them into a generated unity_*_c.c
@@ -171,6 +172,7 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_net.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_pthread.c"
         PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
     set(${list_var} ${_sources} PARENT_SCOPE)
 endfunction()
@@ -214,6 +216,9 @@ function(spm_switch_configure_products)
     endif()
     set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME "${SPM_SWITCH_NRO_NAME}" SUFFIX ".elf")
     target_link_libraries(WiiCompiled PRIVATE SDL3::SDL3-static deko3d nx)
+    # Every pthread and std::thread gets a 4 MiB stack and the application cores
+    # (runtime/horizon_pthread.c); libnx's default 128 KiB overflows in Tint.
+    target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=pthread_create")
     nx_generate_nacp("${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nacp"
         NAME "Super Paper Mario NX" AUTHOR "NewSuperPaperBros + spm-nx" VERSION "0.0.1")
     nx_create_nro(WiiCompiled
