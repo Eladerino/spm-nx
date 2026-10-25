@@ -92,6 +92,10 @@ extern std::atomic_bool g_auroraFrameActive;
 extern "C" int g_gxFrameCount;
 extern "C" const char* DVDResolveHostPathForTest(const char* dvdPath);
 bool OS_HLE_InterruptsEnabled() noexcept;
+#if defined(__SWITCH__)
+// switch/source/spm_switch_init.cpp: the host stack, as offsets into spm-nx.elf.
+extern "C" size_t spm_switch_host_backtrace(char* out, size_t size, unsigned skip);
+#endif
 
 namespace {
 
@@ -702,6 +706,10 @@ std::string FormatHostStackTrace(unsigned framesToSkip) {
         out << ")\n";
     }
     return out.str();
+#elif defined(__SWITCH__)
+    std::string trace(4096, '\0');
+    trace.resize(spm_switch_host_backtrace(trace.data(), trace.size(), framesToSkip + 1));
+    return trace;
 #else
     (void)framesToSkip;
     return {};
@@ -780,6 +788,10 @@ void DumpHostStackTrace() {
     std::fputs(trace.c_str(), stderr);
     std::fflush(stderr);
     s_inProgress.clear();
+#elif defined(__SWITCH__)
+    const std::string trace = FormatHostStackTrace(1);
+    std::fputs(trace.c_str(), stderr);
+    std::fflush(stderr);
 #else
     RT_LOGF(RT_TAG_RUNTIME, "Host stack trace unavailable on this platform\n");
     std::fflush(stderr);
