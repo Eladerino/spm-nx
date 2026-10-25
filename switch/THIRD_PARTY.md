@@ -13,6 +13,9 @@ is under the repository's GPLv3 license.
 | `runtime/horizon_pthread.c` | SwitchWaker `switch/native/source/thread_wrap.c` at `92307ff`, reduced to the stack size, core, priority and detached-thread reaper parts | MIT (`licenses/SwitchWaker-MIT.txt`) |
 | `cmake/clang-launcher.sh` | SwitchWaker `switch/native/clang-launcher.sh` at `92307ff`, adapted (compiler override variables, extra flag filtering) | MIT (`licenses/SwitchWaker-MIT.txt`) |
 | `scripts/Containerfile` | based on SwitchWaker `scripts/switch/Containerfile.native` (same image digest and packages, plus rsync) | MIT (`licenses/SwitchWaker-MIT.txt`) |
+| `deko3d/` | [deko3d](https://github.com/devkitPro/deko3d) 0.5.0 (`5cc144d`), copied from SwitchWakerHD `runtime/third_party/deko3d` at `bed2af7` with its patches, plus the local changes in `deko3d/PATCHES.md`; built from source instead of devkitPro's `libdeko3d.a` | zlib (`deko3d/LICENSE`) |
+| `uam/` | [uam](https://github.com/devkitPro/uam) 1.1.0, vendored from SwitchWakerHD with the local changes in `uam/PATCHES.md`; the `mesa-imported/` parts are Mesa's GLSL frontend and nouveau's nv50_ir | zlib (`uam/LICENSE`), MIT (the mesa-imported parts) |
+| `deko/` | this fork's WebGPU-to-deko3d interposer, adapted from SwitchWaker/SwitchWakerHD's deko3d backend | MPL-2.0 |
 
 Fetched at build time, not stored here:
 
@@ -21,4 +24,4 @@ Fetched at build time, not stored here:
 | [Dawn](https://github.com/encounter/dawn) (with Tint and abseil) | `266c1cf`, SwitchWaker's pin (`dawn/dawn.cmake`) | BSD-3-Clause, Apache-2.0 (abseil) |
 | [SDL 3](https://github.com/libsdl-org/SDL) headers | 3.4.4, Aurora's pin in WiiCompiled | Zlib |
 | [Dear ImGui](https://github.com/ocornut/imgui) headers (audit build only) | v1.91.9b-docking | MIT |
-| devkitPro devkitA64, libnx, deko3d | the image digest in `scripts/Containerfile` | GPL (toolchain), ISC (libnx), zlib (deko3d) |
+| devkitPro devkitA64, libnx | the image digest in `scripts/Containerfile` | GPL (toolchain), ISC (libnx) |

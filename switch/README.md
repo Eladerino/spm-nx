@@ -17,7 +17,7 @@ image, and only its generated C++ is compiled here.
 | SDL 3 on libnx (SwitchWaker's shim + WiiCompiled's extra calls) | compiles, links clean against 3.4.4 headers |
 | Crash handler and logging (`source/spm_switch_init.cpp`) | written |
 | Dawn (Null device + Tint GLSL), Aurora, the translated game | build and link into `spm-nx.nro` |
-| deko3d renderer | not started: see "Graphics" |
+| deko3d renderer | written and wired into the build: see "Graphics"; first run on hardware still to come |
 | First boot on hardware | `spm-spike.nro` passed; `spm-nx.nro` next |
 
 ## Layout
@@ -32,6 +32,8 @@ runtime/                     guest memory for Horizon, mmap/mprotect over svcSet
 source/spm_switch_init.cpp   libnx startup: SD folders, stderr log, sockets, crash dump
 sdl3_shim/                   SDL 3 implemented on libnx (sdl3_shim/PATCHES.md)
 dawn/                        SwitchWaker's Dawn recipe and Horizon patches
+deko/                        the WebGPU-to-deko3d interposer that draws Aurora's frames (see "Graphics")
+deko3d/, uam/                vendored: the GPU API itself, and the GLSL-to-DKSH shader compiler
 scripts/                     build container and build-switch.sh
 tests/                       host-side tests for the Horizon pieces
 docs/GUEST-MEMORY-PLAN.md    how guest RAM works on Horizon, phase 1 and phase 2
@@ -73,15 +75,23 @@ keeps guest RAM in plain heap blocks and turns on the runtime's checked access p
 those checks in software. It's slower but has no kernel dependencies. Phase 2 brings the flat
 window back with `svcMapProcessMemory`. Details: `docs/GUEST-MEMORY-PLAN.md`.
 
-**Graphics.** The plan is SwitchWaker's: Aurora records each frame against Dawn's Null device, Tint
-turns Aurora's WGSL shaders into GLSL, uam compiles that to deko3d shaders, and a deko3d backend
-draws. The catch found while scaffolding: WiiCompiled carries its own Aurora (encounter/aurora from
-mid-May 2026 plus about 13.6k lines of WiiCompiled changes) with its own frame recording
-(`SealedFrame`, `RenderPass`/`Command` in `lib/gfx/common.cpp`). SwitchWaker's backend hooks
-upstream Aurora's newer `FramePacket` layer, which WiiCompiled's copy doesn't have. So the plan is to
-reuse SwitchWaker's Aurora-independent half (device, memory, swapchain, shader translation, shader
-cache, present) and write a new encoder against WiiCompiled's `SealedFrame`, rather than rebasing
-13.6k lines onto upstream.
+**Graphics.** Aurora records each frame against Dawn's Null device, exactly as on the other
+surfaceless builds; what differs on the Switch is that the frames are drawn. `deko/` is a link-time
+interposer: the linker's `--wrap=wgpuXxx` (the list lives in `cmake/SpmSwitch.cmake`, generated
+from the `__wrap_` definitions) routes Aurora's WebGPU calls to `deko/wgpu_objects.cpp` and
+`deko/wgpu_encode.cpp`. Each wrapper lets Dawn's Null device see the call where it needs to, and
+keeps a deko3d "shadow" of the object in step; command encoders are recorded as op lists and
+replayed onto the real GPU at `QueueSubmit`. Tint turns Aurora's WGSL shaders into GLSL, uam
+compiles the GLSL to DKSH, and deko3d draws; compiled shaders are cached on the SD card
+(`UserData/dksh_cache.bin`), and shaders that fail are dumped to `UserData/Logs/shaderfail_*` for
+diagnosis. At present time Aurora hands its finished frame to `aurora_switch_dk_present`, which
+blits it to the deko3d swapchain (1280x720, also when docked, for now); MSAA is ignored and resolves
+become copies, which Aurora's msaa=1 does not notice.
+
+An earlier plan wrote a new encoder against WiiCompiled's own frame recording (`SealedFrame`), the
+way SwitchWaker's backend hooks upstream Aurora's `FramePacket` layer, which WiiCompiled's Aurora
+doesn't have. The interposer replaced it: it sits below Aurora entirely, so upstream Aurora changes
+cannot break it, and nothing of Aurora's 13.6k lines of local changes had to move.
 
 ## Upstream hooks
 
@@ -97,7 +107,9 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
 - `runtime/src/game_folder.cpp`: the game is the `game` folder beside the NRO (no folder picker).
 - `runtime/src/main.cpp`: graphics backend list; no POSIX fault handler.
 - `aurora-main/lib/webgpu/gpu.{hpp,cpp}`, `aurora-main/lib/aurora.cpp`: surfaceless on the Null device (`kSurfaceless`):
-  no WebGPU surface or SDL renderer, frames encoded and dropped at present until deko3d draws them.
+  no WebGPU surface or SDL renderer. On `__SWITCH__`, `gpu.cpp` starts the deko3d renderer right
+  after the device queue exists (and stops it first in `shutdown()`), and `aurora.cpp` hands each
+  presented frame to it instead of dropping the image.
 - `aurora-main/lib/sqlite_utils.hpp` (`CachePragmas`): the GPU caches use a PERSIST journal with no
   syncs, as SwitchWaker does, since WAL is compiled out.
 - `runtime/src/host_context.cpp`: the AArch64 context switch Android uses.
