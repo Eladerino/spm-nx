@@ -16,9 +16,9 @@ image, and only its generated C++ is compiled here.
 | Guest memory, phase 1 (heap stores, checked access) | written, tested off-device |
 | SDL 3 on libnx (SwitchWaker's shim + WiiCompiled's extra calls) | compiles, links clean against 3.4.4 headers |
 | Crash handler and logging (`source/spm_switch_init.cpp`) | written |
-| Dawn (Null device + Tint GLSL), Aurora | wired in, not yet built (needs a network that can reach googlesource) |
+| Dawn (Null device + Tint GLSL), Aurora, the translated game | build and link into `spm-nx.nro` |
 | deko3d renderer | not started: see "Graphics" |
-| First boot on hardware | waiting on the `spm-spike.nro` log |
+| First boot on hardware | `spm-spike.nro` passed; `spm-nx.nro` next |
 
 ## Layout
 
@@ -47,8 +47,10 @@ bash switch/scripts/build-switch.sh --audit    # runtime only, quick, no game ne
 bash switch/scripts/build-switch.sh            # the NRO: ~/spm-switch/build/spm-nx.nro
 ```
 
-Copy `spm-nx.nro` to `sdmc:/switch/spm-nx/` and launch it with title takeover (hold R while
-starting a game), not from the album: the applet doesn't get enough memory. Logs land in
+Copy `spm-nx.nro` and its companion files from the build folder (`dsp_coef.bin`,
+`initial_pipeline_cache.db`, `cacert.pem`, `wii_bootstrap/`) to `sdmc:/switch/spm-nx/`, and your
+extracted disc (`Disc\DATA`, the folder with `files` and `sys`) to `sdmc:/switch/spm-nx/game/`.
+Launch it with title takeover (hold R while starting a game), not from the album: the applet doesn't get enough memory. Logs land in
 `sdmc:/switch/spm-nx/UserData/Logs/`.
 
 ## How the port works
@@ -90,7 +92,8 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
 - `runtime/cmake/PublicProducts.cmake`: `-mcpu=cortex-a57` as the baseline arch flag.
 - `runtime/include/guest_flat_memory.h`: the flat base for Horizon.
 - `runtime/include/memory_access.h`: `FlatWriteRam*` honor checked access (phase 1 needs it).
-- `runtime/include/runtime_config.h`: graphics API `auto`; executable directory as on Apple/Android.
+- `runtime/include/runtime_config.h`: graphics API `auto`; executable and data directories as on Apple/Android.
+- `runtime/src/game_folder.cpp`: the game is the `game` folder beside the NRO (no folder picker).
 - `runtime/src/main.cpp`: graphics backend list; no POSIX fault handler.
 - `runtime/src/host_context.cpp`: the AArch64 context switch Android uses.
 - `runtime/src/platform/host_platform.cpp`: runtime and data folders from the environment, as on Android.
