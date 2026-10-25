@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <unwind.h>
 
 #include "guest_flat_memory.h"
 
@@ -228,6 +229,86 @@ void __libnx_exception_handler(ThreadExceptionDump* ctx) {
         close(g_crashFd);
     }
     std::_Exit(EXIT_FAILURE);
+}
+
+// The host stack for the runtime's fatal paths (runtime/src/main.cpp FormatHostStackTrace), which
+// has no walker on this platform: a std::terminate() reported only the guest's state (boot 7). The
+// unwind tables first (C++ code has them), the frame records if they give out early. Offsets are
+// for aarch64-none-elf-addr2line -f -C -i -e spm-nx.elf.
+namespace {
+struct UnwindFrames {
+    uintptr_t pcs[48];
+    unsigned count = 0;
+    unsigned skip = 0;
+};
+
+_Unwind_Reason_Code CollectFrame(_Unwind_Context* context, void* argument) {
+    auto* frames = static_cast<UnwindFrames*>(argument);
+    const uintptr_t pc = _Unwind_GetIP(context);
+    if (pc == 0) {
+        return _URC_END_OF_STACK;
+    }
+    if (frames->skip > 0) {
+        --frames->skip;
+        return _URC_NO_REASON;
+    }
+    frames->pcs[frames->count++] = pc;
+    return frames->count < 48 ? _URC_NO_REASON : _URC_END_OF_STACK;
+}
+} // namespace
+
+size_t spm_switch_host_backtrace(char* out, size_t size, unsigned skip) {
+    if (out == nullptr || size == 0) {
+        return 0;
+    }
+    UnwindFrames frames;
+    frames.skip = skip + 1;  // this function
+    _Unwind_Backtrace(CollectFrame, &frames);
+    const char* method = "unwind tables";
+    if (frames.count < 3) {
+        frames.count = 0;
+        method = "frame records";
+        uintptr_t fp = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+        while (fp != 0 && frames.count < 48) {
+            uintptr_t next = 0;
+            uintptr_t ret = 0;
+            if (!ReadWord(fp, &next) || !ReadWord(fp + 8, &ret) || ret == 0) {
+                break;
+            }
+            frames.pcs[frames.count++] = ret;
+            if (next <= fp) {
+                break;
+            }
+            fp = next;
+        }
+    }
+
+    u64 threadId = 0;
+    svcGetThreadId(&threadId, CUR_THREAD_HANDLE);
+    const uintptr_t base = ImageBase();
+    size_t used = 0;
+    auto append = [&](const char* format, auto... args) {
+        if (used + 1 >= size) {
+            return;
+        }
+        const int n = std::snprintf(out + used, size - used, format, args...);
+        if (n > 0) {
+            used += static_cast<size_t>(n) < size - used ? static_cast<size_t>(n) : size - used - 1;
+        }
+    };
+    append("[switch] host stack on thread %" PRIu64 "%s (%s; image base 0x%" PRIxPTR
+           ", aarch64-none-elf-addr2line -f -C -i -e spm-nx.elf <offset>):\n",
+           threadId, threadId == g_mainThreadId ? " (main)" : "", method, base);
+    for (unsigned i = 0; i < frames.count; ++i) {
+        // Return addresses: the call is the instruction before each.
+        const uintptr_t pc = frames.pcs[i] - 4;
+        if (base != 0 && pc >= base && pc - base < (1ull << 30)) {
+            append("[switch]   #%u spm-nx.elf+0x%" PRIxPTR "\n", i, pc - base);
+        } else {
+            append("[switch]   #%u 0x%016" PRIxPTR "\n", i, pc);
+        }
+    }
+    return used;
 }
 
 } // extern "C"
