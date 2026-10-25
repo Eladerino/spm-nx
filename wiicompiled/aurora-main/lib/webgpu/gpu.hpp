@@ -49,6 +49,15 @@ struct Viewport {
 extern wgpu::Device g_device;
 extern wgpu::Queue g_queue;
 extern wgpu::Surface g_surface;
+#if defined(__SWITCH__)
+// The Switch NRO: Dawn's Null device and no WebGPU surface. Frames are recorded and encoded but
+// nothing is drawn or presented through WebGPU (switch/README.md, "Graphics").
+inline constexpr bool kSurfaceless = true;
+#else
+inline constexpr bool kSurfaceless = false;
+#endif
+// A surface frames can go to: always, when surfaceless.
+inline bool surface_ready() noexcept { return kSurfaceless || static_cast<bool>(g_surface); }
 extern wgpu::BackendType g_backendType;
 extern GraphicsConfig g_graphicsConfig;
 extern TextureWithSampler g_frameBuffer;

@@ -96,6 +96,8 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
   `sdmc:/` paths count as absolute.
 - `runtime/src/game_folder.cpp`: the game is the `game` folder beside the NRO (no folder picker).
 - `runtime/src/main.cpp`: graphics backend list; no POSIX fault handler.
+- `aurora-main/lib/webgpu/gpu.{hpp,cpp}`, `aurora-main/lib/aurora.cpp`: surfaceless on the Null device (`kSurfaceless`):
+  no WebGPU surface or SDL renderer, frames encoded and dropped at present until deko3d draws them.
 - `runtime/src/host_context.cpp`: the AArch64 context switch Android uses.
 - `runtime/src/platform/host_platform.cpp`: runtime and data folders from the environment, as on Android.
 
