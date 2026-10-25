@@ -355,7 +355,7 @@ inline std::filesystem::path ApplicationDataDirectory() {
         CoTaskMemFree(rawPath);
         return directory;
     }
-#elif defined(__APPLE__) || defined(__ANDROID__)
+#elif defined(__APPLE__) || defined(__ANDROID__) || defined(__SWITCH__)
     return RuntimePlatform::ApplicationDataDirectory(kApplicationDirectoryName);
 #else
     // XDG Base Directory spec equivalent of FOLDERID_LocalAppData: $XDG_DATA_HOME if set and
