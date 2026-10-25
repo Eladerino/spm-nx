@@ -6,6 +6,19 @@
 
 namespace aurora::sqlite {
 
+#if defined(__SWITCH__)
+// Horizon (SD card through newlib, WAL compiled out): a rollback journal kept next to the database
+// and no syncs, as SwitchWaker runs its caches (switch/native/aurora/patches/0006 at 92307ff). WAL
+// fell back to DELETE, where every commit failed with "disk I/O error" on the console. PERSIST
+// creates the -journal file once and zeroes its header at each commit; with the build's exclusive
+// locking it stays open. A commit cut short by HOME is rolled back from it at the next open.
+inline constexpr const char* CachePragmas =
+    "PRAGMA journal_mode=PERSIST; PRAGMA journal_size_limit=4194304; PRAGMA synchronous=OFF;";
+#else
+// WAL mode + NORMAL = no need for disk syncs, consistent but not durable is fine.
+inline constexpr const char* CachePragmas = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
+#endif
+
 inline int exec(sqlite3* db, const char* sql) { return sqlite3_exec(db, sql, nullptr, nullptr, nullptr); }
 
 template <typename T>
@@ -59,7 +72,7 @@ public:
 
     const auto ret = sqlite3_exec(m_db, "COMMIT", nullptr, nullptr, nullptr);
     if (ret != SQLITE_OK) {
-      m_log.error("Failed to commit transaction: {}", sqlite3_errmsg(m_db));
+      m_log.error("Failed to commit transaction: {} ({})", sqlite3_errmsg(m_db), sqlite3_extended_errcode(m_db));
       return;
     }
 

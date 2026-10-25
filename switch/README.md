@@ -98,6 +98,8 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
 - `runtime/src/main.cpp`: graphics backend list; no POSIX fault handler.
 - `aurora-main/lib/webgpu/gpu.{hpp,cpp}`, `aurora-main/lib/aurora.cpp`: surfaceless on the Null device (`kSurfaceless`):
   no WebGPU surface or SDL renderer, frames encoded and dropped at present until deko3d draws them.
+- `aurora-main/lib/sqlite_utils.hpp` (`CachePragmas`): the GPU caches use a PERSIST journal with no
+  syncs, as SwitchWaker does, since WAL is compiled out.
 - `runtime/src/host_context.cpp`: the AArch64 context switch Android uses.
 - `runtime/src/platform/host_platform.cpp`: runtime and data folders from the environment, as on Android.
 
