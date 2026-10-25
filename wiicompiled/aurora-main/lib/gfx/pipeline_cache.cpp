@@ -726,7 +726,7 @@ static bool prepare_pipeline_cache_db() {
     return false;
   }
 
-  ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+  ret = sqlite::exec(g_pipelineCacheDb, sqlite::CachePragmas);
   if (ret != SQLITE_OK) {
     Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
     pipeline_cache_abort();
