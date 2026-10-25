@@ -11,6 +11,11 @@
 #include "webgpu/gpu.hpp"
 #include "webgpu/metalfx.hpp"
 #include <webgpu/webgpu_cpp.h>
+
+#if defined(__SWITCH__)
+// The deko3d renderer (switch/deko) that presents the surfaceless frames.
+#include "deko/dk_aurora.h"
+#endif
 #endif
 
 #include "input.hpp"
@@ -928,6 +933,11 @@ bool present_presentation_job(const PresentationJob& job) {
     if (job.presentAt != PresentClock::time_point{}) {
       wait_until_precise(job.presentAt);
     }
+#if defined(__SWITCH__)
+    // On the Switch the frame is not dropped: the deko3d renderer blits it to
+    // its own swapchain (switch/deko).
+    aurora_switch_dk_present(job.image->texture.texture.Get());
+#endif
     record_successful_present(job.interpolated, job.logicalFrame, {}, {}, {}, {}, {},
                               std::chrono::duration_cast<std::chrono::nanoseconds>(PresentClock::now() -
                                                                                    submissionStarted),

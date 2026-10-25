@@ -36,6 +36,11 @@
 #include <windows.h>
 #endif
 
+#if defined(__SWITCH__)
+// The deko3d renderer (switch/deko) that draws what this Null device records.
+#include "deko/dk_aurora.h"
+#endif
+
 namespace aurora::gx {
 void clear_display_copy_cache() noexcept;
 } // namespace aurora::gx
@@ -940,6 +945,11 @@ bool initialize(AuroraBackend auroraBackend) {
     });
   }
   g_queue = g_device.GetQueue();
+#if defined(__SWITCH__)
+  // Before anything below creates a texture or buffer: the interposer's shadows
+  // have to exist from the first wgpu call on.
+  aurora_switch_dk_init();
+#endif
 
   auto surfaceFormat = wgpu::TextureFormat::RGBA8Unorm;
   auto presentMode = wgpu::PresentMode::Fifo;
@@ -1038,6 +1048,9 @@ void serialize_pipeline_caches() noexcept {
 }
 
 void shutdown() {
+#if defined(__SWITCH__)
+  aurora_switch_dk_shutdown();
+#endif
   serialize_pipeline_caches();
   g_initialized.store(false, std::memory_order_release);
   g_CopyBindGroupLayout = {};
