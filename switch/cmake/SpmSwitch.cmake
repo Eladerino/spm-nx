@@ -220,6 +220,9 @@ function(spm_switch_configure_products)
     # works (runtime/horizon_pthread.c): libnx's default 128 KiB overflows in Tint, and libnx has no
     # pthread_detach, so std::thread::detach() threw and ended the game.
     target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=pthread_create" "LINKER:--wrap=pthread_detach")
+    # rename() over an existing file, which Horizon refuses and the NAND saves rely on
+    # (runtime/horizon_unistd.c).
+    target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=rename")
     nx_generate_nacp("${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nacp"
         NAME "Super Paper Mario NX" AUTHOR "NewSuperPaperBros + spm-nx" VERSION "0.0.1")
     nx_create_nro(WiiCompiled

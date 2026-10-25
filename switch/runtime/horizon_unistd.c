@@ -31,3 +31,29 @@ int chmod(const char* path, mode_t mode)
     struct stat st;
     return stat(path, &st);
 }
+
+// POSIX rename replaces an existing destination; Horizon's file system refuses it (the path already
+// exists), so libnx's rename fails. The runtime saves through a temporary file renamed over the old
+// one (hle/storage/nand_async.cpp AtomicReplaceHostFile), and NANDCreate makes the save file before
+// the first write, so every save failed with "rename(... .nandsafe.tmp -> ...) failed" (boot 9). The
+// NRO links with -Wl,--wrap=rename (cmake/SpmSwitch.cmake): when the plain rename fails and both
+// paths are regular files, the old destination is removed and the rename tried again. That is not
+// atomic: a kill between the two steps leaves only the temporary file, which holds the new data.
+int __real_rename(const char* from, const char* to);
+
+int __wrap_rename(const char* from, const char* to)
+{
+    if (__real_rename(from, to) == 0)
+        return 0;
+    const int err = errno;
+    struct stat source;
+    struct stat target;
+    if (stat(from, &source) != 0 || !S_ISREG(source.st_mode) || stat(to, &target) != 0 ||
+        !S_ISREG(target.st_mode)) {
+        errno = err;
+        return -1;
+    }
+    if (unlink(to) != 0)
+        return -1;
+    return __real_rename(from, to);
+}
