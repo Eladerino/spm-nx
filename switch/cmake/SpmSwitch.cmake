@@ -133,6 +133,18 @@ macro(spm_switch_enter_project_scope)
         get_filename_component(_spm_sqlite_dir "${_spm_sqlite_amalgamation}" DIRECTORY)
         target_include_directories(sqlite3 PRIVATE "${_spm_sqlite_dir}")
     endif()
+    # ImGui without its SDL backends: the shim has no windows, cursors or SDL_Renderer, so
+    # aurora/imgui_sdl_backends_horizon.cpp stands in for imgui_impl_sdl3 and imgui_impl_sdlrenderer3
+    # (as SwitchWaker). ImGui's default "open in shell" needs fork/exec/waitpid, which Horizon lacks.
+    if(TARGET imgui_backends)
+        get_target_property(_spm_imgui_backends imgui_backends SOURCES)
+        list(FILTER _spm_imgui_backends EXCLUDE REGEX "imgui_impl_sdl(renderer)?3\\.cpp$")
+        list(APPEND _spm_imgui_backends "${SPM_SWITCH_DIR}/aurora/imgui_sdl_backends_horizon.cpp")
+        set_property(TARGET imgui_backends PROPERTY SOURCES ${_spm_imgui_backends})
+    endif()
+    if(TARGET imgui)
+        target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+    endif()
 endmacro()
 
 # The runtime's source list on Horizon: the Horizon guest-memory layer replaces the desktop one, and
@@ -149,6 +161,7 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_mman.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_net.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
         "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp")
     # The runtime's precompiled header is C++ (mkw_pch.h); these are the only C files in its targets.
     # They also stay out of its unity build: CMake would merge them into a generated unity_*_c.c
@@ -157,6 +170,7 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_mman.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_net.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
         PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
     set(${list_var} ${_sources} PARENT_SCOPE)
 endfunction()
