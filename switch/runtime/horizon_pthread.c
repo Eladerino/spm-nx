@@ -11,10 +11,18 @@
 //   only when it waits (Horizon does not time-slice). Each new thread prefers core 1 or 2 in turn,
 //   may run on any of the process's cores among 0-2, and gets the main thread's priority.
 //
-// SwitchWaker's version also reaps detached threads (libnx has no pthread_detach) and keeps a thread
-// registry for its performance lines; neither is needed to boot yet.
+// - detached threads: libnx has no __syscall_thread_detach, so newlib's pthread_detach fails with
+//   ENOSYS, std::thread::detach() throws, and the temporary std::thread's destructor, still joinable,
+//   calls std::terminate(). Boot 8: the runtime's stall watchdog (hle/vi.cpp StartStallWatchdogOnce,
+//   std::thread(...).detach()) ended the game at its first frame that way. pthread_detach hands
+//   the thread to a reaper thread, which joins it once its handle signals that it ended (its stack
+//   and kernel thread are freed then).
+//
+// SwitchWaker's version also keeps a thread registry for its performance lines; not needed yet.
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <switch.h>
 
@@ -23,6 +31,7 @@
 
 int __real_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*start)(void*), void* arg);
 int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (*start)(void*), void* arg);
+int __wrap_pthread_detach(pthread_t thread);
 
 static atomic_int g_next_core = 1;
 
@@ -90,4 +99,92 @@ int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (
     if (attr == NULL)
         pthread_attr_destroy(&sized);
     return result;
+}
+
+// ---- reaper of detached threads -------------------------------------------------------------------
+// newlib's pthread_t is libnx's struct __pthread_t*, whose first member is the libnx Thread.
+#define MAX_REAP 64 // svcWaitSynchronization's limit
+
+static Mutex g_reap_lock;
+static pthread_t g_reap[MAX_REAP];
+static int g_reap_count;
+static atomic_int g_reaper_started;
+
+static Handle thread_handle(pthread_t t)
+{
+    return ((const Thread*)t)->handle;
+}
+
+static void reap_remove(pthread_t t)
+{
+    mutexLock(&g_reap_lock);
+    for (int i = 0; i < g_reap_count; i++) {
+        if (g_reap[i] == t) {
+            g_reap[i] = g_reap[--g_reap_count];
+            break;
+        }
+    }
+    mutexUnlock(&g_reap_lock);
+}
+
+static void* reaper(void* unused)
+{
+    (void)unused;
+    for (;;) {
+        Handle handles[MAX_REAP];
+        pthread_t threads[MAX_REAP];
+        mutexLock(&g_reap_lock);
+        const int n = g_reap_count;
+        for (int i = 0; i < n; i++) {
+            threads[i] = g_reap[i];
+            handles[i] = thread_handle(g_reap[i]);
+        }
+        mutexUnlock(&g_reap_lock);
+        if (n == 0) {
+            svcSleepThread(100000000ull);
+            continue;
+        }
+        s32 index = -1;
+        // 100 ms: threads detached meanwhile are picked up at the next round
+        const Result rc = svcWaitSynchronization(&index, handles, n, 100000000ull);
+        if (R_VALUE(rc) == KERNELRESULT(InvalidHandle)) {
+            // not a thread any more (should not happen): drop the ones that are not, keep the others
+            for (int i = 0; i < n; i++) {
+                s32 one = -1;
+                if (R_VALUE(svcWaitSynchronization(&one, &handles[i], 1, 0)) == KERNELRESULT(InvalidHandle))
+                    reap_remove(threads[i]);
+            }
+            continue;
+        }
+        if (R_FAILED(rc) || index < 0 || index >= n)
+            continue;
+        reap_remove(threads[index]);
+        pthread_join(threads[index], NULL); // it has ended: frees its stack and closes its handle
+    }
+    return NULL;
+}
+
+int __wrap_pthread_detach(pthread_t thread)
+{
+    if (atomic_exchange(&g_reaper_started, 1) == 0) {
+        pthread_t r;
+        if (__wrap_pthread_create(&r, NULL, reaper, NULL) != 0)
+            fprintf(stderr, "[switch] the reaper of detached threads could not start\n");
+    }
+    mutexLock(&g_reap_lock);
+    bool listed = false;
+    for (int i = 0; i < g_reap_count; i++)
+        listed = listed || g_reap[i] == thread;
+    const bool full = !listed && g_reap_count >= MAX_REAP;
+    if (!listed && !full)
+        g_reap[g_reap_count++] = thread;
+    mutexUnlock(&g_reap_lock);
+    if (full) {
+        static int warned;
+        if (!warned++)
+            fprintf(stderr, "[switch] %d detached threads already wait to be joined: more are left unjoined\n",
+                    MAX_REAP);
+    }
+    // Detached either way: the caller (std::thread::detach) must not see an error.
+    return 0;
 }

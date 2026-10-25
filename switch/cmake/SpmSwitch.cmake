@@ -216,9 +216,10 @@ function(spm_switch_configure_products)
     endif()
     set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME "${SPM_SWITCH_NRO_NAME}" SUFFIX ".elf")
     target_link_libraries(WiiCompiled PRIVATE SDL3::SDL3-static deko3d nx)
-    # Every pthread and std::thread gets a 4 MiB stack and the application cores
-    # (runtime/horizon_pthread.c); libnx's default 128 KiB overflows in Tint.
-    target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=pthread_create")
+    # Every pthread and std::thread gets a 4 MiB stack and the application cores, and detaching one
+    # works (runtime/horizon_pthread.c): libnx's default 128 KiB overflows in Tint, and libnx has no
+    # pthread_detach, so std::thread::detach() threw and ended the game.
+    target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=pthread_create" "LINKER:--wrap=pthread_detach")
     nx_generate_nacp("${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nacp"
         NAME "Super Paper Mario NX" AUTHOR "NewSuperPaperBros + spm-nx" VERSION "0.0.1")
     nx_create_nro(WiiCompiled
