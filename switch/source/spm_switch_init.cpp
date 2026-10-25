@@ -20,10 +20,14 @@
 #include "guest_flat_memory.h"
 
 namespace {
-constexpr const char* kRoot = "sdmc:/switch/spm-nx";
-constexpr const char* kUserData = "sdmc:/switch/spm-nx/UserData";
-constexpr const char* kLogs = "sdmc:/switch/spm-nx/UserData/Logs";
-constexpr const char* kStderrLog = "sdmc:/switch/spm-nx/UserData/Logs/stderr.log";
+// Without the "sdmc:" prefix: fsdevMountSdmc makes the SD card the default device, so "/switch/..."
+// is the same place, and it is an absolute path to std::filesystem and sqlite. With the prefix both
+// treat the path as relative: std::filesystem::create_directories tries to make "sdmc:" and fails
+// (the NAND folders), and sqlite's unix VFS looks for "/sdmc:" (Aurora's caches).
+constexpr const char* kRoot = "/switch/spm-nx";
+constexpr const char* kUserData = "/switch/spm-nx/UserData";
+constexpr const char* kLogs = "/switch/spm-nx/UserData/Logs";
+constexpr const char* kStderrLog = "/switch/spm-nx/UserData/Logs/stderr.log";
 
 bool g_sockets = false;
 
