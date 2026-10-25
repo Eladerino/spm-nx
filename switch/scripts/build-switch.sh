@@ -2,19 +2,24 @@
 # Switch build of New Super Paper Bros. Run on Linux or in WSL with docker or podman, after
 # tools\build-spm.ps1 has translated the game on Windows: like tools/build-linux.sh, this reuses that
 # output (wiicompiled\generated) and only compiles it, here for Horizon inside switch/scripts/Containerfile.
-#   bash switch/scripts/build-switch.sh [--jobs N] [--audit]
+#   bash switch/scripts/build-switch.sh [--jobs N] [--audit] [--out DIR|none]
 # --audit compiles only the runtime's sources for the Switch (no game, no Dawn, no network beyond the
 # SDL/ImGui header downloads): the quick check after an upstream merge.
 # Sources are copied to ~/spm-switch first. Output: ~/spm-switch/build/spm-nx.nro
+# After a good build the NRO and its companion files are also copied, laid out like the SD card, to
+# <DIR>/switch/spm-nx/; DIR defaults to Downloads\spm-nx-sd in your Windows profile under WSL. Drag
+# that switch folder onto the card. --out none skips the copy.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 jobs=6   # translated shards need ~1 GB each
 audit=0
+out=auto
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --jobs) jobs=$2; shift ;;
         --audit) audit=1 ;;
+        --out) out=$2; shift ;;
         *) echo "unknown argument $1" >&2; exit 1 ;;
     esac
     shift
@@ -62,5 +67,23 @@ fi
 if [[ $audit == 1 ]]; then
     echo "DONE: runtime compiles for Horizon"
 else
-    echo "DONE: $work/build/spm-nx.nro (copy to sdmc:/switch/spm-nx/, launch with title takeover)"
+    echo "DONE: $work/build/spm-nx.nro"
+    if [[ $out == auto ]]; then
+        out=
+        if command -v wslpath >/dev/null && command -v cmd.exe >/dev/null; then
+            profile=$(cd /mnt/c 2>/dev/null && cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')
+            [[ -n $profile ]] && out=$(wslpath -u "$profile")/Downloads/spm-nx-sd
+        fi
+    fi
+    if [[ -n $out && $out != none ]]; then
+        dest=$out/switch/spm-nx
+        mkdir -p "$dest"
+        cp "$work/build/spm-nx.nro" "$work/build/dsp_coef.bin" "$work/build/initial_pipeline_cache.db" \
+            "$work/build/cacert.pem" "$dest/"
+        cp -r "$work/build/wii_bootstrap" "$dest/"
+        echo "COPIED to $dest ($(date -r "$dest/spm-nx.nro" '+%Y-%m-%d %H:%M'))"
+        echo "drag its switch folder onto the SD card, then launch with title takeover"
+    elif [[ $out != none ]]; then
+        echo "copy $work/build/spm-nx.nro to sdmc:/switch/spm-nx/, then launch with title takeover"
+    fi
 fi
