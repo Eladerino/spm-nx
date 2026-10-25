@@ -147,8 +147,7 @@ static bool cache_init_core() {
     return false;
   }
 
-  // WAL mode + NORMAL = no need for disk syncs, consistent but not durable is fine.
-  ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+  ret = sqlite::exec(db, sqlite::CachePragmas);
   if (ret != SQLITE_OK) {
     Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
     return false;
@@ -177,7 +176,7 @@ static bool cache_init_core() {
       Log.error("Failed to recreate database: {}", sqlite3_errmsg(db));
       return false;
     }
-    ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+    ret = sqlite::exec(db, sqlite::CachePragmas);
     if (ret != SQLITE_OK) {
       Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
       return false;
