@@ -5,6 +5,12 @@
 
 #include <fstream>
 
+#if defined(__SWITCH__)
+#include <cerrno>
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -79,6 +85,46 @@ std::wstring Widen(const std::string& utf8) {
 }
 #endif
 
+#if defined(__SWITCH__)
+// What the game folder search saw, for the log: the paths it used and how std::filesystem and a
+// plain stat() each answered for the folders and files it looks for.
+void LogSwitchGameFolderChecks() {
+    const auto programDirectory = RuntimeConfigFile::ExecutableDirectory();
+    RT_LOGF(RT_TAG_RUNTIME, "game check: dvd_root='%s' resolved='%s' program='%s'\n",
+            RuntimeConfigFile::DvdRoot().c_str(),
+            RuntimeConfigFile::PathToUtf8(RuntimeConfigFile::ResolvedDvdRoot()).c_str(),
+            programDirectory ? RuntimeConfigFile::PathToUtf8(*programDirectory).c_str() : "(none)");
+    if (!programDirectory) {
+        return;
+    }
+    const fs::path game = *programDirectory / "game";
+    for (const fs::path& path : {game, game / "files", game / "sys", game / "sys" / "fst.bin",
+                                 game / "sys" / "boot.bin", game / "DATA"}) {
+        std::error_code ec;
+        const fs::file_status status = fs::status(path, ec);
+        struct stat st {};
+        errno = 0;
+        const int rc = ::stat(path.c_str(), &st);
+        const int statErrno = errno;
+        RT_LOGF(RT_TAG_RUNTIME, "game check: %s fs=%d (%s) stat=%d errno=%d mode=0%o\n", path.c_str(),
+                static_cast<int>(status.type()), ec ? ec.message().c_str() : "ok", rc, statErrno,
+                static_cast<unsigned>(st.st_mode));
+    }
+    if (DIR* dir = ::opendir(game.c_str())) {
+        int shown = 0;
+        while (const dirent* entry = ::readdir(dir)) {
+            if (++shown > 12) {
+                break;
+            }
+            RT_LOGF(RT_TAG_RUNTIME, "game check: entry '%s'\n", entry->d_name);
+        }
+        ::closedir(dir);
+    } else {
+        RT_LOGF(RT_TAG_RUNTIME, "game check: opendir %s failed, errno=%d\n", game.c_str(), errno);
+    }
+}
+#endif
+
 } // namespace
 
 fs::path Find(const fs::path& path) {
@@ -149,6 +195,7 @@ bool EnsureConfigured() {
         if (root.empty()) {
             RT_LOGF(RT_TAG_RUNTIME,
                     "no game: copy your extracted disc (its files and sys folders) to sdmc:/switch/spm-nx/game\n");
+            LogSwitchGameFolderChecks();
             return false;
         }
         if (const std::string problem = Problem(root); !problem.empty()) {
