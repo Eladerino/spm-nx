@@ -133,6 +133,32 @@ bool EnsureConfigured() {
         RT_LOGF(RT_TAG_RUNTIME, "game folder: %s\n", RuntimeConfigFile::PathToUtf8(beside).c_str());
         return true;
     }
+#elif defined(__SWITCH__)
+    // The Switch has no folder picker: the game is the "game" folder beside the NRO
+    // (sdmc:/switch/spm-nx/game, holding files/ and sys/, or a DATA folder with them), unless
+    // Config.toml names another.
+    if (RuntimeConfigFile::DvdRoot().empty()) {
+        if (const auto programDirectory = RuntimeConfigFile::ExecutableDirectory()) {
+            if (const fs::path beside = Find(*programDirectory / "game"); !beside.empty()) {
+                RuntimeConfigFile::UseDvdRootForThisRun(beside);
+            }
+        }
+    }
+    {
+        const fs::path root = Find(RuntimeConfigFile::ResolvedDvdRoot());
+        if (root.empty()) {
+            RT_LOGF(RT_TAG_RUNTIME,
+                    "no game: copy your extracted disc (its files and sys folders) to sdmc:/switch/spm-nx/game\n");
+            return false;
+        }
+        if (const std::string problem = Problem(root); !problem.empty()) {
+            RT_LOGF(RT_TAG_RUNTIME, "game folder %s: %s\n", RuntimeConfigFile::PathToUtf8(root).c_str(),
+                    problem.c_str());
+            return false;
+        }
+        RT_LOGF(RT_TAG_RUNTIME, "game folder: %s\n", RuntimeConfigFile::PathToUtf8(root).c_str());
+        return true;
+    }
 #endif
     const fs::path configured = Find(RuntimeConfigFile::ResolvedDvdRoot());
     if (!configured.empty() && Problem(configured).empty()) {
