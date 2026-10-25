@@ -54,6 +54,27 @@ if(NOT SPM_SWITCH_AUDIT)
     # ---- Dawn: Null backend + Tint's GLSL writer, patched for Horizon (switch/dawn) --------------
     include("${SPM_SWITCH_DIR}/dawn/dawn.cmake")
 
+    # ---- deko3d renderer (switch/deko): takes Aurora's wgpu calls over at link time ------------
+    # Vendored deko3d 0.5.0 and uam 1.1.0 build from their own CMakeLists, then the interposer as
+    # spm_deko. Still GCC scope like Dawn above: the clang launcher is only set further down.
+    # uam's CMakeLists keys its Switch path (no Threads package, no host tool) off NX_ROOT.
+    if(NOT DEFINED NX_ROOT)
+        set(NX_ROOT "${DEVKITPRO_ROOT}")
+    endif()
+    add_subdirectory("${SPM_SWITCH_DIR}/deko3d" "${CMAKE_BINARY_DIR}/spm_deko3d")
+    add_subdirectory("${SPM_SWITCH_DIR}/uam" "${CMAKE_BINARY_DIR}/spm_uam")
+    file(GLOB _spm_deko_sources CONFIGURE_DEPENDS "${SPM_SWITCH_DIR}/deko/*.cpp")
+    add_library(spm_deko STATIC ${_spm_deko_sources})
+    target_compile_features(spm_deko PUBLIC cxx_std_20)
+    # Dawn's own tree for the "src/tint/..." includes in the shader translation; the generated
+    # webgpu headers land in Dawn's binary dir (the tint targets also carry these transitively).
+    target_include_directories(spm_deko PRIVATE
+        "${dawn_SOURCE_DIR}" "${dawn_BINARY_DIR}/gen/include" "${dawn_BINARY_DIR}/gen")
+    target_link_libraries(spm_deko PUBLIC
+        deko3d_release uamlib
+        tint_api tint_lang_glsl_writer tint_lang_wgsl_reader tint_lang_wgsl_inspector
+        nx)
+
     # ---- SDL 3 as the libnx shim (switch/sdl3_shim) ----------------------------------------------
     file(GLOB _spm_shim_sources CONFIGURE_DEPENDS "${SPM_SWITCH_DIR}/sdl3_shim/*.c")
     add_library(SDL3-static STATIC ${_spm_shim_sources})
@@ -116,6 +137,8 @@ macro(spm_switch_enter_project_scope)
             if(TARGET ${_spm_t})
                 target_include_directories(${_spm_t} SYSTEM BEFORE PRIVATE "${SPM_SWITCH_DIR}/include")
                 target_include_directories(${_spm_t} PRIVATE "${SWITCH_PORTLIBS}/include")
+                # So lib/webgpu/gpu.cpp and lib/aurora.cpp find "deko/dk_aurora.h".
+                target_include_directories(${_spm_t} PRIVATE "${SPM_SWITCH_DIR}")
             endif()
         endforeach()
         target_link_libraries(aurora_core PUBLIC nx)
@@ -215,7 +238,81 @@ function(spm_switch_configure_products)
         return()
     endif()
     set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME "${SPM_SWITCH_NRO_NAME}" SUFFIX ".elf")
-    target_link_libraries(WiiCompiled PRIVATE SDL3::SDL3-static deko3d nx)
+    # The game links the vendored deko3d (through spm_deko) instead of devkitPro's libdeko3d.
+    target_link_libraries(WiiCompiled PRIVATE SDL3::SDL3-static spm_deko deko3d_release nx)
+    # The renderer takes over Aurora's WebGPU calls at link time: every __wrap_wgpu* defined in
+    # switch/deko/wgpu_objects.cpp and switch/deko/wgpu_encode.cpp needs its --wrap here, or that
+    # call silently goes to Dawn only. This list is generated, not typed:
+    #   grep -ho '__wrap_wgpu[A-Za-z]*' switch/deko/*.cpp | sort -u | sed 's/__wrap_//'
+    # (64 functions when this was wired, 2026-10-25; re-run it when switch/deko changes.)
+    set(_spm_dk_wraps
+        wgpuBindGroupAddRef
+        wgpuBindGroupLayoutAddRef
+        wgpuBindGroupLayoutRelease
+        wgpuBindGroupRelease
+        wgpuBufferAddRef
+        wgpuBufferGetConstMappedRange
+        wgpuBufferGetMappedRange
+        wgpuBufferMapAsync
+        wgpuBufferRelease
+        wgpuCommandBufferAddRef
+        wgpuCommandBufferRelease
+        wgpuCommandEncoderAddRef
+        wgpuCommandEncoderBeginComputePass
+        wgpuCommandEncoderBeginRenderPass
+        wgpuCommandEncoderCopyBufferToBuffer
+        wgpuCommandEncoderCopyBufferToTexture
+        wgpuCommandEncoderCopyTextureToBuffer
+        wgpuCommandEncoderCopyTextureToTexture
+        wgpuCommandEncoderFinish
+        wgpuCommandEncoderRelease
+        wgpuComputePassEncoderAddRef
+        wgpuComputePassEncoderDispatchWorkgroups
+        wgpuComputePassEncoderEnd
+        wgpuComputePassEncoderRelease
+        wgpuComputePassEncoderSetBindGroup
+        wgpuComputePassEncoderSetPipeline
+        wgpuComputePipelineAddRef
+        wgpuComputePipelineRelease
+        wgpuDeviceCreateBindGroup
+        wgpuDeviceCreateBindGroupLayout
+        wgpuDeviceCreateBuffer
+        wgpuDeviceCreateCommandEncoder
+        wgpuDeviceCreateComputePipeline
+        wgpuDeviceCreateRenderPipeline
+        wgpuDeviceCreateSampler
+        wgpuDeviceCreateShaderModule
+        wgpuDeviceCreateTexture
+        wgpuQueueSubmit
+        wgpuQueueWriteBuffer
+        wgpuQueueWriteTexture
+        wgpuRenderPassEncoderAddRef
+        wgpuRenderPassEncoderDraw
+        wgpuRenderPassEncoderDrawIndexed
+        wgpuRenderPassEncoderEnd
+        wgpuRenderPassEncoderRelease
+        wgpuRenderPassEncoderSetBindGroup
+        wgpuRenderPassEncoderSetBlendConstant
+        wgpuRenderPassEncoderSetIndexBuffer
+        wgpuRenderPassEncoderSetPipeline
+        wgpuRenderPassEncoderSetScissorRect
+        wgpuRenderPassEncoderSetStencilReference
+        wgpuRenderPassEncoderSetVertexBuffer
+        wgpuRenderPassEncoderSetViewport
+        wgpuRenderPipelineAddRef
+        wgpuRenderPipelineRelease
+        wgpuSamplerAddRef
+        wgpuSamplerRelease
+        wgpuShaderModuleAddRef
+        wgpuShaderModuleRelease
+        wgpuTextureAddRef
+        wgpuTextureCreateView
+        wgpuTextureRelease
+        wgpuTextureViewAddRef
+        wgpuTextureViewRelease)
+    foreach(_spm_dk_fn IN LISTS _spm_dk_wraps)
+        target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=${_spm_dk_fn}")
+    endforeach()
     # Every pthread and std::thread gets a 4 MiB stack and the application cores, and detaching one
     # works (runtime/horizon_pthread.c): libnx's default 128 KiB overflows in Tint, and libnx has no
     # pthread_detach, so std::thread::detach() threw and ended the game.
