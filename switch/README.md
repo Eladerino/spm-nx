@@ -92,7 +92,8 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
 - `runtime/cmake/PublicProducts.cmake`: `-mcpu=cortex-a57` as the baseline arch flag.
 - `runtime/include/guest_flat_memory.h`: the flat base for Horizon.
 - `runtime/include/memory_access.h`: `FlatWriteRam*` honor checked access (phase 1 needs it).
-- `runtime/include/runtime_config.h`: graphics API `auto`; executable and data directories as on Apple/Android.
+- `runtime/include/runtime_config.h`: graphics API `auto`; executable and data directories as on Apple/Android;
+  `sdmc:/` paths count as absolute.
 - `runtime/src/game_folder.cpp`: the game is the `game` folder beside the NRO (no folder picker).
 - `runtime/src/main.cpp`: graphics backend list; no POSIX fault handler.
 - `runtime/src/host_context.cpp`: the AArch64 context switch Android uses.
