@@ -379,6 +379,10 @@ private:
         for (uint32_t i = 0; i < p.colorCount; i++) {
             if (!p.clear[i]) continue;
             const float* c = p.clearValue[i];
+            // diag efbclear: the EFB's passes (the only ones with a depth target) clear magenta, so a
+            // magenta screen proves the EFB reaches the picture and a black one proves it does not
+            static const float kMagenta[4] = {1.0f, 0.0f, 1.0f, 1.0f};
+            if (g_diag.efbClear && hasDepth) c = kMagenta;
             if (p.color[i]->tex->fmt.integer) {
                 dkCmdBufClearColorUint(R.cmd, i, DkColorMask_RGBA, uint32_t(c[0]), uint32_t(c[1]), uint32_t(c[2]),
                                        uint32_t(c[3]));
