@@ -208,6 +208,12 @@ DkImageView level_view(const Tex& t, uint32_t level);
 DkGpuAddr null_buffer();
 constexpr uint32_t kNullBufferSize = 0x10000;
 
+// the buffer maps' waits for the GPU since the last call (and reset)
+struct MapWaitStats {
+    uint64_t count = 0, totalNs = 0, maxNs = 0;
+};
+MapWaitStats map_wait_stats_take();
+
 std::string to_string(WGPUStringView s);
 // log a message the first `limit` times its call site is reached
 #define SWDK_LOG_LIMITED(limit, ...)              \
