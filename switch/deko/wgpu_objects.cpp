@@ -660,6 +660,7 @@ WGPUBuffer __wrap_wgpuDeviceCreateBuffer(WGPUDevice device, WGPUBufferDescriptor
     auto buf = std::make_shared<Buf>();
     buf->size = d->size;
     buf->usage = d->usage;
+    buf->label = to_string(d->label);
     buf->block = block_create(uint32_t(std::max<uint64_t>(d->size, 4)), "a WebGPU buffer");
     if (d->size >= (8u << 20))
         dklog("buffers: %s, %llu MiB", to_string(d->label).c_str(), (unsigned long long)(d->size >> 20));
