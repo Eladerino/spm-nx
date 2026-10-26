@@ -180,6 +180,7 @@ struct Diag {
     bool picDump = false;   // the picture is read back at a few presents and its content logged
     bool efbClear = false;
     bool bufDump = false;   // at a few presents (GPU idle), every buffer's size, usage and non-zero bytes  // colour clears of passes with a depth target (the EFB) are magenta
+    bool texDump = false;   // the most-sampled textures are read back to files at a few presents
 };
 extern Diag g_diag;
 void diag_init();
