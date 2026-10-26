@@ -175,6 +175,7 @@ struct Diag {
     bool cullOff = false;   // rasterizer cull mode forced to None at every pipeline bind
     bool magenta = false;   // the swapchain image is cleared magenta before every present blit
     bool picDump = false;   // the picture is read back at a few presents and its content logged
+    bool efbClear = false;  // colour clears of passes with a depth target (the EFB) are magenta
 };
 extern Diag g_diag;
 void diag_init();
