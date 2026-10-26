@@ -13,9 +13,9 @@ image, and only its generated C++ is compiled here.
 |---|---|
 | Runtime sources (WiiCompiled `runtime/`) for Horizon | compiles, 0 errors (`--audit`) |
 | Crypto++, pugixml, toml11, mbed TLS for Horizon | compile |
-| Guest memory, phase 1 (heap stores, checked access) | written, tested off-device |
+| Guest memory, phase 1 (heap stores, checked access) | written and running on hardware; phase 2 (the flat window) not yet done |
 | SDL 3 on libnx (SwitchWaker's shim + WiiCompiled's extra calls) | compiles, links clean against 3.4.4 headers |
-| Crash handler and logging (`source/spm_switch_init.cpp`) | written |
+| Crash handler and logging (`source/spm_switch_init.cpp`) | written and running on hardware |
 | Dawn (Null device + Tint GLSL), Aurora, the translated game | build and link into `spm-nx.nro` |
 | deko3d renderer | wired into the build and running on hardware: see "Graphics" |
 | First boot on hardware | `spm-nx.nro` boots and plays on hardware |
@@ -32,8 +32,10 @@ runtime/                     guest memory for Horizon, mmap/mprotect over svcSet
 source/spm_switch_init.cpp   libnx startup: SD folders, stderr log, sockets, crash dump
 sdl3_shim/                   SDL 3 implemented on libnx (sdl3_shim/PATCHES.md)
 dawn/                        SwitchWaker's Dawn recipe and Horizon patches
+aurora/                      Horizon shims for Aurora: the ImGui SDL backends and the sqlite journal
 deko/                        the WebGPU-to-deko3d interposer that draws Aurora's frames (see "Graphics")
 deko3d/, uam/                vendored: the GPU API itself, and the GLSL-to-DKSH shader compiler
+licenses/                    license texts for the code adapted from SwitchWaker (THIRD_PARTY.md)
 scripts/                     build container and build-switch.sh
 tests/                       host-side tests for the Horizon pieces
 docs/GUEST-MEMORY-PLAN.md    how guest RAM works on Horizon, phase 1 and phase 2
@@ -49,9 +51,12 @@ bash switch/scripts/build-switch.sh --audit    # runtime only, quick, no game ne
 bash switch/scripts/build-switch.sh            # the NRO: ~/spm-switch/build/spm-nx.nro
 ```
 
-Copy `spm-nx.nro` and its companion files from the build folder (`dsp_coef.bin`,
-`initial_pipeline_cache.db`, `cacert.pem`, `wii_bootstrap/`) to `sdmc:/switch/spm-nx/`, and your
-extracted disc (`Disc\DATA`, the folder with `files` and `sys`) to `sdmc:/switch/spm-nx/game/`.
+After a full build the script also stages the SD card layout for you: under WSL it lands in the
+Windows profile's `Downloads\spm-nx-sd\switch\spm-nx\` (the NRO plus `dsp_coef.bin`,
+`initial_pipeline_cache.db`, `cacert.pem` and `wii_bootstrap/`). Drag that `switch` folder onto
+the SD card. (`--out DIR` chooses the staging folder, `--out none` skips it; without staging,
+copy those files from `~/spm-switch/build/` to `sdmc:/switch/spm-nx/` by hand.) Put your
+extracted disc (`Disc\DATA`, the folder with `files` and `sys`) in `sdmc:/switch/spm-nx/game/`.
 Launch it with title takeover (hold R while starting a game), not from the album: the applet doesn't get enough memory. Logs land in
 `sdmc:/switch/spm-nx/UserData/Logs/`.
 
@@ -92,6 +97,11 @@ An earlier plan wrote a new encoder against WiiCompiled's own frame recording (`
 way SwitchWaker's backend hooks upstream Aurora's `FramePacket` layer, which WiiCompiled's Aurora
 doesn't have. The interposer replaced it: it sits below Aurora entirely, so upstream Aurora changes
 cannot break it, and nothing of Aurora's 13.6k lines of local changes had to move.
+
+The renderer's own status, conventions and known limitations live in `deko/HANDOFF.md`, including
+its diagnostic switches: a `dk_diag.txt` in `UserData` can force pieces of the replay off or read
+state back (the presented picture, the most-sampled textures) to files in `UserData/Logs`. With no
+such file the build behaves normally.
 
 ## Upstream hooks
 

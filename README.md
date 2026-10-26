@@ -10,6 +10,14 @@ with [WiiCompiled](https://github.com/patchzyy/Wiicompiled). No emulator: the ga
 | ![Gloam Valley](screenshots/mi1_01.png) | ![Lineland Road](screenshots/he1_02.png) |
 | ![The Bitlands](screenshots/ta1_02.png) | ![Sammer's Kingdom](screenshots/wa1_02.png) |
 
+## Nintendo Switch port
+
+This fork also runs on a modded Nintendo Switch as a homebrew NRO (`spm-nx.nro`): the game boots
+and plays on hardware, rendered by a deko3d interposer that draws Aurora's WebGPU frames on the
+Switch GPU. It needs the same disc image as the PC build (the translator runs on a PC) and a
+Switch running custom firmware. Building, installing and the state of the port are documented in
+[`switch/README.md`](switch/README.md).
+
 ## Features
 
 - Up to 4K, borderless 1080p by default
