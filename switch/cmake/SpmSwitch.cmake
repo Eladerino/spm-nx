@@ -244,7 +244,7 @@ function(spm_switch_configure_products)
     # switch/deko/wgpu_objects.cpp and switch/deko/wgpu_encode.cpp needs its --wrap here, or that
     # call silently goes to Dawn only. This list is generated, not typed:
     #   grep -ho '__wrap_wgpu[A-Za-z]*' switch/deko/*.cpp | sort -u | sed 's/__wrap_//'
-    # (64 functions when this was wired, 2026-10-25; re-run it when switch/deko changes.)
+    # (64 functions; re-run it when switch/deko changes.)
     set(_spm_dk_wraps
         wgpuBindGroupAddRef
         wgpuBindGroupLayoutAddRef
