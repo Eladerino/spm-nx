@@ -86,6 +86,7 @@ struct Buf : Object {
     Block block;
     uint64_t size = 0;
     uint64_t usage = 0;
+    std::string label;
     std::atomic<uint64_t> lastSerial{0};  // the newest submit that used it
     ~Buf() override;
     void used_by(uint64_t serial) override { lastSerial.store(serial, std::memory_order_release); }
@@ -170,6 +171,10 @@ public:
     size_t size() {
         std::shared_lock<std::shared_mutex> lock(m_mutex);
         return m_map.size();
+    }
+    template <class F> void for_each(F&& f) {
+        std::shared_lock<std::shared_mutex> lock(m_mutex);
+        for (auto& [h, rec] : m_map) f(*rec.obj);
     }
 
 private:

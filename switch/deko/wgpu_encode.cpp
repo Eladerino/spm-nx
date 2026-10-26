@@ -645,6 +645,33 @@ namespace {
 // the GPU, and logs what is actually in it: how many sampled pixels are lit, the brightest
 // channel, each quadrant's average brightness, the centre pixel. Runs at a handful of present
 // calls only; each one stalls the present for one GPU round trip. Under queue_mutex().
+// diag bufdump: with the GPU idle, every live buffer's size, usage, label and how many of its first
+// 4 MiB of 32-bit words are non-zero (staging should be full, and so should the vertex, uniform,
+// index and storage buffers it is copied into; zeros there mean the copies never landed)
+void buf_dump_maybe(uint64_t presentCall) {
+    if (presentCall != 600 && presentCall != 1800 && presentCall != 3600) return;
+    dkQueueWaitIdle(R.queue);
+    dklog("bufdump at present %llu:", (unsigned long long)presentCall);
+    g_buffers.for_each([](const Buf& b) {
+        const uint64_t n = std::min<uint64_t>(b.size, 4u << 20) / 4;
+        const uint32_t* w = reinterpret_cast<const uint32_t*>(b.block.cpu);
+        uint64_t nonzero = 0, firstNonzero = UINT64_MAX;
+        for (uint64_t i = 0; i < n; i++) {
+            if (w[i]) {
+                nonzero++;
+                if (firstNonzero == UINT64_MAX) firstNonzero = i * 4;
+            }
+        }
+        dklog("  buffer %s: %llu bytes, usage 0x%llX, last submit %llu, %llu of %llu words non-zero (first at %lld), "
+              "words 0-3: %08X %08X %08X %08X",
+              b.label.empty() ? "(no label)" : b.label.c_str(), (unsigned long long)b.size,
+              (unsigned long long)b.usage, (unsigned long long)b.lastSerial.load(), (unsigned long long)nonzero,
+              (unsigned long long)n, firstNonzero == UINT64_MAX ? -1ll : (long long)firstNonzero,
+              n > 0 ? w[0] : 0, n > 1 ? w[1] : 0, n > 2 ? w[2] : 0, n > 3 ? w[3] : 0);
+    });
+    log_flush();
+}
+
 void pic_dump_maybe(const Tex& t, uint64_t presentCall) {
     if (presentCall != 90 && presentCall != 1500 && presentCall != 5400 && presentCall != 10800) return;
     if (t.fmt.compressed || t.fmt.depth || t.fmt.blockBytes != 4) {
@@ -1181,6 +1208,7 @@ bool aurora_switch_dk_present(void* texture) {
     g_copyRun = true;  // the next draw into Aurora's picture waits for the blit
     keep_until_done(std::static_pointer_cast<void>(t));
     flush();
+    if (g_diag.bufDump) buf_dump_maybe(presentCall);
     swapchain_present(slot);
     if (R.presents == 1 || R.presents % 3600 == 0) {
         const MemoryStats m = memory_stats();
