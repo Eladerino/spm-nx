@@ -44,11 +44,17 @@ void diag_init() {
         if (std::strstr(line, "bufdump")) g_diag.bufDump = !off;
         if (std::strstr(line, "texdump")) g_diag.texDump = !off;
         if (std::strstr(line, "shaderdump")) g_diag.shaderDump = !off;
+        if (std::strstr(line, "nomerge")) g_diag.noMerge = !off;
     }
     std::fclose(f);
-    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d",
+    // Aurora's command processor reads NSMBW_NO_MERGE once, on the first draw it handles; diag_init
+    // runs from webgpu::initialize, before any texture, buffer or draw exists, so setting it here
+    // lands in time. In-process libc env: Aurora's getenv sees what this setenv wrote.
+    if (g_diag.noMerge) setenv("NSMBW_NO_MERGE", "1", 1);
+    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d nomerge=%d",
           g_diag.depthOff ? 1 : 0, g_diag.cullOff ? 1 : 0, g_diag.magenta ? 1 : 0, g_diag.picDump ? 1 : 0,
-          g_diag.efbClear ? 1 : 0, g_diag.bufDump ? 1 : 0, g_diag.texDump ? 1 : 0, g_diag.shaderDump ? 1 : 0);
+          g_diag.efbClear ? 1 : 0, g_diag.bufDump ? 1 : 0, g_diag.texDump ? 1 : 0, g_diag.shaderDump ? 1 : 0,
+          g_diag.noMerge ? 1 : 0);
 }
 
 namespace {
