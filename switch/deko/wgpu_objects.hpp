@@ -63,6 +63,7 @@ struct Tex : Object {
     DkImage image{};
     ImageAlloc mem;
     std::string label;
+    uint32_t sampledBinds = 0;  // diag texdump: draws and dispatches that sampled this texture since the last dump
     ~Tex() override;
     uint32_t level_width(uint32_t level) const { return width >> level ? width >> level : 1; }
     uint32_t level_height(uint32_t level) const { return height >> level ? height >> level : 1; }
