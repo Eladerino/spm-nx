@@ -357,7 +357,7 @@ const CompiledStage* compile_stage(const std::string& wgsl, const std::string& e
     }
     // diag shaderdump: the shaders whose WGSL indexes texture matrices per vertex (in_texmtxidx)
     // are the suspects behind the tree, door and crowd corruption; save their sources for reading.
-    if (g_diag.shaderDump && wgsl.find("texmtxidx") != std::string::npos)
+    if (g_diag.shaderDump)
         dump_shader_sources(key, wgsl, t.glsl);
     const uint64_t t1 = now_ns();
     uam::Result res = run_uam(stage, t.glsl);
