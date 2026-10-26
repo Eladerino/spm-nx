@@ -166,6 +166,19 @@ void log_flush();
 void check_queue(const char* before);
 bool env_flag(const char* name, bool def);
 
+// ---- diagnostics (device.cpp): switches from UserData/dk_diag.txt, read once at renderer init ----
+// A bisect aid for the black-game-picture problem (the startup cover, an overlay, reaches the
+// screen; the game's own GX content does not). Each switch disables or exposes one piece of the
+// replay so a single boot can clear a whole suspect. No file = every switch off = normal build.
+struct Diag {
+    bool depthOff = false;  // depth/stencil test and write forced off at every pipeline bind
+    bool cullOff = false;   // rasterizer cull mode forced to None at every pipeline bind
+    bool magenta = false;   // the swapchain image is cleared magenta before every present blit
+    bool picDump = false;   // the picture is read back at a few presents and its content logged
+};
+extern Diag g_diag;
+void diag_init();
+
 inline uint64_t now_ns() {
     uint64_t ticks;
     asm volatile("mrs %0, cntpct_el0" : "=r"(ticks));
