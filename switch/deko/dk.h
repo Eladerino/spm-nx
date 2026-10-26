@@ -181,6 +181,7 @@ struct Diag {
     bool efbClear = false;
     bool bufDump = false;   // at a few presents (GPU idle), every buffer's size, usage and non-zero bytes  // colour clears of passes with a depth target (the EFB) are magenta
     bool texDump = false;   // the most-sampled textures are read back to files at a few presents
+    bool shaderDump = false;   // shaders using per-vertex texture matrices: their WGSL and GLSL are saved as they compile
 };
 extern Diag g_diag;
 void diag_init();

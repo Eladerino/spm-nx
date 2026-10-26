@@ -166,6 +166,35 @@ void dump_failure(uint64_t key, ShaderStage stage, const std::string& source, co
     }
 }
 
+// diag shaderdump: one shader's WGSL and the GLSL Tint made from it, saved side by side under the
+// shader's cache key so the generated code behind a suspect draw can be read off the card. Called
+// on a compile_stage miss only, so each unique shader is written once; a failed write is logged
+// and otherwise ignored (the compile carries on either way).
+void dump_shader_sources(uint64_t key, const std::string& wgsl, const std::string& glsl) {
+    std::lock_guard<std::mutex> lock(g_fileMutex);
+    char wgslPath[256], glslPath[256];
+    snprintf(wgslPath, sizeof wgslPath, "%s/shaderdump_%016llx.wgsl", kFailDir, (unsigned long long)key);
+    snprintf(glslPath, sizeof glslPath, "%s/shaderdump_%016llx.glsl", kFailDir, (unsigned long long)key);
+    bool ok = false;
+    if (FILE* f = fopen(wgslPath, "wb")) {
+        ok = fwrite(wgsl.data(), 1, wgsl.size(), f) == wgsl.size();
+        fclose(f);
+    }
+    if (ok) {
+        ok = false;
+        if (FILE* f = fopen(glslPath, "wb")) {
+            ok = fwrite(glsl.data(), 1, glsl.size(), f) == glsl.size();
+            fclose(f);
+        }
+    }
+    if (ok) {
+        dklog("diag shaderdump: saved shaderdump_%016llx.wgsl/.glsl (wgsl %zu bytes, glsl %zu bytes)",
+              (unsigned long long)key, wgsl.size(), glsl.size());
+    } else {
+        dklog("diag shaderdump: could not write shaderdump_%016llx.wgsl/.glsl", (unsigned long long)key);
+    }
+}
+
 template <class T> void put(std::vector<uint8_t>& out, const T& v) {
     const uint8_t* p = reinterpret_cast<const uint8_t*>(&v);
     out.insert(out.end(), p, p + sizeof v);
@@ -326,6 +355,10 @@ const CompiledStage* compile_stage(const std::string& wgsl, const std::string& e
         dump_failure(key, stage, wgsl, t.error, "wgsl");
         return finish(Entry::Failed);
     }
+    // diag shaderdump: the shaders whose WGSL indexes texture matrices per vertex (in_texmtxidx)
+    // are the suspects behind the tree, door and crowd corruption; save their sources for reading.
+    if (g_diag.shaderDump && wgsl.find("texmtxidx") != std::string::npos)
+        dump_shader_sources(key, wgsl, t.glsl);
     const uint64_t t1 = now_ns();
     uam::Result res = run_uam(stage, t.glsl);
     const uint64_t t2 = now_ns();
