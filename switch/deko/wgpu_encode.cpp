@@ -28,6 +28,7 @@
 #include "dk_aurora.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 extern "C" {
@@ -312,6 +313,7 @@ private:
         case OpType::Draw:
             if (!draw_ready()) break;
             dkCmdBufDraw(R.cmd, m_pipe->prim, op.u[0], op.u[1], op.u[2], op.u[3]);
+            note_sampled_textures();
             g_stats.draws++;
             break;
         case OpType::DrawIndexed:
@@ -327,9 +329,13 @@ private:
                 m_ibDirty = false;
             }
             dkCmdBufDrawIndexed(R.cmd, m_pipe->prim, op.u[0], op.u[1], op.u[2], int32_t(op.u[3]), op.u[4]);
+            note_sampled_textures();
             g_stats.draws++;
             break;
-        case OpType::Dispatch: dispatch(op.u[0], op.u[1], op.u[2]); break;
+        case OpType::Dispatch:
+            dispatch(op.u[0], op.u[1], op.u[2]);
+            note_sampled_textures();
+            break;
         case OpType::Copy: copy(m_enc->copies[op.n]); break;
         }
     }
@@ -544,6 +550,22 @@ private:
         if (nTex) dkCmdBufBindTextures(R.cmd, stage, 0, tex, nTex);
     }
 
+    // diag texdump: count this draw or dispatch against every texture it samples, so the dump
+    // at a present can pick the textures the game is actually using (the crowd's sprite sheets,
+    // say) instead of guessing by size. Only runs while the switch is on.
+    void note_sampled_textures() {
+        if (!g_diag.texDump || !m_pipe) return;
+        const CompiledStage* stages[3] = {m_pipe->vs, m_pipe->fs, m_pipe->cs};
+        for (const CompiledStage* cs : stages) {
+            if (!cs) continue;
+            for (const SlotBinding& b : cs->bindings) {
+                if (b.kind != SlotBinding::Kind::Sampler) continue;
+                const BindGroup::Entry* e = entry(b.group, b.binding);
+                if (e && e->view && e->view->tex) e->view->tex->sampledBinds++;
+            }
+        }
+    }
+
     void dispatch(uint32_t x, uint32_t y, uint32_t z) {
         if (!m_computePass || !m_pipe || !m_pipe->compute || !m_pipe->valid) {
             SWDK_LOG_LIMITED(8, "replay: a dispatch without a usable compute pipeline is skipped");
@@ -731,6 +753,114 @@ void pic_dump_maybe(const Tex& t, uint64_t presentCall) {
           (unsigned long long)(quadN[1] ? quadLum[1] / quadN[1] : 0),
           (unsigned long long)(quadN[2] ? quadLum[2] / quadN[2] : 0),
           (unsigned long long)(quadN[3] ? quadLum[3] / quadN[3] : 0), c[0], c[1], c[2], c[3]);
+    log_flush();
+}
+
+// diag texdump: at a few presents, the textures the game sampled most since the last dump
+// (Tex::sampledBinds, counted in the replay while the switch is on) are copied out and saved
+// under UserData/Logs: a .ppm for plain 4-byte pixel formats, which opens anywhere, and the
+// raw level-0 bytes for anything else, with one manifest line per texture in the log. A saved
+// texture can then be compared with what the screen showed, which separates an upload that
+// was already wrong (the corruption is in the file) from sampling that goes wrong (the file
+// is clean). Under queue_mutex(); each texture stalls for one GPU round trip, like picdump.
+void tex_dump_maybe(uint64_t presentCall) {
+    if (presentCall != 1800 && presentCall != 3600 && presentCall != 5400) return;
+    uint32_t counts[1024];
+    size_t nCounts = 0;
+    g_textures.for_each([&](const Tex& t) {
+        if (t.valid && !t.fmt.depth && t.sampledBinds && nCounts < 1024) counts[nCounts++] = t.sampledBinds;
+    });
+    if (!nCounts) {
+        dklog("diag texdump @%llu: nothing was sampled since the last dump", (unsigned long long)presentCall);
+        log_flush();
+        return;
+    }
+    std::sort(counts, counts + nCounts, [](uint32_t a, uint32_t b) { return a > b; });
+    const uint32_t threshold = counts[std::min<size_t>(nCounts, 6) - 1];
+    dklog("diag texdump @%llu: %zu sampled textures, dumping the ones with at least %u sampled draws",
+          (unsigned long long)presentCall, nCounts, threshold);
+    static Block s_block;
+    uint32_t dumped = 0;
+    g_textures.for_each([&](const Tex& t) {
+        if (dumped >= 6 || !t.valid || t.fmt.depth || t.sampledBinds < threshold) return;
+        const uint32_t w = t.level_width(0), h = t.level_height(0);
+        const uint32_t pitch = (w + t.fmt.blockW - 1) / t.fmt.blockW * t.fmt.blockBytes;
+        const uint32_t rows = (h + t.fmt.blockH - 1) / t.fmt.blockH;
+        const uint32_t total = pitch * rows;
+        if (!total || total > (16u << 20)) {
+            dklog("  texdump: skipped a %ux%u texture (format %u), %u bytes is too large to dump", w, h,
+                  unsigned(t.wformat), total);
+            return;
+        }
+        if (s_block && s_block.size < total) {
+            block_destroy(s_block);
+            s_block = Block{};
+        }
+        if (!s_block) s_block = block_create(total, "diag texdump");
+        if (!s_block) return;
+        const DkImageView src = level_view(t, 0);
+        const DkImageRect r = {0, 0, 0, w, h, 1};
+        const DkCopyBuf b = {s_block.gpu, pitch, total};
+        dkCmdBufCopyImageToBuffer(R.cmd, &src, &r, &b, 0);
+        const uint64_t serial = recording_serial();
+        flush();
+        if (!wait_serial(serial)) {
+            dklog("  texdump: the GPU did not finish a copy in time");
+            return;
+        }
+        const bool pixels = !t.fmt.compressed && t.fmt.blockBytes == 4;
+        char path[128];
+        std::snprintf(path, sizeof(path), "/switch/spm-nx/UserData/Logs/texdump_p%llu_%u_%ux%u_f%u.%s",
+                      (unsigned long long)presentCall, dumped, w, h, unsigned(t.wformat),
+                      pixels ? "ppm" : "bin");
+        FILE* f = std::fopen(path, "wb");
+        if (!f) {
+            dklog("  texdump: could not open %s", path);
+            return;
+        }
+        if (pixels) {
+            std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+            std::vector<uint8_t> row(w * 3);
+            for (uint32_t y = 0; y < h; y++) {
+                const uint8_t* srcRow = s_block.cpu + uint64_t(y) * pitch;
+                for (uint32_t x = 0; x < w; x++) {
+                    row[x * 3 + 0] = srcRow[x * 4 + 0];
+                    row[x * 3 + 1] = srcRow[x * 4 + 1];
+                    row[x * 3 + 2] = srcRow[x * 4 + 2];
+                }
+                std::fwrite(row.data(), 1, row.size(), f);
+            }
+        } else {
+            std::fwrite(s_block.cpu, 1, total, f);
+        }
+        std::fclose(f);
+        if (pixels) {
+            uint64_t bands[16] = {}, bandN[16] = {};
+            for (uint32_t y = 0; y < h; y += 4) {
+                for (uint32_t x = 0; x < w; x += 4) {
+                    const uint8_t* p = s_block.cpu + uint64_t(y) * pitch + uint64_t(x) * 4;
+                    const uint32_t band = std::min<uint32_t>(x * 16 / w, 15);
+                    bands[band] += (uint32_t(p[0]) + p[1] + p[2]) / 3;
+                    bandN[band]++;
+                }
+            }
+            uint32_t avg[16];
+            for (int i = 0; i < 16; i++) avg[i] = bandN[i] ? uint32_t(bands[i] / bandN[i]) : 0;
+            dklog("  texdump %u: %ux%u format %u, %u sampled draws, saved %s; column brightness "
+                  "%u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u",
+                  dumped, w, h, unsigned(t.wformat), t.sampledBinds, path, avg[0], avg[1], avg[2], avg[3],
+                  avg[4], avg[5], avg[6], avg[7], avg[8], avg[9], avg[10], avg[11], avg[12], avg[13], avg[14],
+                  avg[15]);
+        } else {
+            uint64_t nonzero = 0;
+            for (uint32_t i = 0; i < total; i++) nonzero += s_block.cpu[i] != 0;
+            dklog("  texdump %u: %ux%u format %u, %u sampled draws, saved %s; %llu of %u bytes non-zero",
+                  dumped, w, h, unsigned(t.wformat), t.sampledBinds, path, (unsigned long long)nonzero,
+                  total);
+        }
+        dumped++;
+    });
+    g_textures.for_each([](Tex& t) { t.sampledBinds = 0; });
     log_flush();
 }
 
@@ -1227,6 +1357,7 @@ bool aurora_switch_dk_present(void* texture) {
     keep_until_done(std::static_pointer_cast<void>(t));
     flush();
     if (g_diag.bufDump) buf_dump_maybe(presentCall);
+    if (g_diag.texDump) tex_dump_maybe(presentCall);
     swapchain_present(slot);
     // frame pacing over the last 600 presents: the gaps between presents, the acquire waits and the
     // buffer maps' waits for the GPU (wgpu_objects.cpp)
