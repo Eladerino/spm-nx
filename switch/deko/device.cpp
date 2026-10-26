@@ -40,10 +40,11 @@ void diag_init() {
         if (std::strstr(line, "cull_off")) g_diag.cullOff = !off;
         if (std::strstr(line, "magenta")) g_diag.magenta = !off;
         if (std::strstr(line, "picdump")) g_diag.picDump = !off;
+        if (std::strstr(line, "efbclear")) g_diag.efbClear = !off;
     }
     std::fclose(f);
-    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d", g_diag.depthOff ? 1 : 0,
-          g_diag.cullOff ? 1 : 0, g_diag.magenta ? 1 : 0, g_diag.picDump ? 1 : 0);
+    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d", g_diag.depthOff ? 1 : 0,
+          g_diag.cullOff ? 1 : 0, g_diag.magenta ? 1 : 0, g_diag.picDump ? 1 : 0, g_diag.efbClear ? 1 : 0);
 }
 
 namespace {
