@@ -428,11 +428,25 @@ private:
             if (m_pipe->fs) shaders[n++] = &m_pipe->fs->shader;
             // stages of the mask without a shader are unbound
             dkCmdBufBindShaders(R.cmd, DkStageFlag_GraphicsMask, shaders, n);
-            dkCmdBufBindRasterizerState(R.cmd, &m_pipe->rs);
+            if (g_diag.cullOff) {
+                DkRasterizerState rs = m_pipe->rs;
+                rs.cullMode = DkFace_None;
+                dkCmdBufBindRasterizerState(R.cmd, &rs);
+            } else {
+                dkCmdBufBindRasterizerState(R.cmd, &m_pipe->rs);
+            }
             dkCmdBufBindColorState(R.cmd, &m_pipe->color);
             dkCmdBufBindColorWriteState(R.cmd, &m_pipe->colorWrite);
             if (m_pipe->blendCount) dkCmdBufBindBlendStates(R.cmd, 0, m_pipe->blend, m_pipe->blendCount);
-            dkCmdBufBindDepthStencilState(R.cmd, &m_pipe->ds);
+            if (g_diag.depthOff) {
+                DkDepthStencilState ds = m_pipe->ds;
+                ds.depthTestEnable = 0;
+                ds.depthWriteEnable = 0;
+                ds.stencilTestEnable = 0;
+                dkCmdBufBindDepthStencilState(R.cmd, &ds);
+            } else {
+                dkCmdBufBindDepthStencilState(R.cmd, &m_pipe->ds);
+            }
             if (m_pipe->rs.depthBiasEnableMask)
                 dkCmdBufSetDepthBias(R.cmd, m_pipe->depthBias[0], m_pipe->depthBias[1], m_pipe->depthBias[2]);
             dkCmdBufBindVtxAttribState(R.cmd, m_pipe->attribs, m_pipe->attribCount);
@@ -620,6 +634,69 @@ void record_bind_group(Encoder* e, OpType type, uint32_t index, WGPUBindGroup gr
 
 using namespace swdk;
 using namespace swdk::wg;
+
+namespace {
+
+// Diagnostic readback (dk.h, picdump): copies the picture into a CPU-readable block, waits for
+// the GPU, and logs what is actually in it: how many sampled pixels are lit, the brightest
+// channel, each quadrant's average brightness, the centre pixel. Runs at a handful of present
+// calls only; each one stalls the present for one GPU round trip. Under queue_mutex().
+void pic_dump_maybe(const Tex& t, uint64_t presentCall) {
+    if (presentCall != 90 && presentCall != 1500 && presentCall != 5400 && presentCall != 10800) return;
+    if (t.fmt.compressed || t.fmt.depth || t.fmt.blockBytes != 4) {
+        dklog("diag picdump @%llu: skipped, the picture format is not 4-byte pixels",
+              (unsigned long long)presentCall);
+        log_flush();
+        return;
+    }
+    const uint32_t w = t.width, h = t.height, pitch = w * 4;
+    static Block s_block;
+    if (s_block && s_block.size < pitch * h) {
+        block_destroy(s_block);
+        s_block = Block{};
+    }
+    if (!s_block) s_block = block_create(pitch * h, "diag picdump");
+    if (!s_block) {
+        dklog("diag picdump: the readback block could not be created");
+        return;
+    }
+    const DkImageView src = level_view(t, 0);
+    const DkImageRect r = {0, 0, 0, w, h, 1};
+    const DkCopyBuf b = {s_block.gpu, pitch, pitch * h};
+    dkCmdBufCopyImageToBuffer(R.cmd, &src, &r, &b, 0);
+    const uint64_t serial = recording_serial();
+    flush();
+    if (!wait_serial(serial)) {
+        dklog("diag picdump: the GPU did not finish the copy in time");
+        log_flush();
+        return;
+    }
+    uint64_t lit = 0, samples = 0;
+    uint32_t maxv = 0;
+    uint64_t quadLum[4] = {0, 0, 0, 0}, quadN[4] = {0, 0, 0, 0};
+    for (uint32_t y = 0; y < h; y += 8) {
+        for (uint32_t x = 0; x < w; x += 8) {
+            const uint8_t* p = s_block.cpu + uint64_t(y) * pitch + uint64_t(x) * 4;
+            if (p[0] > 8 || p[1] > 8 || p[2] > 8) lit++;
+            maxv = std::max({maxv, uint32_t(p[0]), uint32_t(p[1]), uint32_t(p[2])});
+            const int q = (y >= h / 2 ? 2 : 0) + (x >= w / 2 ? 1 : 0);
+            quadLum[q] += (uint32_t(p[0]) + p[1] + p[2]) / 3;
+            quadN[q]++;
+            samples++;
+        }
+    }
+    const uint8_t* c = s_block.cpu + uint64_t(h / 2) * pitch + uint64_t(w / 2) * 4;
+    dklog("diag picdump @%llu: %ux%u picture, %llu of %llu sampled pixels lit, brightest channel %u, quadrant "
+          "brightness TL %llu TR %llu BL %llu BR %llu, centre pixel (%u,%u,%u,%u)",
+          (unsigned long long)presentCall, w, h, (unsigned long long)lit, (unsigned long long)samples, maxv,
+          (unsigned long long)(quadN[0] ? quadLum[0] / quadN[0] : 0),
+          (unsigned long long)(quadN[1] ? quadLum[1] / quadN[1] : 0),
+          (unsigned long long)(quadN[2] ? quadLum[2] / quadN[2] : 0),
+          (unsigned long long)(quadN[3] ? quadLum[3] / quadN[3] : 0), c[0], c[1], c[2], c[3]);
+    log_flush();
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -1079,12 +1156,18 @@ bool aurora_switch_dk_present(void* texture) {
     const uint32_t fx = (dw - fw) / 2, fy = (dh - fh) / 2;
     // the picture's draws done (whatever ran last)
     dkCmdBufBarrier(R.cmd, DkBarrier_Full, DkInvalidateFlags_Image);
-    if (fw != dw || fh != dh) {
+    static uint64_t s_presentCalls = 0;
+    const uint64_t presentCall = ++s_presentCalls;
+    if (g_diag.picDump) pic_dump_maybe(*t, presentCall);
+    if (g_diag.magenta || fw != dw || fh != dh) {
         const DkImageView* targets[1] = {&dst};
         dkCmdBufBindRenderTargets(R.cmd, targets, 1, nullptr);
         const DkScissor s = {0, 0, dw, dh};
         dkCmdBufSetScissors(R.cmd, 0, &s, 1);
-        dkCmdBufClearColorFloat(R.cmd, 0, DkColorMask_RGBA, 0.0f, 0.0f, 0.0f, 1.0f);
+        // diag magenta: a clear colour the game never uses, so any of it left on screen after
+        // the blit marks exactly the pixels the blit did not cover
+        dkCmdBufClearColorFloat(R.cmd, 0, DkColorMask_RGBA, g_diag.magenta ? 1.0f : 0.0f, 0.0f,
+                                g_diag.magenta ? 1.0f : 0.0f, 1.0f);
         dkCmdBufBarrier(R.cmd, DkBarrier_Fragments, 0);
     }
     const DkImageView src = level_view(*t, 0);
