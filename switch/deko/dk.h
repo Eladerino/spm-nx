@@ -42,9 +42,12 @@ struct Renderer {
 };
 extern Renderer R;
 
-// The window (device.cpp): an image to draw into (blocks until one is free), then shown. Under
-// queue_mutex(); the present's commands are flushed between the two.
-int swapchain_acquire();
+// The window (device.cpp): an image to draw into, then shown. swapchain_acquire blocks until an image
+// is free (up to a vsync) and is called outside queue_mutex(), so submits from other threads carry on;
+// swapchain_wait (under queue_mutex()) makes the queue wait for the image's fence. The present's
+// commands are flushed between that and swapchain_present (under queue_mutex()).
+int swapchain_acquire(DkFence* fence);
+void swapchain_wait(DkFence* fence);
 const DkImage& swapchain_image(int slot);
 void swapchain_present(int slot);
 
