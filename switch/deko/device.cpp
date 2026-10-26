@@ -43,11 +43,12 @@ void diag_init() {
         if (std::strstr(line, "efbclear")) g_diag.efbClear = !off;
         if (std::strstr(line, "bufdump")) g_diag.bufDump = !off;
         if (std::strstr(line, "texdump")) g_diag.texDump = !off;
+        if (std::strstr(line, "shaderdump")) g_diag.shaderDump = !off;
     }
     std::fclose(f);
-    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d",
+    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d",
           g_diag.depthOff ? 1 : 0, g_diag.cullOff ? 1 : 0, g_diag.magenta ? 1 : 0, g_diag.picDump ? 1 : 0,
-          g_diag.efbClear ? 1 : 0, g_diag.bufDump ? 1 : 0, g_diag.texDump ? 1 : 0);
+          g_diag.efbClear ? 1 : 0, g_diag.bufDump ? 1 : 0, g_diag.texDump ? 1 : 0, g_diag.shaderDump ? 1 : 0);
 }
 
 namespace {
