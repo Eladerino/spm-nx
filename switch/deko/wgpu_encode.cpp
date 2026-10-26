@@ -759,10 +759,13 @@ void pic_dump_maybe(const Tex& t, uint64_t presentCall) {
 // diag texdump: at a few presents, the textures the game sampled most since the last dump
 // (Tex::sampledBinds, counted in the replay while the switch is on) are copied out and saved
 // under UserData/Logs: a .ppm for plain 4-byte pixel formats, which opens anywhere, and the
-// raw level-0 bytes for anything else, with one manifest line per texture in the log. A saved
-// texture can then be compared with what the screen showed, which separates an upload that
-// was already wrong (the corruption is in the file) from sampling that goes wrong (the file
-// is clean). Under queue_mutex(); each texture stalls for one GPU round trip, like picdump.
+// raw bytes for anything else, with one manifest line per level in the log. Every mip level
+// is dumped, not just level 0: run 9 found level 0 clean on all 18 textures it captured,
+// while the on-screen corruption hits small, distant sprites, which is exactly the content
+// the GPU samples from the deeper levels. A saved level can then be compared with what the
+// screen showed, which separates an upload that was already wrong (the corruption is in the
+// file) from sampling that goes wrong (the file is clean). Under queue_mutex(); each level
+// stalls for one GPU round trip, like picdump.
 void tex_dump_maybe(uint64_t presentCall) {
     if (presentCall != 1800 && presentCall != 3600 && presentCall != 5400) return;
     uint32_t counts[1024];
@@ -783,87 +786,89 @@ void tex_dump_maybe(uint64_t presentCall) {
     uint32_t dumped = 0;
     g_textures.for_each([&](const Tex& t) {
         if (dumped >= 6 || !t.valid || t.fmt.depth || t.sampledBinds < threshold) return;
-        const uint32_t w = t.level_width(0), h = t.level_height(0);
-        const uint32_t pitch = (w + t.fmt.blockW - 1) / t.fmt.blockW * t.fmt.blockBytes;
-        const uint32_t rows = (h + t.fmt.blockH - 1) / t.fmt.blockH;
-        const uint32_t total = pitch * rows;
-        if (!total || total > (16u << 20)) {
-            dklog("  texdump: skipped a %ux%u texture (format %u), %u bytes is too large to dump", w, h,
-                  unsigned(t.wformat), total);
-            return;
-        }
-        if (s_block && s_block.size < total) {
-            block_destroy(s_block);
-            s_block = Block{};
-        }
-        if (!s_block) s_block = block_create(total, "diag texdump");
-        if (!s_block) return;
-        const DkImageView src = level_view(t, 0);
-        const DkImageRect r = {0, 0, 0, w, h, 1};
-        const DkCopyBuf b = {s_block.gpu, pitch, total};
-        dkCmdBufCopyImageToBuffer(R.cmd, &src, &r, &b, 0);
-        const uint64_t serial = recording_serial();
-        flush();
-        if (!wait_serial(serial)) {
-            dklog("  texdump: the GPU did not finish a copy in time");
-            return;
-        }
-        const bool pixels = !t.fmt.compressed && t.fmt.blockBytes == 4;
-        char path[128];
-        std::snprintf(path, sizeof(path), "/switch/spm-nx/UserData/Logs/texdump_p%llu_%u_%ux%u_f%u.%s",
-                      (unsigned long long)presentCall, dumped, w, h, unsigned(t.wformat),
-                      pixels ? "ppm" : "bin");
-        FILE* f = std::fopen(path, "wb");
-        if (!f) {
-            dklog("  texdump: could not open %s", path);
-            return;
-        }
-        if (pixels) {
-            std::fprintf(f, "P6\n%u %u\n255\n", w, h);
-            std::vector<uint8_t> row(w * 3);
-            for (uint32_t y = 0; y < h; y++) {
-                const uint8_t* srcRow = s_block.cpu + uint64_t(y) * pitch;
-                for (uint32_t x = 0; x < w; x++) {
-                    row[x * 3 + 0] = srcRow[x * 4 + 0];
-                    row[x * 3 + 1] = srcRow[x * 4 + 1];
-                    row[x * 3 + 2] = srcRow[x * 4 + 2];
-                }
-                std::fwrite(row.data(), 1, row.size(), f);
+        for (uint32_t level = 0; level < t.mips; level++) {
+            const uint32_t w = t.level_width(level), h = t.level_height(level);
+            const uint32_t pitch = (w + t.fmt.blockW - 1) / t.fmt.blockW * t.fmt.blockBytes;
+            const uint32_t rows = (h + t.fmt.blockH - 1) / t.fmt.blockH;
+            const uint32_t total = pitch * rows;
+            if (!total || total > (16u << 20)) {
+                dklog("  texdump: skipped mip %u of a %ux%u texture (format %u), %u bytes is too large to dump",
+                      level, t.width, t.height, unsigned(t.wformat), total);
+                continue;
             }
-        } else {
-            std::fwrite(s_block.cpu, 1, total, f);
-        }
-        std::fclose(f);
-        if (pixels) {
-            uint64_t bands[16] = {}, bandN[16] = {};
-            for (uint32_t y = 0; y < h; y += 4) {
-                for (uint32_t x = 0; x < w; x += 4) {
-                    const uint8_t* p = s_block.cpu + uint64_t(y) * pitch + uint64_t(x) * 4;
-                    const uint32_t band = std::min<uint32_t>(x * 16 / w, 15);
-                    bands[band] += (uint32_t(p[0]) + p[1] + p[2]) / 3;
-                    bandN[band]++;
-                }
+            if (s_block && s_block.size < total) {
+                block_destroy(s_block);
+                s_block = Block{};
             }
-            uint32_t avg[16];
-            for (int i = 0; i < 16; i++) avg[i] = bandN[i] ? uint32_t(bands[i] / bandN[i]) : 0;
-            dklog("  texdump %u: %ux%u format %u, %u sampled draws, saved %s; column brightness "
-                  "%u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u",
-                  dumped, w, h, unsigned(t.wformat), t.sampledBinds, path, avg[0], avg[1], avg[2], avg[3],
-                  avg[4], avg[5], avg[6], avg[7], avg[8], avg[9], avg[10], avg[11], avg[12], avg[13], avg[14],
-                  avg[15]);
-        } else {
-            uint64_t nonzero = 0;
-            for (uint32_t i = 0; i < total; i++) nonzero += s_block.cpu[i] != 0;
-            dklog("  texdump %u: %ux%u format %u, %u sampled draws, saved %s; %llu of %u bytes non-zero",
-                  dumped, w, h, unsigned(t.wformat), t.sampledBinds, path, (unsigned long long)nonzero,
-                  total);
+            if (!s_block) s_block = block_create(total, "diag texdump");
+            if (!s_block) return;
+            const DkImageView src = level_view(t, level);
+            const DkImageRect r = {0, 0, 0, w, h, 1};
+            const DkCopyBuf b = {s_block.gpu, pitch, total};
+            dkCmdBufCopyImageToBuffer(R.cmd, &src, &r, &b, 0);
+            const uint64_t serial = recording_serial();
+            flush();
+            if (!wait_serial(serial)) {
+                dklog("  texdump: the GPU did not finish a copy in time");
+                continue;
+            }
+            const bool pixels = !t.fmt.compressed && t.fmt.blockBytes == 4;
+            char path[128];
+            std::snprintf(path, sizeof(path), "/switch/spm-nx/UserData/Logs/texdump_p%llu_%u_%ux%u_f%u_m%u.%s",
+                          (unsigned long long)presentCall, dumped, t.width, t.height, unsigned(t.wformat),
+                          level, pixels ? "ppm" : "bin");
+            FILE* f = std::fopen(path, "wb");
+            if (!f) {
+                dklog("  texdump: could not open %s", path);
+                continue;
+            }
+            if (pixels) {
+                std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+                std::vector<uint8_t> row(w * 3);
+                for (uint32_t y = 0; y < h; y++) {
+                    const uint8_t* srcRow = s_block.cpu + uint64_t(y) * pitch;
+                    for (uint32_t x = 0; x < w; x++) {
+                        row[x * 3 + 0] = srcRow[x * 4 + 0];
+                        row[x * 3 + 1] = srcRow[x * 4 + 1];
+                        row[x * 3 + 2] = srcRow[x * 4 + 2];
+                    }
+                    std::fwrite(row.data(), 1, row.size(), f);
+                }
+            } else {
+                std::fwrite(s_block.cpu, 1, total, f);
+            }
+            std::fclose(f);
+            if (pixels) {
+                uint64_t bands[16] = {}, bandN[16] = {};
+                for (uint32_t y = 0; y < h; y += 4) {
+                    for (uint32_t x = 0; x < w; x += 4) {
+                        const uint8_t* p = s_block.cpu + uint64_t(y) * pitch + uint64_t(x) * 4;
+                        const uint32_t band = std::min<uint32_t>(x * 16 / w, 15);
+                        bands[band] += (uint32_t(p[0]) + p[1] + p[2]) / 3;
+                        bandN[band]++;
+                    }
+                }
+                uint32_t avg[16];
+                for (int i = 0; i < 16; i++) avg[i] = bandN[i] ? uint32_t(bands[i] / bandN[i]) : 0;
+                dklog("  texdump %u mip %u/%u: %ux%u (level %ux%u) format %u, %u sampled draws, saved %s; "
+                      "column brightness %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u",
+                      dumped, level + 1, t.mips, t.width, t.height, w, h, unsigned(t.wformat), t.sampledBinds,
+                      path, avg[0], avg[1], avg[2], avg[3], avg[4], avg[5], avg[6], avg[7], avg[8], avg[9],
+                      avg[10], avg[11], avg[12], avg[13], avg[14], avg[15]);
+            } else {
+                uint64_t nonzero = 0;
+                for (uint32_t i = 0; i < total; i++) nonzero += s_block.cpu[i] != 0;
+                dklog("  texdump %u mip %u/%u: %ux%u (level %ux%u) format %u, %u sampled draws, saved %s; "
+                      "%llu of %u bytes non-zero",
+                      dumped, level + 1, t.mips, t.width, t.height, w, h, unsigned(t.wformat), t.sampledBinds,
+                      path, (unsigned long long)nonzero, total);
+            }
         }
         dumped++;
     });
     g_textures.for_each([](Tex& t) { t.sampledBinds = 0; });
     log_flush();
 }
-
 }  // namespace
 
 extern "C" {
