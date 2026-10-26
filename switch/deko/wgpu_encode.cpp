@@ -209,6 +209,13 @@ struct Stats {
 };
 Stats g_stats;  // under queue_mutex()
 
+// CPU time of the queue's work since the last pacing line (any thread): the wait for queue_mutex,
+// our replay and flush, and Dawn's own submit after it
+struct CpuTimes {
+    std::atomic<uint64_t> lockWaitNs{0}, replayNs{0}, dawnSubmitNs{0};
+};
+CpuTimes g_cpu;
+
 // ---- replay (under queue_mutex()) -------------------------------------------------------------------
 struct VertexBinding {
     Buf* buf = nullptr;
@@ -1049,7 +1056,10 @@ void __wrap_wgpuQueueSubmit(WGPUQueue queue, size_t commandCount, WGPUCommandBuf
         if (auto e = g_commandBuffers.get(commands[i])) encoders.push_back(std::move(e));
     }
     if (!encoders.empty()) {
+        const uint64_t l0 = now_ns();
         std::lock_guard<std::mutex> lock(queue_mutex());
+        const uint64_t r0 = now_ns();
+        g_cpu.lockWaitNs.fetch_add(r0 - l0, std::memory_order_relaxed);
         const uint64_t serial = recording_serial();
         for (auto& e : encoders) {
             if (e->submitted) continue;  // (Dawn refuses a second submit)
@@ -1072,6 +1082,7 @@ void __wrap_wgpuQueueSubmit(WGPUQueue queue, size_t commandCount, WGPUCommandBuf
         }
         g_stats.submits++;
         flush();
+        g_cpu.replayNs.fetch_add(now_ns() - r0, std::memory_order_relaxed);
         if (g_stats.submits == 1 || g_stats.submits % 3600 == 0) {
             dklog("replay: %llu submits, %llu passes, %llu draws (%llu skipped), %llu dispatches, %llu copies, "
                   "%llu queue writes (%llu KiB)",
@@ -1081,7 +1092,9 @@ void __wrap_wgpuQueueSubmit(WGPUQueue queue, size_t commandCount, WGPUCommandBuf
                   (unsigned long long)g_stats.writes, (unsigned long long)(g_stats.writeBytes >> 10));
         }
     }
+    const uint64_t d0 = now_ns();
     __real_wgpuQueueSubmit(queue, commandCount, commands);
+    g_cpu.dawnSubmitNs.fetch_add(now_ns() - d0, std::memory_order_relaxed);
 }
 
 // A queue write lands before every submit that follows it. When the GPU is done with the buffer and no
@@ -1218,6 +1231,7 @@ bool aurora_switch_dk_present(void* texture) {
     // frame pacing over the last 600 presents: the gaps between presents, the acquire waits and the
     // buffer maps' waits for the GPU (wgpu_objects.cpp)
     static uint64_t s_lastPresentNs = 0, s_gapMaxNs = 0, s_gapSlow = 0, s_acquireNs = 0, s_acquireMaxNs = 0;
+    static uint64_t s_windowStartNs = 0, s_windowDraws = 0;
     const uint64_t nowNs = now_ns();
     if (s_lastPresentNs) {
         const uint64_t gap = nowNs - s_lastPresentNs;
@@ -1227,8 +1241,20 @@ bool aurora_switch_dk_present(void* texture) {
     s_lastPresentNs = nowNs;
     s_acquireNs += acquireNs;
     s_acquireMaxNs = std::max(s_acquireMaxNs, acquireNs);
+    if (!s_windowStartNs) s_windowStartNs = nowNs;
     if (R.presents % 600 == 0) {
         const MapWaitStats mw = map_wait_stats_take();
+        // per present, over the window: the average gap, and the queue's CPU time
+        const double perFrame = 600e6;
+        const double windowMs = double(nowNs - s_windowStartNs) / 1e6;
+        dklog("cpu per frame, presents %llu-%llu: %.1f ms between presents; replay %.2f ms, queue lock wait %.2f "
+              "ms, Dawn submit %.2f ms; %llu draws",
+              (unsigned long long)(R.presents - 599), (unsigned long long)R.presents, windowMs / 600.0,
+              double(g_cpu.replayNs.exchange(0)) / perFrame, double(g_cpu.lockWaitNs.exchange(0)) / perFrame,
+              double(g_cpu.dawnSubmitNs.exchange(0)) / perFrame,
+              (unsigned long long)((g_stats.draws - s_windowDraws) / 600));
+        s_windowDraws = g_stats.draws;
+        s_windowStartNs = nowNs;
         dklog("pacing, presents %llu-%llu: %llu over 20 ms (longest %.1f ms); acquire %.1f ms avg, %.1f max; "
               "%llu map waits, %.1f ms total, %.1f max",
               (unsigned long long)(R.presents - 599), (unsigned long long)R.presents, (unsigned long long)s_gapSlow,
