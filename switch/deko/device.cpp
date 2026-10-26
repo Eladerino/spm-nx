@@ -22,6 +22,29 @@ extern "C" char* fake_heap_end;
 namespace swdk {
 
 Renderer R;
+Diag g_diag;
+
+// The diagnostic switches (dk.h): one "key=1" per line in UserData/dk_diag.txt, read once here.
+// A line naming a key without "=0" turns it on. The active set is logged so a test log always
+// says which switches the run used.
+void diag_init() {
+    FILE* f = std::fopen("/switch/spm-nx/UserData/dk_diag.txt", "r");
+    if (!f) {
+        dklog("diag: no UserData/dk_diag.txt; all diagnostic switches off");
+        return;
+    }
+    char line[128];
+    while (std::fgets(line, sizeof(line), f)) {
+        const bool off = std::strstr(line, "=0") != nullptr;
+        if (std::strstr(line, "depth_off")) g_diag.depthOff = !off;
+        if (std::strstr(line, "cull_off")) g_diag.cullOff = !off;
+        if (std::strstr(line, "magenta")) g_diag.magenta = !off;
+        if (std::strstr(line, "picdump")) g_diag.picDump = !off;
+    }
+    std::fclose(f);
+    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d", g_diag.depthOff ? 1 : 0,
+          g_diag.cullOff ? 1 : 0, g_diag.magenta ? 1 : 0, g_diag.picDump ? 1 : 0);
+}
 
 namespace {
 
@@ -134,6 +157,7 @@ using namespace swdk;
 
 extern "C" void aurora_switch_dk_init(void) {
     if (R.device) return;
+    diag_init();
     const uint64_t t0 = now_ns();
     const size_t heapBefore = heap_never_used_mib();
     dklog("deko3d renderer: Aurora's WebGPU calls replayed on deko3d; heap never used before the set-up %zu MiB",
