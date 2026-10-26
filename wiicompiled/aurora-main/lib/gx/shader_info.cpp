@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #if !defined(_LIBCPP_VERSION)
 #include <execution>
@@ -710,13 +711,36 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
       buf.append(texcoord_scale(g_gxState.texCoordScales[i]));
     }
   }
+  // NSMBW debugging: NSMBW_UV_LOG logs every staged texture whose texcoord scale disagrees
+  // with its size (checked in the loop below).
+  static const bool uvLogOn = [] {
+    const char* v = std::getenv("NSMBW_UV_LOG");
+    return v != nullptr && v[0] != '0';
+  }();
+  static int uvLogLines = 0;
   for (int i = 0; i < info.sampledTextures.size(); ++i) {
     if (!info.sampledTextures.test(i)) {
       continue;
     }
     const auto& tex = get_texture(static_cast<GXTexMapID>(i));
     // CHECK(tex, "unbound texture {}", i);
-    buf.append(texture_size_bias(tex));
+    const auto sizeBias = texture_size_bias(tex);
+    if (uvLogOn && info.sampledTexCoords.test(i)) {
+      // The shader divides this slot's texture size into the same slot's texcoord scale. For a
+      // normally loaded texture the two agree by construction (scale + 1 == size), so a mismatch
+      // means one of the two state paths went stale.
+      const auto scale = texcoord_scale(g_gxState.texCoordScales[i]);
+      if (scale.x() != sizeBias.x() || scale.y() != sizeBias.y()) {
+        if (uvLogLines < 400) {
+          std::fprintf(stderr, "[uvlog] texmap %u scale %gx%g size %gx%g\n", static_cast<unsigned>(i),
+                       scale.x(), scale.y(), sizeBias.x(), sizeBias.y());
+          if (++uvLogLines == 400) {
+            std::fprintf(stderr, "[uvlog] cap reached\n");
+          }
+        }
+      }
+    }
+    buf.append(sizeBias);
   }
   if (info.zFreeze) {
     // Same z correction effective_projection() folds into ubuf.proj, applied to the reference plane.
