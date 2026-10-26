@@ -182,6 +182,7 @@ struct Diag {
     bool bufDump = false;   // at a few presents (GPU idle), every buffer's size, usage and non-zero bytes  // colour clears of passes with a depth target (the EFB) are magenta
     bool texDump = false;   // the most-sampled textures are read back to files at a few presents
     bool shaderDump = false;   // every translated shader: its WGSL and GLSL are saved as it compiles
+    bool noMerge = false;   // Aurora draw merging off (sets NSMBW_NO_MERGE=1 before the first draw)
 };
 extern Diag g_diag;
 void diag_init();
