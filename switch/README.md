@@ -17,8 +17,8 @@ image, and only its generated C++ is compiled here.
 | SDL 3 on libnx (SwitchWaker's shim + WiiCompiled's extra calls) | compiles, links clean against 3.4.4 headers |
 | Crash handler and logging (`source/spm_switch_init.cpp`) | written |
 | Dawn (Null device + Tint GLSL), Aurora, the translated game | build and link into `spm-nx.nro` |
-| deko3d renderer | written and wired into the build: see "Graphics"; first run on hardware still to come |
-| First boot on hardware | `spm-spike.nro` passed; `spm-nx.nro` next |
+| deko3d renderer | wired into the build and running on hardware: see "Graphics" |
+| First boot on hardware | `spm-nx.nro` boots and plays on hardware |
 
 ## Layout
 

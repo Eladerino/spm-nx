@@ -1,6 +1,6 @@
 # Horizon guest memory: plan
 
-Based on upstream NewSuperPaperBros at `46343ab` (read on 2026-10-24):
+Based on upstream NewSuperPaperBros at `46343ab`:
 `wiicompiled/runtime/include/guest_flat_memory.h`, `src/guest_flat_memory.cpp`
 (Windows + Linux), `src/guest_flat_memory_macos.cpp`, `src/memory.cpp`.
 
@@ -10,8 +10,8 @@ Based on upstream NewSuperPaperBros at `46343ab` (read on 2026-10-24):
   `*(T*)(MKW_FLAT_GUEST_BASE + addr)` plus a byte swap. The base is a
   `constexpr` picked per architecture in `guest_flat_memory.h`. Generic
   AArch64 gets `0x10'0000'0000` (64 GiB). The translator never emits the
-  number itself (I grepped `translator/`, and it only shows up in runtime
-  headers), so a Horizon-specific base is a header change and has no effect
+  number itself (it only shows up in runtime headers), so a
+  Horizon-specific base is a header change and has no effect
   on recompiled code.
 - **Two views of one backing store.** Each backing store (MEM1, MEM2, plus
   "Owned" stores such as the locked cache at `0xE0000000`) is mapped twice:
