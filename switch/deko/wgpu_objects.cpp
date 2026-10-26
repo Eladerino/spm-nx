@@ -681,6 +681,24 @@ void __wrap_wgpuBufferRelease(WGPUBuffer buffer) {
 // The GPU has to be done with the buffer before Aurora writes or reads its memory: Dawn's Null queue
 // finishes everything at once, so the map waits for the newest submit that used the buffer first
 // (the map's callback then comes from Dawn as before).
+}  // extern "C"
+
+namespace swdk::wg {
+namespace {
+std::atomic<uint64_t> g_mapWaits{0}, g_mapWaitNs{0}, g_mapWaitMaxNs{0};
+}  // namespace
+
+MapWaitStats map_wait_stats_take() {
+    MapWaitStats s;
+    s.count = g_mapWaits.exchange(0, std::memory_order_relaxed);
+    s.totalNs = g_mapWaitNs.exchange(0, std::memory_order_relaxed);
+    s.maxNs = g_mapWaitMaxNs.exchange(0, std::memory_order_relaxed);
+    return s;
+}
+}  // namespace swdk::wg
+
+extern "C" {
+
 WGPUFuture __wrap_wgpuBufferMapAsync(WGPUBuffer buffer, WGPUMapMode mode, size_t offset, size_t size,
                                      WGPUBufferMapCallbackInfo callbackInfo) {
     if (auto b = g_buffers.get(buffer)) {
@@ -688,7 +706,13 @@ WGPUFuture __wrap_wgpuBufferMapAsync(WGPUBuffer buffer, WGPUMapMode mode, size_t
         if (serial > completed_serial()) {
             const uint64_t t0 = now_ns();
             wait_serial(serial);
-            const uint64_t ms = (now_ns() - t0) / 1000000;
+            const uint64_t ns = now_ns() - t0;
+            g_mapWaits.fetch_add(1, std::memory_order_relaxed);
+            g_mapWaitNs.fetch_add(ns, std::memory_order_relaxed);
+            uint64_t prev = g_mapWaitMaxNs.load(std::memory_order_relaxed);
+            while (ns > prev && !g_mapWaitMaxNs.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {
+            }
+            const uint64_t ms = ns / 1000000;
             if (ms >= 4) SWDK_LOG_LIMITED(16, "buffers: a map waited %llu ms for the GPU", (unsigned long long)ms);
         }
     }

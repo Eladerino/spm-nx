@@ -106,9 +106,15 @@ void init_swapchain() {
 
 }  // namespace
 
-int swapchain_acquire() {
+int swapchain_acquire(DkFence* fence) {
+    int slot = 0;
+    dkSwapchainAcquireImage(g_swapchain, &slot, fence);
+    return slot;
+}
+
+void swapchain_wait(DkFence* fence) {
     check_queue("acquiring a swapchain image");
-    return dkQueueAcquireImage(R.queue, g_swapchain);
+    dkQueueWaitFence(R.queue, fence);
 }
 
 const DkImage& swapchain_image(int slot) { return g_swapImages[slot]; }

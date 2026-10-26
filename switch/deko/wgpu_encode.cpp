@@ -1170,8 +1170,13 @@ bool aurora_switch_dk_present(void* texture) {
         SWDK_LOG_LIMITED(8, "present: the picture has no deko3d image: nothing shown");
         return false;
     }
+    // (the wait for a free image, up to a vsync, outside the lock: the game's submits go on meanwhile)
+    DkFence imageFence{};
+    const uint64_t a0 = now_ns();
+    const int slot = swapchain_acquire(&imageFence);
+    const uint64_t acquireNs = now_ns() - a0;
     std::lock_guard<std::mutex> lock(queue_mutex());
-    const int slot = swapchain_acquire();
+    swapchain_wait(&imageFence);
     const DkImage& target = swapchain_image(slot);
     DkImageView dst;
     dkImageViewDefaults(&dst, &target);
@@ -1210,6 +1215,27 @@ bool aurora_switch_dk_present(void* texture) {
     flush();
     if (g_diag.bufDump) buf_dump_maybe(presentCall);
     swapchain_present(slot);
+    // frame pacing over the last 600 presents: the gaps between presents, the acquire waits and the
+    // buffer maps' waits for the GPU (wgpu_objects.cpp)
+    static uint64_t s_lastPresentNs = 0, s_gapMaxNs = 0, s_gapSlow = 0, s_acquireNs = 0, s_acquireMaxNs = 0;
+    const uint64_t nowNs = now_ns();
+    if (s_lastPresentNs) {
+        const uint64_t gap = nowNs - s_lastPresentNs;
+        s_gapMaxNs = std::max(s_gapMaxNs, gap);
+        if (gap > 20'000'000) s_gapSlow++;  // a frame missed (60 Hz: 16.7 ms)
+    }
+    s_lastPresentNs = nowNs;
+    s_acquireNs += acquireNs;
+    s_acquireMaxNs = std::max(s_acquireMaxNs, acquireNs);
+    if (R.presents % 600 == 0) {
+        const MapWaitStats mw = map_wait_stats_take();
+        dklog("pacing, presents %llu-%llu: %llu over 20 ms (longest %.1f ms); acquire %.1f ms avg, %.1f max; "
+              "%llu map waits, %.1f ms total, %.1f max",
+              (unsigned long long)(R.presents - 599), (unsigned long long)R.presents, (unsigned long long)s_gapSlow,
+              double(s_gapMaxNs) / 1e6, double(s_acquireNs) / 600e6, double(s_acquireMaxNs) / 1e6,
+              (unsigned long long)mw.count, double(mw.totalNs) / 1e6, double(mw.maxNs) / 1e6);
+        s_gapMaxNs = s_gapSlow = s_acquireNs = s_acquireMaxNs = 0;
+    }
     if (R.presents == 1 || R.presents % 3600 == 0) {
         const MemoryStats m = memory_stats();
         const ShaderStats s = shader_stats();
