@@ -84,7 +84,10 @@ TranslateResult wgsl_to_glsl(const std::string& wgsl, const std::string& request
     options.disable_robustness = true;
     options.depth_zero_to_one = true;
     options.disable_position_y_negation = true;
-    options.use_uniform_buffers = true;
+    // Uniforms as array<vec4u, N> read by byte offset, which keeps WGSL's layout. Used directly they
+    // become std140 blocks, and Tint only fixes matrices for std140: Aurora's GX uniform has an
+    // array<u32, 12> (stride 4 in WGSL, 16 in std140) that would shift every member after it.
+    options.use_uniform_buffers = false;
     options.strip_all_names = false;
     options.disable_polyfill_integer_div_mod = false;
     options.placeholder_sampler_bind_point = {kNoSamplerGroup, 0};

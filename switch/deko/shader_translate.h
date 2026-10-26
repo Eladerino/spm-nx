@@ -28,7 +28,7 @@ namespace swdk {
 enum class ShaderStage : uint8_t { Vertex = 0, Fragment = 4, Compute = 5 };
 
 // Changes whenever this file's output for the same input changes: part of the cache file's id.
-constexpr uint32_t kTranslateRevision = 1;
+constexpr uint32_t kTranslateRevision = 2;
 
 // a texture used without a sampler (textureLoad): the renderer binds its nearest sampler
 constexpr uint32_t kNoSamplerGroup = 1000;
