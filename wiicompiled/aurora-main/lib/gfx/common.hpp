@@ -313,14 +313,17 @@ private:
 void seal_frame(SealedFrame& out) noexcept;
 
 // NSMBW stage timers (env NSMBW_STAGE_TIMERS, set by the Switch dk_diag perftimer
-// switch): while on, the producer's FIFO process() time (lib/gx/fifo.cpp) and the
-// frame worker's encode time (lib/aurora.cpp) are accumulated in common.cpp beside
-// the staging map wait, and stage_time_add_encode prints one [frametime] line every
-// 600 encoded frames. All three functions are cheap no-ops while the toggle is off:
-// callers gate their clock reads on stage_timers_enabled().
+// switch): while on, the producer's FIFO process() time and the sealed wait at the
+// drain head (lib/gx/fifo.cpp), the frame worker's encode time, and the game thread's
+// whole frame span (lib/aurora.cpp) are accumulated in common.cpp beside the staging
+// map wait, and stage_time_add_encode prints one [frametime] line every 600 encoded
+// frames. All the functions are cheap no-ops while the toggle is off: callers gate
+// their clock reads on stage_timers_enabled().
 bool stage_timers_enabled() noexcept;
 void stage_time_add_producer(std::chrono::nanoseconds duration) noexcept;
 void stage_time_add_encode(std::chrono::nanoseconds duration) noexcept;
+void stage_time_add_sealedwait(std::chrono::nanoseconds duration) noexcept;
+void stage_time_add_frametotal(std::chrono::nanoseconds duration) noexcept;
 
 // Encode a sealed frame. Never touches the producer-visible recording state,
 // so this may run concurrently with the producer's FIFO drains.

@@ -76,6 +76,11 @@ static void note_drain_wait(uint64_t nanos) noexcept {
 void drain() {
   // SEALED, not DONE.
   const auto waited = aurora::wait_for_frame_worker_sealed();
+  // NSMBW stage timers: the wait above is the game thread blocked on the frame worker;
+  // wait_for_frame_worker_sealed returns its duration, so no clock read is needed here.
+  if (gfx::stage_timers_enabled()) {
+    gfx::stage_time_add_sealedwait(waited);
+  }
   if (waited.count() > 0) UNLIKELY {
     note_drain_wait(static_cast<uint64_t>(waited.count()));
   }

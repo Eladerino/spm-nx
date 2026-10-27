@@ -314,9 +314,10 @@ void ensure_staging_space(const StagingSizes& demand) {
     throw StagingCapacityError("GPU operation still exceeds staging capacity after submission");
 }
 
-// NSMBW stage timers: NSMBW_STAGE_TIMERS accumulates the three Aurora stage costs no
-// [dk] line measures: the producer's FIFO process() time (hooked in lib/gx/fifo.cpp),
-// the staging map wait below, and the frame worker's encode time (lib/aurora.cpp).
+// NSMBW stage timers: NSMBW_STAGE_TIMERS accumulates the Aurora stage costs no
+// [dk] line measures: the producer's FIFO process() time and the sealed wait at the
+// drain head (hooked in lib/gx/fifo.cpp), the staging map wait below, the frame
+// worker's encode time, and the game thread's whole frame span (lib/aurora.cpp).
 // The encode hook is called exactly once per frame, so it owns the 600-frame window
 // print. Adds are relaxed atomic increments so the two threads never lock; while the
 // toggle is off, callers skip their clock reads and these are never called.
@@ -332,6 +333,8 @@ namespace {
 std::atomic<uint64_t> g_stageProducerNs{0};
 std::atomic<uint64_t> g_stageMapWaitNs{0};
 std::atomic<uint64_t> g_stageEncodeNs{0};
+std::atomic<uint64_t> g_stageSealedWaitNs{0};
+std::atomic<uint64_t> g_stageFrameTotalNs{0};
 
 void stage_time_add_map_wait(std::chrono::nanoseconds duration) noexcept {
   g_stageMapWaitNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
@@ -342,12 +345,22 @@ void stage_time_add_producer(std::chrono::nanoseconds duration) noexcept {
   g_stageProducerNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
 }
 
+void stage_time_add_sealedwait(std::chrono::nanoseconds duration) noexcept {
+  g_stageSealedWaitNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
+}
+
+void stage_time_add_frametotal(std::chrono::nanoseconds duration) noexcept {
+  g_stageFrameTotalNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
+}
+
 void stage_time_add_encode(std::chrono::nanoseconds duration) noexcept {
   g_stageEncodeNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
   static std::atomic<uint64_t> s_stageFrameCount{0};
   static uint64_t s_printedProducerNs = 0;
   static uint64_t s_printedMapWaitNs = 0;
   static uint64_t s_printedEncodeNs = 0;
+  static uint64_t s_printedSealedWaitNs = 0;
+  static uint64_t s_printedFrameTotalNs = 0;
   const uint64_t frame = s_stageFrameCount.fetch_add(1, std::memory_order_relaxed) + 1;
   if (frame % 600 != 0) {
     return;
@@ -355,14 +368,21 @@ void stage_time_add_encode(std::chrono::nanoseconds duration) noexcept {
   const uint64_t producerNs = g_stageProducerNs.load(std::memory_order_relaxed);
   const uint64_t mapWaitNs = g_stageMapWaitNs.load(std::memory_order_relaxed);
   const uint64_t encodeNs = g_stageEncodeNs.load(std::memory_order_relaxed);
+  const uint64_t sealedWaitNs = g_stageSealedWaitNs.load(std::memory_order_relaxed);
+  const uint64_t frameTotalNs = g_stageFrameTotalNs.load(std::memory_order_relaxed);
   const auto ms = [](uint64_t ns) { return static_cast<double>(ns) / 1'000'000.0; };
-  std::fprintf(stderr, "[frametime] frames %llu-%llu: producer %.1f ms (mapwait %.1f ms), encode %.1f ms\n",
+  std::fprintf(stderr,
+               "[frametime] frames %llu-%llu: producer %.1f ms (mapwait %.1f ms), encode %.1f ms, sealedwait %.1f "
+               "ms, frametotal %.1f ms\n",
                static_cast<unsigned long long>(frame - 599), static_cast<unsigned long long>(frame),
                ms(producerNs - s_printedProducerNs), ms(mapWaitNs - s_printedMapWaitNs),
-               ms(encodeNs - s_printedEncodeNs));
+               ms(encodeNs - s_printedEncodeNs), ms(sealedWaitNs - s_printedSealedWaitNs),
+               ms(frameTotalNs - s_printedFrameTotalNs));
   s_printedProducerNs = producerNs;
   s_printedMapWaitNs = mapWaitNs;
   s_printedEncodeNs = encodeNs;
+  s_printedSealedWaitNs = sealedWaitNs;
+  s_printedFrameTotalNs = frameTotalNs;
 }
 
 static void discard_suspended_efb_pass() noexcept {
