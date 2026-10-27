@@ -2895,6 +2895,21 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
     const char* v = std::getenv("NSMBW_NO_MERGE");
     return v == nullptr ? 0 : std::atoi(v);
   }();
+  // NSMBW debugging: NSMBW_ARRAY_REUPLOAD forces every draw to re-upload its vertex arrays.
+  static const bool arrayReupload = [] {
+    const char* v = std::getenv("NSMBW_ARRAY_REUPLOAD");
+    return v != nullptr && v[0] != '0';
+  }();
+  if (arrayReupload) {
+    // The invalidation GXInvalidateVtxCache performs, applied before every draw: staged array
+    // uploads stop being valid, every cached upload is dropped, and the forced dirty state
+    // routes even a would-be-merged draw through handle_draw_unmerged's fresh upload.
+    ++g_arrayUploadEpoch;
+    for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+      g_gxState.arrays[i].cachedRange = {};
+    }
+    g_gxState.stateDirty = true;
+  }
   // 1: never merge; 2: not while drawing into the EFB below line 456 (light textures, tile frames);
   // 3: only there.
   const bool scratch =
