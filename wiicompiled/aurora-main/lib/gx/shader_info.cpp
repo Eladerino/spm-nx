@@ -663,7 +663,9 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
     const auto stagedMtx = [&](u32 i, std::array<float, 12>& out) {
       std::memcpy(out.data(), staged.data() + positionOffset + i * sizeof(Mat3x4<float>), sizeof(out));
     };
-    static constexpr std::array<float, 12> kIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    // GX texture matrices are effectively 2x4; the staged third row is unused, so the
+    // identity test covers the first two rows only.
+    static constexpr std::array<float, 8> kIdentity2x4 = {1, 0, 0, 0, 0, 1, 0, 0};
     bool logDraw = g_gxState.currentPnMtx != 0;
     for (u32 i = 0; i < layout.postexCount && !logDraw; ++i) {
       if (stagedSlot(i) < MaxPnMtx) {
@@ -671,9 +673,9 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
       }
       std::array<float, 12> v;
       stagedMtx(i, v);
-      logDraw = v != kIdentity;
+      logDraw = !std::equal(v.begin(), v.begin() + 8, kIdentity2x4.begin());
     }
-    if (logDraw && mtxLogLines < 1500) {
+    if (logDraw && mtxLogLines < 100000) {
       std::fprintf(stderr, "[mtxlog] draw %llu pn %u postex %u:", drawNo,
                    static_cast<unsigned>(g_gxState.currentPnMtx),
                    static_cast<unsigned>(layout.postexCount));
@@ -685,7 +687,7 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
                      v[8], v[9], v[10], v[11]);
       }
       std::fprintf(stderr, "\n");
-      if (++mtxLogLines == 1500) {
+      if (++mtxLogLines == 100000) {
         std::fprintf(stderr, "[mtxlog] cap reached\n");
       }
     }
