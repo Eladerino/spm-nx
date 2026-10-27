@@ -1850,6 +1850,9 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
       presentationJobs = encode_sealed_frame(sealedFrame, ctx);
     }
     encoded = WorkerClock::now();
+    if (!overlapEncode && gfx::stage_timers_enabled()) {
+      gfx::stage_time_add_encode(encoded - sealed);
+    }
   }
   if (!overlapEncode) {
     publish_presentations(std::move(presentationJobs), ctx.interpolationActive);
@@ -1903,7 +1906,12 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
   if (overlapEncode) {
     // Mutex-free: the producer drains and records the next frame in parallel, taking the renderer
     // mutex per drain, and this phase never takes it.
+    const bool timeEncode = gfx::stage_timers_enabled();
+    const auto encodeStart = timeEncode ? WorkerClock::now() : WorkerClock::time_point{};
     presentationJobs = encode_sealed_frame(sealedFrame, ctx);
+    if (timeEncode) {
+      gfx::stage_time_add_encode(WorkerClock::now() - encodeStart);
+    }
     publish_presentations(std::move(presentationJobs), ctx.interpolationActive);
     if (imguiNewFrameOwed) {
       // Safe only now: every slot has replayed this frame's ImGui draw lists.
@@ -1938,7 +1946,13 @@ void end_frame_impl(bool pumpEvents, bool drainFifo) {
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
     seal_frame_locked(sealedFrame, ctx);
+    const bool timeEncode = gfx::stage_timers_enabled();
+    const auto encodeStart =
+        timeEncode ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     presentationJobs = encode_sealed_frame(sealedFrame, ctx);
+    if (timeEncode) {
+      gfx::stage_time_add_encode(std::chrono::steady_clock::now() - encodeStart);
+    }
   }
   publish_presentations(std::move(presentationJobs), ctx.interpolationActive);
   record_frame_telemetry();

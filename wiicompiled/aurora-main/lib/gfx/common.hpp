@@ -4,6 +4,7 @@
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -310,6 +311,16 @@ private:
 // Detach the recorded passes of the frame that just ended into `out`. Must be
 // called with the renderer GPU mutex held; see SealedFrame.
 void seal_frame(SealedFrame& out) noexcept;
+
+// NSMBW stage timers (env NSMBW_STAGE_TIMERS, set by the Switch dk_diag perftimer
+// switch): while on, the producer's FIFO process() time (lib/gx/fifo.cpp) and the
+// frame worker's encode time (lib/aurora.cpp) are accumulated in common.cpp beside
+// the staging map wait, and stage_time_add_encode prints one [frametime] line every
+// 600 encoded frames. All three functions are cheap no-ops while the toggle is off:
+// callers gate their clock reads on stage_timers_enabled().
+bool stage_timers_enabled() noexcept;
+void stage_time_add_producer(std::chrono::nanoseconds duration) noexcept;
+void stage_time_add_encode(std::chrono::nanoseconds duration) noexcept;
 
 // Encode a sealed frame. Never touches the producer-visible recording state,
 // so this may run concurrently with the producer's FIFO drains.

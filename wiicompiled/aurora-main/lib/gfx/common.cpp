@@ -314,6 +314,57 @@ void ensure_staging_space(const StagingSizes& demand) {
     throw StagingCapacityError("GPU operation still exceeds staging capacity after submission");
 }
 
+// NSMBW stage timers: NSMBW_STAGE_TIMERS accumulates the three Aurora stage costs no
+// [dk] line measures: the producer's FIFO process() time (hooked in lib/gx/fifo.cpp),
+// the staging map wait below, and the frame worker's encode time (lib/aurora.cpp).
+// The encode hook is called exactly once per frame, so it owns the 600-frame window
+// print. Adds are relaxed atomic increments so the two threads never lock; while the
+// toggle is off, callers skip their clock reads and these are never called.
+bool stage_timers_enabled() noexcept {
+  static const bool enabled = [] {
+    const char* v = std::getenv("NSMBW_STAGE_TIMERS");
+    return v != nullptr && v[0] != '0';
+  }();
+  return enabled;
+}
+
+namespace {
+std::atomic<uint64_t> g_stageProducerNs{0};
+std::atomic<uint64_t> g_stageMapWaitNs{0};
+std::atomic<uint64_t> g_stageEncodeNs{0};
+
+void stage_time_add_map_wait(std::chrono::nanoseconds duration) noexcept {
+  g_stageMapWaitNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
+}
+} // namespace
+
+void stage_time_add_producer(std::chrono::nanoseconds duration) noexcept {
+  g_stageProducerNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
+}
+
+void stage_time_add_encode(std::chrono::nanoseconds duration) noexcept {
+  g_stageEncodeNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
+  static std::atomic<uint64_t> s_stageFrameCount{0};
+  static uint64_t s_printedProducerNs = 0;
+  static uint64_t s_printedMapWaitNs = 0;
+  static uint64_t s_printedEncodeNs = 0;
+  const uint64_t frame = s_stageFrameCount.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (frame % 600 != 0) {
+    return;
+  }
+  const uint64_t producerNs = g_stageProducerNs.load(std::memory_order_relaxed);
+  const uint64_t mapWaitNs = g_stageMapWaitNs.load(std::memory_order_relaxed);
+  const uint64_t encodeNs = g_stageEncodeNs.load(std::memory_order_relaxed);
+  const auto ms = [](uint64_t ns) { return static_cast<double>(ns) / 1'000'000.0; };
+  std::fprintf(stderr, "[frametime] frames %llu-%llu: producer %.1f ms (mapwait %.1f ms), encode %.1f ms\n",
+               static_cast<unsigned long long>(frame - 599), static_cast<unsigned long long>(frame),
+               ms(producerNs - s_printedProducerNs), ms(mapWaitNs - s_printedMapWaitNs),
+               ms(encodeNs - s_printedEncodeNs));
+  s_printedProducerNs = producerNs;
+  s_printedMapWaitNs = mapWaitNs;
+  s_printedEncodeNs = encodeNs;
+}
+
 static void discard_suspended_efb_pass() noexcept {
   if (g_suspendedEfbPass) {
     release_render_pass(*g_suspendedEfbPass);
@@ -1093,6 +1144,9 @@ static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
   ZoneScoped;
   {
     ZoneScopedN("Wait for buffer map");
+    const bool timeMapWait = stage_timers_enabled();
+    const auto mapWaitStart =
+        timeMapWait ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     map_staging_buffer();
     while (true) {
       const auto mappingState = s_mappingState.state();
@@ -1108,11 +1162,17 @@ static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
                    s_beginFrameMapFailCount + 1);
         }
         ++s_beginFrameMapFailCount;
+        if (timeMapWait) {
+          stage_time_add_map_wait(std::chrono::steady_clock::now() - mapWaitStart);
+        }
         return false;
       }
       g_instance.ProcessEvents();
       webgpu::fail_if_device_lost();
       s_mappingState.wait_for_progress();
+    }
+    if (timeMapWait) {
+      stage_time_add_map_wait(std::chrono::steady_clock::now() - mapWaitStart);
     }
   }
   ++g_stagingEpoch;
