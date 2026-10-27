@@ -642,6 +642,55 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
   }
   buf.append(staged.data(), stagedSize);
 
+  // NSMBW debugging: NSMBW_MTX_LOG logs the postex matrices staged for a draw whenever the
+  // draw is not the plain default case (a texture matrix is staged, or the current matrix
+  // index is not 0), so the tiles of one object can be compared for coherence after the fact.
+  static const bool mtxLogOn = [] {
+    const char* v = std::getenv("NSMBW_MTX_LOG");
+    return v != nullptr && v[0] != '0';
+  }();
+  static unsigned long long mtxLogDraws = 0;
+  static int mtxLogLines = 0;
+  if (mtxLogOn) {
+    const unsigned long long drawNo = ++mtxLogDraws;
+    // The staged bytes at positionOffset are the appended values themselves: postexCount
+    // Mat3x4 in layout order, each resolved to a raw matrix memory index exactly as the
+    // staging loop resolved it (0-9 position matrices, 10 and up texture matrices).
+    const auto stagedSlot = [&](u32 i) {
+      return layout.postexSlots[i] == UniformMatrixLayout::kCurrentPnMtx ? currentPostexSlot
+                                                                          : layout.postexSlots[i];
+    };
+    const auto stagedMtx = [&](u32 i, std::array<float, 12>& out) {
+      std::memcpy(out.data(), staged.data() + positionOffset + i * sizeof(Mat3x4<float>), sizeof(out));
+    };
+    static constexpr std::array<float, 12> kIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    bool logDraw = g_gxState.currentPnMtx != 0;
+    for (u32 i = 0; i < layout.postexCount && !logDraw; ++i) {
+      if (stagedSlot(i) < MaxPnMtx) {
+        continue;
+      }
+      std::array<float, 12> v;
+      stagedMtx(i, v);
+      logDraw = v != kIdentity;
+    }
+    if (logDraw && mtxLogLines < 1500) {
+      std::fprintf(stderr, "[mtxlog] draw %llu pn %u postex %u:", drawNo,
+                   static_cast<unsigned>(g_gxState.currentPnMtx),
+                   static_cast<unsigned>(layout.postexCount));
+      for (u32 i = 0; i < layout.postexCount; ++i) {
+        std::array<float, 12> v;
+        stagedMtx(i, v);
+        std::fprintf(stderr, " [%u]=%.3g,%.3g,%.3g,%.3g / %.3g,%.3g,%.3g,%.3g / %.3g,%.3g,%.3g,%.3g",
+                     static_cast<unsigned>(stagedSlot(i)), v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
+                     v[8], v[9], v[10], v[11]);
+      }
+      std::fprintf(stderr, "\n");
+      if (++mtxLogLines == 1500) {
+        std::fprintf(stderr, "[mtxlog] cap reached\n");
+      }
+    }
+  }
+
   const auto loadsTevRegs = info.loadsTevRegRgb | info.loadsTevRegAlpha;
   for (int i = 0; i < loadsTevRegs.size(); ++i) {
     if (loadsTevRegs.test(i)) {
