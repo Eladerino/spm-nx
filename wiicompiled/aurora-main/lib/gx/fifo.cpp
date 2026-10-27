@@ -85,7 +85,15 @@ void drain() {
   uint32_t consumed = 0;
   bool retried = false;
   while (consumed < detail::sBufferSize) {
+    // NSMBW stage timers: process() is the producer's decode + staging work. The
+    // SEALED wait above and any split_staging_batch() between batches stay outside.
+    const bool timeProcess = gfx::stage_timers_enabled();
+    const auto processStart =
+        timeProcess ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto count = process(detail::sBufferData + consumed, detail::sBufferSize - consumed, true);
+    if (timeProcess) {
+      gfx::stage_time_add_producer(std::chrono::steady_clock::now() - processStart);
+    }
     if (count == 0 && retried)
       throw gfx::StagingCapacityError("FIFO draw does not fit after capacity submission");
     consumed += count;

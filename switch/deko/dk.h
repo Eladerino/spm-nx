@@ -185,6 +185,7 @@ struct Diag {
     bool noMerge = false;   // Aurora draw merging off (sets NSMBW_NO_MERGE=1 before the first draw)
     bool uvLog = false;   // Aurora logs staged textures whose texcoord scale and size disagree (sets NSMBW_UV_LOG=1 before the first draw)
     bool mtxLog = false;   // Aurora logs the postex matrices staged per draw (sets NSMBW_MTX_LOG=1 before the first draw)
+    bool perfTimer = false;   // Aurora stage timers: producer, map wait and encode totals every 600 frames (sets NSMBW_STAGE_TIMERS=1 before the first draw)
 };
 extern Diag g_diag;
 void diag_init();
