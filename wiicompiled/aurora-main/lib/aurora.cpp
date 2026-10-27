@@ -1962,7 +1962,25 @@ void end_frame_impl(bool pumpEvents, bool drainFifo) {
 #endif
 }
 
+// NSMBW stage timers: the game thread's whole frame span, stamped at begin_frame()
+// entry and added by end_frame() (stage_time_add_frametotal). The validity flag keeps
+// an unpaired end_frame (or a begin the toggle missed) from adding a garbage span.
+std::chrono::steady_clock::time_point g_stageFrameStart{};
+bool g_stageFrameStartValid = false;
+
+void note_stage_frame_end() noexcept {
+  if (g_stageFrameStartValid && gfx::stage_timers_enabled()) {
+    gfx::stage_time_add_frametotal(std::chrono::steady_clock::now() - g_stageFrameStart);
+  }
+  g_stageFrameStartValid = false;
+}
+
 bool begin_frame() noexcept {
+  // NSMBW stage timers: stamp the frame span before anything else runs.
+  if (gfx::stage_timers_enabled()) {
+    g_stageFrameStart = std::chrono::steady_clock::now();
+    g_stageFrameStartValid = true;
+  }
 #ifdef AURORA_ENABLE_GX
   // The asynchronous fast path below can return a logically prepared frame
   // without entering begin_frame_impl(), so loss must be checked before it.
@@ -2033,6 +2051,7 @@ void end_frame() {
 #endif
   if (!frame_worker_requested()) {
     end_frame_impl(true, true);
+    note_stage_frame_end();
     return;
   }
 
@@ -2053,6 +2072,7 @@ void end_frame() {
     g_frameWorker.prepareAllowed = false;
   }
   g_frameWorker.cv.notify_one();
+  note_stage_frame_end();
 }
 } // namespace
 
