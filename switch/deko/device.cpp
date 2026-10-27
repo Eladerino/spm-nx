@@ -48,6 +48,7 @@ void diag_init() {
         if (std::strstr(line, "uvlog")) g_diag.uvLog = !off;
         if (std::strstr(line, "mtxlog")) g_diag.mtxLog = !off;
         if (std::strstr(line, "perftimer")) g_diag.perfTimer = !off;
+        if (std::strstr(line, "arrayup")) g_diag.arrayUp = !off;
     }
     std::fclose(f);
     // Aurora's command processor reads NSMBW_NO_MERGE once, on the first draw it handles; diag_init
@@ -60,10 +61,13 @@ void diag_init() {
     if (g_diag.mtxLog) setenv("NSMBW_MTX_LOG", "1", 1);
     // Same handshake for NSMBW_STAGE_TIMERS.
     if (g_diag.perfTimer) setenv("NSMBW_STAGE_TIMERS", "1", 1);
-    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d nomerge=%d uvlog=%d mtxlog=%d perftimer=%d",
+    // Same handshake for NSMBW_ARRAY_REUPLOAD: handle_draw reads it once, on the first draw it handles.
+    if (g_diag.arrayUp) setenv("NSMBW_ARRAY_REUPLOAD", "1", 1);
+    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d nomerge=%d uvlog=%d mtxlog=%d perftimer=%d arrayup=%d",
           g_diag.depthOff ? 1 : 0, g_diag.cullOff ? 1 : 0, g_diag.magenta ? 1 : 0, g_diag.picDump ? 1 : 0,
           g_diag.efbClear ? 1 : 0, g_diag.bufDump ? 1 : 0, g_diag.texDump ? 1 : 0, g_diag.shaderDump ? 1 : 0,
-          g_diag.noMerge ? 1 : 0, g_diag.uvLog ? 1 : 0, g_diag.mtxLog ? 1 : 0, g_diag.perfTimer ? 1 : 0);
+          g_diag.noMerge ? 1 : 0, g_diag.uvLog ? 1 : 0, g_diag.mtxLog ? 1 : 0, g_diag.perfTimer ? 1 : 0,
+          g_diag.arrayUp ? 1 : 0);
 }
 
 namespace {

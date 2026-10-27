@@ -186,6 +186,7 @@ struct Diag {
     bool uvLog = false;   // Aurora logs staged textures whose texcoord scale and size disagree (sets NSMBW_UV_LOG=1 before the first draw)
     bool mtxLog = false;   // Aurora logs the postex matrices staged per draw (sets NSMBW_MTX_LOG=1 before the first draw)
     bool perfTimer = false;   // Aurora stage timers: producer, map wait and encode totals every 600 frames (sets NSMBW_STAGE_TIMERS=1 before the first draw)
+    bool arrayUp = false;   // Aurora re-uploads every draw's vertex arrays (sets NSMBW_ARRAY_REUPLOAD=1 before the first draw)
 };
 extern Diag g_diag;
 void diag_init();
