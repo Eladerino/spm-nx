@@ -15,6 +15,7 @@
 #if defined(__SWITCH__)
 // The deko3d renderer (switch/deko) that presents the surfaceless frames.
 #include "deko/dk_aurora.h"
+#include <switch.h>
 #endif
 #endif
 
@@ -306,6 +307,12 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept;
 #endif
 
 void frame_worker_main() noexcept {
+#if defined(__SWITCH__)
+  // Pin the worker to core 2, off the game thread's default core: the encode/submit/present cycle
+  // stays on one core and keeps its caches warm instead of floating over all three application
+  // cores. SwitchWakerHD measured +0.4-0.5 fps from pinning its render thread this way.
+  svcSetThreadCoreMask(CUR_THREAD_HANDLE, 2, 1u << 2);
+#endif
   {
     std::lock_guard lock(g_frameWorker.mutex);
     g_frameWorker.threadId = std::this_thread::get_id();
