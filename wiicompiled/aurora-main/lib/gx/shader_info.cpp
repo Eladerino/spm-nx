@@ -14,6 +14,7 @@
 #endif
 #include <limits>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -651,6 +652,12 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
   }();
   static unsigned long long mtxLogDraws = 0;
   static int mtxLogLines = 0;
+  // Formatted lines accumulate in memory and reach stderr in one bulk write per flush:
+  // writing every fragment straight to the log file made the game unusable on hardware.
+  // The buffer flushes at ~256 KB or every 5000 lines, whichever comes first, so a killed
+  // session loses at most that bounded tail.
+  static std::string mtxLogBuf;
+  static int mtxLogBufLines = 0;
   if (mtxLogOn) {
     const unsigned long long drawNo = ++mtxLogDraws;
     // The staged bytes at positionOffset are the appended values themselves: postexCount
@@ -676,19 +683,42 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
       logDraw = !std::equal(v.begin(), v.begin() + 8, kIdentity2x4.begin());
     }
     if (logDraw && mtxLogLines < 100000) {
-      std::fprintf(stderr, "[mtxlog] draw %llu pn %u postex %u:", drawNo,
-                   static_cast<unsigned>(g_gxState.currentPnMtx),
-                   static_cast<unsigned>(layout.postexCount));
+      if (mtxLogBuf.capacity() == 0) {
+        mtxLogBuf.reserve(256 * 1024 + 4096);
+      }
+      const auto flushMtxLog = [&] {
+        if (!mtxLogBuf.empty()) {
+          std::fwrite(mtxLogBuf.data(), 1, mtxLogBuf.size(), stderr);
+          mtxLogBuf.clear();
+          mtxLogBufLines = 0;
+        }
+      };
+      // Each fragment is formatted with the same format strings the direct fprintf calls
+      // used, then appended; the assembled bytes are identical, only the writes are batched.
+      char frag[1024];
+      const auto appendFrag = [&](int n) {
+        if (n > 0) {
+          mtxLogBuf.append(frag, static_cast<size_t>(std::min(n, static_cast<int>(sizeof(frag) - 1))));
+        }
+      };
+      appendFrag(std::snprintf(frag, sizeof(frag), "[mtxlog] draw %llu pn %u postex %u:", drawNo,
+                               static_cast<unsigned>(g_gxState.currentPnMtx),
+                               static_cast<unsigned>(layout.postexCount)));
       for (u32 i = 0; i < layout.postexCount; ++i) {
         std::array<float, 12> v;
         stagedMtx(i, v);
-        std::fprintf(stderr, " [%u]=%.3g,%.3g,%.3g,%.3g / %.3g,%.3g,%.3g,%.3g / %.3g,%.3g,%.3g,%.3g",
-                     static_cast<unsigned>(stagedSlot(i)), v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
-                     v[8], v[9], v[10], v[11]);
+        appendFrag(std::snprintf(frag, sizeof(frag),
+                                 " [%u]=%.3g,%.3g,%.3g,%.3g / %.3g,%.3g,%.3g,%.3g / %.3g,%.3g,%.3g,%.3g",
+                                 static_cast<unsigned>(stagedSlot(i)), v[0], v[1], v[2], v[3], v[4], v[5],
+                                 v[6], v[7], v[8], v[9], v[10], v[11]));
       }
-      std::fprintf(stderr, "\n");
+      mtxLogBuf += '\n';
+      ++mtxLogBufLines;
       if (++mtxLogLines == 100000) {
-        std::fprintf(stderr, "[mtxlog] cap reached\n");
+        mtxLogBuf += "[mtxlog] cap reached\n";
+        flushMtxLog();
+      } else if (mtxLogBuf.size() >= 256 * 1024 || mtxLogBufLines >= 5000) {
+        flushMtxLog();
       }
     }
   }
