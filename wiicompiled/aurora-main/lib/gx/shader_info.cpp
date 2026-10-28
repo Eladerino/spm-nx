@@ -682,7 +682,7 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
       stagedMtx(i, v);
       logDraw = !std::equal(v.begin(), v.begin() + 8, kIdentity2x4.begin());
     }
-    if (logDraw && mtxLogLines < 100000) {
+    if (logDraw && mtxLogLines < 1000000) {
       if (mtxLogBuf.capacity() == 0) {
         mtxLogBuf.reserve(256 * 1024 + 4096);
       }
@@ -714,7 +714,7 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
       }
       mtxLogBuf += '\n';
       ++mtxLogBufLines;
-      if (++mtxLogLines == 100000) {
+      if (++mtxLogLines == 1000000) {
         mtxLogBuf += "[mtxlog] cap reached\n";
         flushMtxLog();
       } else if (mtxLogBuf.size() >= 256 * 1024 || mtxLogBufLines >= 5000) {
