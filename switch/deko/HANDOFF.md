@@ -46,8 +46,8 @@ serial), barriers and serials.
   comments, and they are written as maintained documentation, not session notes.
 - Diagnostics follow one pattern: a switch in `UserData/dk_diag.txt`, read once at renderer init
   (see `dk.h`). No file, or a switch off, means behaviour identical to a normal build.
-- Changes land as pull requests against main, with the body stating what was actually compiled
-  and tested.
+- Changes land as direct pushes to main, with the commit message stating what was actually
+  compiled and tested.
 
 ## Known limitations
 
