@@ -760,7 +760,7 @@ void pic_dump_maybe(const Tex& t, uint64_t presentCall) {
 // (Tex::sampledBinds, counted in the replay while the switch is on) are copied out and saved
 // under UserData/Logs: a .ppm for plain 4-byte pixel formats, which opens anywhere, and the
 // raw bytes for anything else, with one manifest line per level in the log. Every mip level
-// is dumped, not just level 0: run 9 found level 0 clean on all 18 textures it captured,
+// is dumped, not just level 0: level 0 checks out clean on all 18 textures captured,
 // while the on-screen corruption hits small, distant sprites, which is exactly the content
 // the GPU samples from the deeper levels. A saved level can then be compared with what the
 // screen showed, which separates an upload that was already wrong (the corruption is in the
