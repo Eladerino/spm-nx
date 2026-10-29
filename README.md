@@ -145,3 +145,21 @@ Super Paper Mario and all related characters are trademarks and copyrights of Ni
 project, not affiliated with or endorsed by Nintendo. This repository contains no game code or data; the release
 contains the recompiled program, the community mods credited above and Nintendo character artwork used by the
 launcher, but none of the game's disc data, which is read from your own copy of the game.
+
+## Legal notice
+
+This is an unofficial, non-commercial fan project. It is not affiliated with, endorsed by, or
+sponsored by Nintendo.
+
+Super Paper Mario, Nintendo, and Wii are trademarks of Nintendo. The game, its assets, its
+characters (including Tippi), its music, and its artwork are copyrighted material belonging to
+Nintendo and its respective owners. All rights reserved.
+
+Screenshots in this project's documentation depict Nintendo's game and are shown for identification
+and documentation purposes. The launcher icon artwork is Nintendo's.
+
+The GPLv3 license in this repository applies to the project's own code only. It grants no rights in
+Nintendo's material.
+
+This project distributes no game data. A legally obtained copy of the game is required, and users
+extract the files from their own disc.

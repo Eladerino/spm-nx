@@ -225,3 +225,6 @@ The fork is GPLv3 like upstream. Code taken from SwitchWaker stays MIT and Dawn'
 BSD-3-Clause. The `deko/` interposer is MPL-2.0 (text in `licenses/MPL-2.0.txt`), as is the
 Mozilla CA bundle (`cacert.pem`) the runtime's HTTPS uses. `THIRD_PARTY.md` lists each file and
 its origin.
+
+For the project's position on Nintendo's trademarks and copyrighted material, see the Legal notice
+in the root [`README.md`](../README.md).
