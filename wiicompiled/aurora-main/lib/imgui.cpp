@@ -46,6 +46,7 @@ void create_context() noexcept {
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
   remove_legacy_ini_file(g_config.userPath);
   remove_legacy_ini_file(g_config.cachePath);
   g_imguiLog = std::string{g_config.cachePath} + "/imgui.log";
