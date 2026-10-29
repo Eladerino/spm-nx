@@ -209,9 +209,13 @@ enum {
      HidNpadButton_A | HidNpadButton_B | HidNpadButton_L | HidNpadButton_R)
 #define STICK_ENGAGE 16000   // libnx stick units (of 32767) that start a direction
 #define STICK_RELEASE 10000  // and the level it has to fall back under to end it
+#define NAV_ALT_PRESS_DELAY_MS 50  // the bar is focused first, then the Alt press
+#define NAV_ALT_HOLD_MS 50         // and its release a beat after that
 
 static unsigned g_nav_held;         // nav inputs currently fed to ImGui as held keys
 static bool g_nav_menu_was_open;    // the previous pump found the menu open
+static Uint64 g_nav_alt_down_at;    // tick to queue the menu-layer Alt press; 0 when idle
+static Uint64 g_nav_alt_up_at;      // tick to queue its release; 0 when not pressed
 
 static bool menu_is_open(void) {
     if (spm_settings_menu_open)
@@ -252,6 +256,21 @@ static bool stick_direction(bool held, s32 value, bool positive) {
 // Runs in the pump with g_lock held, after minus_menu_filter; returns the
 // buttons to publish.
 static u64 menu_nav_filter(u64 buttons) {
+    const Uint64 now = SDL_GetTicks();
+    // The synthetic Alt tap is timed rather than edged: ImGui arms its
+    // menu-layer toggle on the press and applies it on the release, at least
+    // a frame apart, and only for the focused window. The overlay focuses
+    // the bar on the first frame it draws, so the press is queued a beat
+    // after the bar appears and the release a beat after that.
+    if (g_nav_alt_down_at != 0 && now >= g_nav_alt_down_at) {
+        g_nav_alt_down_at = 0;
+        queue_key_event(SDL_SCANCODE_LALT, SDLK_LALT, true);
+        g_nav_alt_up_at = now + NAV_ALT_HOLD_MS;
+    }
+    if (g_nav_alt_up_at != 0 && now >= g_nav_alt_up_at) {
+        g_nav_alt_up_at = 0;
+        queue_key_event(SDL_SCANCODE_LALT, SDLK_LALT, false);
+    }
     if (!menu_is_open()) {
         if (g_nav_menu_was_open) {
             // The menu closed under a held input: release every fed key, or
@@ -264,6 +283,14 @@ static u64 menu_nav_filter(u64 buttons) {
         }
         g_nav_menu_was_open = false;
         return buttons;
+    }
+    if (!g_nav_menu_was_open) {
+        // The bar just appeared, and its items sit in ImGui's menu layer,
+        // which keyboard navigation only enters through that Alt tap (the
+        // gamepad route to the layer needs backend gamepad support the
+        // horizon backend does not claim). Nothing else on the console ever
+        // sends Alt, so opening the menu is what sends it.
+        g_nav_alt_down_at = now + NAV_ALT_PRESS_DELAY_MS;
     }
     g_nav_menu_was_open = true;
     unsigned nav = 0;
