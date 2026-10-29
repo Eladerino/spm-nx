@@ -169,27 +169,33 @@ void log_flush();
 void check_queue(const char* before);
 bool env_flag(const char* name, bool def);
 
-// ---- diagnostics (device.cpp): switches from UserData/dk_diag.txt, read once at renderer init ----
+// ---- diagnostics (device.cpp): switches from UserData/dk_diag.txt, read at renderer init ------
 // Runtime diagnostics for the renderer. Each switch disables or exposes one piece of the replay
 // so a single boot can clear a whole suspect, or read state back (the picture, the most-sampled
-// textures) for inspection. No file = every switch off = normal build.
+// textures) for inspection. No file = every switch off = normal build. The fields are atomic:
+// diag_set below flips them at runtime (the settings menu and the dk_cmd.txt channel are the
+// callers), so a switch takes effect from its next use without a reboot.
 struct Diag {
-    bool depthOff = false;  // depth/stencil test and write forced off at every pipeline bind
-    bool cullOff = false;   // rasterizer cull mode forced to None at every pipeline bind
-    bool magenta = false;   // the swapchain image is cleared magenta before every present blit
-    bool picDump = false;   // the picture is read back at a few presents and its content logged
-    bool efbClear = false;
-    bool bufDump = false;   // at a few presents (GPU idle), every buffer's size, usage and non-zero bytes  // colour clears of passes with a depth target (the EFB) are magenta
-    bool texDump = false;   // the most-sampled textures are read back to files at a few presents
-    bool shaderDump = false;   // every translated shader: its WGSL and GLSL are saved as it compiles
-    bool noMerge = false;   // Aurora draw merging off (sets NSMBW_NO_MERGE=1 before the first draw)
-    bool uvLog = false;   // Aurora logs staged textures whose texcoord scale and size disagree (sets NSMBW_UV_LOG=1 before the first draw)
-    bool mtxLog = false;   // Aurora logs the postex matrices staged per draw (sets NSMBW_MTX_LOG=1 before the first draw)
-    bool perfTimer = false;   // Aurora stage timers: producer, map wait and encode totals every 600 frames (sets NSMBW_STAGE_TIMERS=1 before the first draw)
-    bool arrayUp = false;   // Aurora re-uploads every draw's vertex arrays (sets NSMBW_ARRAY_REUPLOAD=1 before the first draw)
+    std::atomic<bool> depthOff = false;  // depth/stencil test and write forced off at every pipeline bind
+    std::atomic<bool> cullOff = false;   // rasterizer cull mode forced to None at every pipeline bind
+    std::atomic<bool> magenta = false;   // the swapchain image is cleared magenta before every present blit
+    std::atomic<bool> picDump = false;   // the picture is read back at a few presents and its content logged
+    std::atomic<bool> efbClear = false;
+    std::atomic<bool> bufDump = false;   // at a few presents (GPU idle), every buffer's size, usage and non-zero bytes  // colour clears of passes with a depth target (the EFB) are magenta
+    std::atomic<bool> texDump = false;   // the most-sampled textures are read back to files at a few presents
+    std::atomic<bool> shaderDump = false;   // every translated shader: its WGSL and GLSL are saved as it compiles
+    std::atomic<bool> noMerge = false;   // Aurora draw merging off (sets NSMBW_NO_MERGE=1 before the first draw)
+    std::atomic<bool> uvLog = false;   // Aurora logs staged textures whose texcoord scale and size disagree (sets NSMBW_UV_LOG=1 before the first draw)
+    std::atomic<bool> mtxLog = false;   // Aurora logs the postex matrices staged per draw (sets NSMBW_MTX_LOG=1 before the first draw)
+    std::atomic<bool> perfTimer = false;   // Aurora stage timers: producer, map wait and encode totals every 600 frames (sets NSMBW_STAGE_TIMERS=1 before the first draw)
+    std::atomic<bool> arrayUp = false;   // Aurora re-uploads every draw's vertex arrays (sets NSMBW_ARRAY_REUPLOAD=1 before the first draw)
 };
 extern Diag g_diag;
 void diag_init();
+// Sets one switch by its dk_diag.txt name ("depth_off", "nomerge", ...), at runtime: the
+// interposer switches flip here, the five Aurora switches are forwarded to Aurora's own flags
+// (dk_aurora.h). False for an unknown name. Any thread.
+bool diag_set(const char* key, bool on);
 
 inline uint64_t now_ns() {
     uint64_t ticks;

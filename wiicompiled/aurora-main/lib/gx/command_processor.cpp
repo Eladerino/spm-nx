@@ -2843,6 +2843,30 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
   return true;
 }
 
+// NSMBW debugging switches (draw merging, vertex-array re-upload): each flag's storage,
+// initialised from its env var on first use (the Switch side setenvs them before the first
+// draw) and settable at runtime afterwards through the setters below. These are the storage
+// the one-time getenv latches inside handle_draw used to be.
+static std::atomic<int>& no_merge_mode_flag() {
+  static std::atomic<int> mode = [] {
+    const char* v = std::getenv("NSMBW_NO_MERGE");
+    return v == nullptr ? 0 : std::atoi(v);
+  }();
+  return mode;
+}
+
+static std::atomic<bool>& array_reupload_flag() {
+  static std::atomic<bool> flag = [] {
+    const char* v = std::getenv("NSMBW_ARRAY_REUPLOAD");
+    return v != nullptr && v[0] != '0';
+  }();
+  return flag;
+}
+
+void nsmbw_set_no_merge(int mode) { no_merge_mode_flag().store(mode, std::memory_order_relaxed); }
+
+void nsmbw_set_array_reupload(bool on) { array_reupload_flag().store(on, std::memory_order_relaxed); }
+
 static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndian) {
   ZoneScoped;
   g_statDraws.fetch_add(1, std::memory_order_relaxed);
@@ -2890,16 +2914,10 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   }
 
   DrawData* mergeTarget = nullptr;
-  // NSMBW debugging: NSMBW_NO_MERGE turns draw merging off.
-  static const int noMergeMode = [] {
-    const char* v = std::getenv("NSMBW_NO_MERGE");
-    return v == nullptr ? 0 : std::atoi(v);
-  }();
+  // NSMBW debugging: NSMBW_NO_MERGE turns draw merging off (runtime-settable, above).
+  const int noMergeMode = no_merge_mode_flag().load(std::memory_order_relaxed);
   // NSMBW debugging: NSMBW_ARRAY_REUPLOAD forces every draw to re-upload its vertex arrays.
-  static const bool arrayReupload = [] {
-    const char* v = std::getenv("NSMBW_ARRAY_REUPLOAD");
-    return v != nullptr && v[0] != '0';
-  }();
+  const bool arrayReupload = array_reupload_flag().load(std::memory_order_relaxed);
   if (arrayReupload) {
     // The invalidation GXInvalidateVtxCache performs, applied before every draw: staged array
     // uploads stop being valid, every cached upload is dropped, and the forced dirty state

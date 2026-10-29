@@ -15,6 +15,12 @@ extern bool g_replayingDisplayList;
 // Process a buffer of GX FIFO commands
 uint32_t process(const uint8_t* data, uint32_t size, bool bigEndian);
 
+// NSMBW debugging: the runtime setters for the draw-merging mode and the vertex-array
+// re-upload switch (handle_draw in command_processor.cpp). Each flag still initialises from
+// its env var (NSMBW_NO_MERGE / NSMBW_ARRAY_REUPLOAD) on first use.
+void nsmbw_set_no_merge(int mode);
+void nsmbw_set_array_reupload(bool on);
+
 // Submit already-packed direct vertex bytes against the current GX state.
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
                      uint32_t vertexBytes);
