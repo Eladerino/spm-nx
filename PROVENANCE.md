@@ -2,7 +2,7 @@
 
 This fork carries a few binary files that are not built from source in this repository. This page says
 where each one came from, what is inside it, and how sure we are, so the question "is anything in here
-derived from Nintendo's binaries?" has a written answer before the repository goes public.
+derived from Nintendo's binaries?" has a written answer.
 
 Everything listed here arrived in a single upstream commit, `b873f0b` ("New Super Paper Bros.: native
 PC port of Super Paper Mario", JosiahG, 2026-10-17), which squashes earlier history. So git cannot tell
@@ -52,7 +52,7 @@ Checks were run on 2026-10-24 against `dolphin-emu/dolphin` master.
   (4.8 MB, 1156 rows of GX render-state descriptions recorded by Aurora while a game was being
   played). Which game it was recorded from was never certain, which made it the
   weakest-provenance file on this list.
-- It was removed in the pre-release cleanup, and nothing replaces it: the package ships no
+- It has been removed, and nothing replaces it: the package ships no
   pipeline cache seed. Aurora logs that no bundled cache was found, builds pipelines as they
   come up (some stutter the first time an effect appears), and keeps the cache it builds on
   the SD card for later runs.
@@ -64,8 +64,7 @@ Checks were run on 2026-10-24 against `dolphin-emu/dolphin` master.
 
 - Mozilla's root certificate store as extracted by curl (header: "Certificate data from Mozilla as of: Thu
   Aug 13 03:12:01 2026 GMT", from https://curl.se/docs/caextract.html). Used for the runtime's HTTPS.
-- License: MPL-2.0. Not related to Nintendo. It is not listed in `wiicompiled/THIRD-PARTY-NOTICES.md` yet, which is
-  worth fixing before a public release.
+- License: MPL-2.0. Not related to Nintendo. It is listed in `wiicompiled/THIRD-PARTY-NOTICES.md`.
 
 ## Mario Kart Wii test payload: `payload.RMCPD00.bin`
 
