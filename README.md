@@ -139,6 +139,10 @@ the result for Horizon instead of Windows.
 
 Full credits and licenses ship in the release as `CREDITS.txt`, `LICENSE.txt` and `engine\licenses\`.
 
+## AI assistance
+
+This project is developed with help from AI coding tools. All code is reviewed and tested by the maintainer before it is committed.
+
 ## License
 
 GPLv3, see [`LICENSE`](LICENSE). Bundled third-party components keep their own licenses.
