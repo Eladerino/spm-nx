@@ -81,6 +81,12 @@ else
         cp "$work/build/spm-nx.nro" "$work/build/dsp_coef.bin" "$work/build/initial_pipeline_cache.db" \
             "$work/build/cacert.pem" "$dest/"
         cp -r "$work/build/wii_bootstrap" "$dest/"
+        # The license pack travels with the binary: the root LICENSE (GPLv3), the third-party
+        # notices, the upstream credits and the Switch layer's own notices and license texts.
+        mkdir -p "$dest/licenses"
+        cp "$root/LICENSE" "$root/wiicompiled/THIRD-PARTY-NOTICES.md" "$root/tools/CREDITS.txt" \
+            "$root/switch/THIRD_PARTY.md" "$dest/licenses/"
+        cp "$root"/switch/licenses/*.txt "$dest/licenses/"
         echo "COPIED to $dest ($(date -r "$dest/spm-nx.nro" '+%Y-%m-%d %H:%M'))"
         echo "drag its switch folder onto the SD card, then launch with title takeover"
     elif [[ $out != none ]]; then
