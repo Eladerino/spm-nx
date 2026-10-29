@@ -56,6 +56,9 @@ mapping keeps the same jobs on the Switch buttons:
 
 - **Doors.** The open animation of the game's large doors renders bigger than the door itself
   and off centre. It is visual only; the door still works. The cause is under investigation.
+- **Title card.** The startup title card does not show a button icon at its continue prompt;
+  press A to continue. The card also lists F10 and F11 shortcuts from the PC version; they do
+  not apply on Switch.
 - **Performance.** The port is CPU-bound: the translated game code, not the renderer, sets the
   frame rate. At a high CPU overclock (around 1963 MHz) lighter 2D areas run at or near 60 fps
   and busy 3D areas around 40 fps. At stock clocks everything runs slower, so a CPU overclock
