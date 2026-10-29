@@ -76,6 +76,15 @@ without one) and your own disc image. The rest of the toolchain (LLVM/MinGW, CMa
 the pinned dependencies are downloaded into the repository's `toolchain\` and
 `wiicompiled\Dependencies\` folders on the first build; nothing else is installed system-wide.
 
+**Preparing the game files.** The translation reads the game's code from `game\main.dol` and the
+pre-linked REL produced by the commands below. `main.dol` must carry two code patches from the
+"SPM High Definition Audio" mod (by Toadette Hack Fan and PaperToadette, with game patches by
+JohnP55): `wiicompiled/projects/spm/recomp.yml` (project `spm-r8pe01`) pins the SHA-256 of the
+patched DOL, and an unpatched `main.dol` from a clean dump does not match it. The mod's
+canonical listing is the Super Paper Mario page of the Dolphin Emulator Wiki, under Enhancements
+("HD Audio Mod"). Get the mod there and follow the mod's own instructions to apply its patches
+to your disc's `main.dol` before copying it into `game\`.
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\build-launcher.ps1
 # Extract your disc image to Disc\DATA (the translation reads the game's code from it):

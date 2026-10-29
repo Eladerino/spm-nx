@@ -82,6 +82,14 @@ python wiicompiled\projects\spm\tools\prelink_spm_rel.py Disc\DATA\files\rel\rel
 powershell -ExecutionPolicy Bypass -File tools\build-spm.ps1
 ```
 
+**A note on `main.dol`.** The `main.dol` you copy in must carry two code patches from the
+"SPM High Definition Audio" mod (by Toadette Hack Fan and PaperToadette, with game patches by
+JohnP55). `wiicompiled/projects/spm/recomp.yml` (project `spm-r8pe01`) pins the SHA-256 of the
+patched DOL, and the translator accepts only that file: a clean dump's unpatched `main.dol`
+does not match the pin. The mod's canonical listing is the Super Paper Mario page of the
+Dolphin Emulator Wiki, under Enhancements ("HD Audio Mod"). Get the mod there and follow the
+mod's own instructions to apply its patches before the copy step above.
+
 `build-spm.ps1` translates roughly 28,000 functions. It uses one job per CPU core by default and
 is the slow step of the whole build. The PC executables it also produces are not used by the
 Switch build; only `wiicompiled\generated\` carries over.
