@@ -1,5 +1,7 @@
 # New Super Paper Bros.
 
+> **This repository is spm-nx**, a Nintendo Switch port of [New Super Paper Bros](https://github.com/josiahg2502-glitch/NewSuperPaperBros) by JosiahG. It carries the Switch port of that project (the deko3d renderer and Horizon support); the original PC project lives at the link above, and full credits are in the [Credits](#credits) section below.
+
 A native PC port of **Super Paper Mario** (Wii, 2007), made by statically recompiling the game's PowerPC code to C++
 with [WiiCompiled](https://github.com/patchzyy/Wiicompiled). No emulator: the game runs as a Windows or Linux program.
 
