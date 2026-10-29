@@ -14,9 +14,15 @@ with [WiiCompiled](https://github.com/patchzyy/Wiicompiled). No emulator: the ga
 
 This fork also runs on a modded Nintendo Switch as a homebrew NRO (`spm-nx.nro`): the game boots
 and plays on hardware, rendered by a deko3d interposer that draws Aurora's WebGPU frames on the
-Switch GPU. It needs the same disc image as the PC build (the translator runs on a PC) and a
-Switch running custom firmware. Building, installing and the state of the port are documented in
-[`switch/README.md`](switch/README.md).
+Switch GPU. The easy path is the release: download it, copy it to the SD card, add the files from
+your own disc, and launch. Building the NRO from source instead is the alternative, and it is
+documented in full as well.
+
+Two things differ from the PC build. The Switch build currently needs the **USA disc (R8PE01,
+revision 0)**; the European disc (R8PP01) is PC-only for now, because only the USA game has been
+translated for the Switch. And there is no launcher on the Switch: the NRO boots straight into
+the game by title takeover, with no Play, Display, Controls or Mods pages. Installing, building
+and the state of the port are documented in [`switch/README.md`](switch/README.md).
 
 ## Features
 
@@ -65,9 +71,10 @@ please report problems in [Issues](../../issues).
 
 ## Building from source
 
-You need Windows, Python 3 and your own disc image. The toolchain (LLVM/MinGW, CMake, the .NET 8 SDK) is downloaded
-into the repository's `toolchain\` and `wiicompiled\Dependencies\` folders on the first build; nothing is installed
-system-wide.
+You need Windows, Python 3, a .NET 8 runtime (a `dotnet` on your PATH: `build-spm.ps1` stops
+without one) and your own disc image. The rest of the toolchain (LLVM/MinGW, CMake, Ninja) and
+the pinned dependencies are downloaded into the repository's `toolchain\` and
+`wiicompiled\Dependencies\` folders on the first build; nothing else is installed system-wide.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\build-launcher.ps1
@@ -100,6 +107,10 @@ for regression checks.
 | `launcher` | The launcher (C# WinForms): disc setup, display options, controls, mods |
 | `launcher/linux` | The same launcher for Linux (C# Avalonia) |
 | `tools` | Build, package and test scripts |
+
+For the Switch build, the translation above is the input: the Building section of
+[`switch/README.md`](switch/README.md) runs the same preparation and translation, then compiles
+the result for Horizon instead of Windows.
 
 ## Credits
 
