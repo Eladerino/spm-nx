@@ -36,7 +36,7 @@ Copy-Item -LiteralPath "$root\Play\SuperPaperMario.exe" -Destination "$engine\ns
 # The exe is the loader; the engine proper is one module per disc region (engine_usa.dll, engine_pal.dll from
 # build-spm.ps1 -Pal), copied with the other DLLs below.
 foreach ($m in 'engine_usa.dll', 'engine_pal.dll') { if (-not (Test-Path -LiteralPath "$root\Play\$m")) { throw "missing ${m}: run build-spm.ps1 (and -Pal)" } }
-foreach ($f in '*.dll', 'dsp_coef.bin', 'initial_pipeline_cache.db', 'portable.txt') { Copy-Item "$root\Play\$f" $engine }
+foreach ($f in '*.dll', 'dsp_coef.bin', 'portable.txt') { Copy-Item "$root\Play\$f" $engine }
 # Dawn (webgpu_dawn.dll) and dxcompiler.dll need the Visual C++ 2015-2022 runtime; ship it app-local (Microsoft's
 # redistributable files) so a PC without the VC++ Redistributable still starts the game.
 foreach ($f in 'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') { Copy-Item "$env:SystemRoot\System32\$f" $engine }

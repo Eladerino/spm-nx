@@ -18,7 +18,7 @@ done
 cp "$root/launcher/linux/publish/New Super Paper Bros" "$stage/"
 cp "$build/usa/build/_deps/png-build/libpng16.so.16" "$engine/"   # the one library the game does not build in
 cp -L "$build/sdl-shared/libSDL3.so.0" "$engine/"                 # the launcher's controller list
-cp "$build/usa/build/dsp_coef.bin" "$build/usa/build/cacert.pem" "$build/usa/build/initial_pipeline_cache.db" "$root/Play/portable.txt" "$engine/"
+cp "$build/usa/build/dsp_coef.bin" "$build/usa/build/cacert.pem" "$root/Play/portable.txt" "$engine/"
 cp -r "$root/Play/startup" "$root/Play/wii_bootstrap" "$engine/"
 # Built-in HQ music: the mod's brstm files that replaced the disc's own (Disc/sound_original keeps the originals).
 for original in "$root"/Disc/sound_original/*.brstm; do
