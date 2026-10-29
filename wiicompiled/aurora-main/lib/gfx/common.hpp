@@ -327,6 +327,10 @@ void stage_time_add_producer(std::chrono::nanoseconds duration) noexcept;
 void stage_time_add_encode(std::chrono::nanoseconds duration) noexcept;
 void stage_time_add_sealedwait(std::chrono::nanoseconds duration) noexcept;
 void stage_time_add_frametotal(std::chrono::nanoseconds duration) noexcept;
+// Prints the current, partial [frametime] window now and re-baselines, so a test segment
+// gets its own numbers instead of whatever window it happened to land in; a no-op while
+// the timers are off.
+void stage_time_print_now();
 
 // Encode a sealed frame. Never touches the producer-visible recording state,
 // so this may run concurrently with the producer's FIFO drains.

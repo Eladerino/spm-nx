@@ -107,6 +107,70 @@ bool diag_set(const char* key, bool on) {
     return true;
 }
 
+// diag_flush_all (dk.h): everything that can be holding diagnostic output lets go of it, in
+// dependency order. Aurora's mtxlog buffer first (its lines are the only ones buffered above
+// stderr), then a partial perftimer window while perftimer is on, so the segment just played
+// gets its own numbers, then the stderr stream itself, which every writer in the process
+// shares. The marker goes last, and is flushed too.
+void diag_flush_all(const char* reason) {
+    aurora::gx::nsmbw_mtxlog_flush();
+    if (g_diag.perfTimer) aurora::gfx::stage_time_print_now();
+    log_flush();
+    std::fprintf(stderr, "[diag] logs flushed (%s) at present %llu\n", reason ? reason : "",
+                 (unsigned long long)R.presents);
+    log_flush();
+}
+
+// The command channel (dk.h): UserData/dk_cmd.txt, one command per write, executed by the
+// present path once per present and truncated whether or not it parsed, so a command can
+// never run twice. Commands:
+//   flush           diag_flush_all, now
+//   mark <text>     a "[diag] mark" line bracketing what follows it in the log, then a flush
+//   set <key> <0|1> diag_set for any dk_diag.txt switch; the flip is logged with its present
+//                   count, so a pulled log shows which state each segment ran under
+// Anything else, an unknown key, or a malformed set logs a [diag] error line and changes
+// nothing. The channel exists so a test run can be driven, and its log flushed, without
+// rebooting to edit dk_diag.txt or waiting out a buffer.
+void diag_cmd_poll() {
+    FILE* f = std::fopen("/switch/spm-nx/UserData/dk_cmd.txt", "r");
+    if (!f) return;
+    char cmd[256];
+    const bool got = std::fgets(cmd, sizeof(cmd), f) != nullptr;
+    std::fclose(f);
+    // Truncate before executing: a command that logs heavily must not meet itself again at
+    // the next present.
+    if (FILE* t = std::fopen("/switch/spm-nx/UserData/dk_cmd.txt", "w")) std::fclose(t);
+    if (!got) return;
+    // One line: drop the newline and any trailing whitespace.
+    size_t len = std::strlen(cmd);
+    while (len > 0 && (cmd[len - 1] == '\n' || cmd[len - 1] == '\r' || cmd[len - 1] == ' ')) cmd[--len] = '\0';
+    if (len == 0) return;
+    const unsigned long long present = (unsigned long long)R.presents;
+    if (!std::strcmp(cmd, "flush")) {
+        diag_flush_all("dk_cmd");
+    } else if (!std::strncmp(cmd, "mark", 4) && (cmd[4] == '\0' || cmd[4] == ' ')) {
+        std::fprintf(stderr, "[diag] mark \"%s\" at present %llu\n", cmd[4] == ' ' ? cmd + 5 : "", present);
+        diag_flush_all("mark");
+    } else if (!std::strncmp(cmd, "set ", 4)) {
+        char key[64];
+        char val[8];
+        if (std::sscanf(cmd + 4, "%63s %7s", key, val) == 2 && (val[0] == '0' || val[0] == '1') &&
+            val[1] == '\0') {
+            if (diag_set(key, val[0] == '1')) {
+                std::fprintf(stderr, "[diag] set %s=%s at present %llu\n", key, val, present);
+            } else {
+                std::fprintf(stderr, "[diag] error: unknown diag switch \"%s\"\n", key);
+            }
+        } else {
+            std::fprintf(stderr, "[diag] error: malformed dk_cmd command \"%s\" (want: set <key> <0|1>)\n", cmd);
+        }
+        log_flush();
+    } else {
+        std::fprintf(stderr, "[diag] error: unknown dk_cmd command \"%s\"\n", cmd);
+        log_flush();
+    }
+}
+
 namespace {
 
 constexpr uint32_t kSwapImages = 3;

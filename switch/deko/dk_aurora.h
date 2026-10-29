@@ -33,6 +33,7 @@ void aurora_switch_dk_shutdown(void);
 namespace aurora::gx {
 void nsmbw_set_mtx_log(bool on);
 void nsmbw_set_uv_log(bool on);
+void nsmbw_mtxlog_flush();
 } // namespace aurora::gx
 namespace aurora::gx::fifo {
 void nsmbw_set_no_merge(int mode);
@@ -40,5 +41,6 @@ void nsmbw_set_array_reupload(bool on);
 } // namespace aurora::gx::fifo
 namespace aurora::gfx {
 void stage_timers_set_enabled(bool on) noexcept;
+void stage_time_print_now();
 } // namespace aurora::gfx
 #endif

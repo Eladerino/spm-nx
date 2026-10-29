@@ -1412,6 +1412,8 @@ bool aurora_switch_dk_present(void* texture) {
               g_renderPipelines.size());
         log_flush();
     }
+    // a dk_cmd.txt command, if one is waiting, runs here: once per present (device.cpp)
+    diag_cmd_poll();
     return true;
 }
 

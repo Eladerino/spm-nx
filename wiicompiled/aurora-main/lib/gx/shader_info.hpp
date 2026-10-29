@@ -21,4 +21,8 @@ u8 color_channel(GXChannelID id) noexcept;
 // Each flag still initialises from its env var (NSMBW_MTX_LOG / NSMBW_UV_LOG) on first use.
 void nsmbw_set_mtx_log(bool on);
 void nsmbw_set_uv_log(bool on);
+
+// Writes the buffered mtxlog lines to stderr now (the buffer otherwise flushes at ~256 KB
+// or 5000 lines, shader_info.cpp); a no-op while the buffer is empty.
+void nsmbw_mtxlog_flush();
 }; // namespace aurora::gx
