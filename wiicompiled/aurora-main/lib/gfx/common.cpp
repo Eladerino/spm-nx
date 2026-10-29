@@ -349,6 +349,45 @@ std::atomic<uint64_t> g_stageMapWaitNs{0};
 std::atomic<uint64_t> g_stageEncodeNs{0};
 std::atomic<uint64_t> g_stageSealedWaitNs{0};
 std::atomic<uint64_t> g_stageFrameTotalNs{0};
+std::atomic<uint64_t> g_stageFrameCount{0};
+
+// The [frametime] print's baselines: each print reports the deltas since the previous one
+// and re-baselines, so an on-demand print (stage_time_print_now) gives the segment just
+// played its own numbers. Guarded by g_stagePrintMutex because the print can now run on
+// the present thread (the Switch side's log flush) as well as here on the encode thread.
+uint64_t s_printedFrame = 0;
+uint64_t s_printedProducerNs = 0;
+uint64_t s_printedMapWaitNs = 0;
+uint64_t s_printedEncodeNs = 0;
+uint64_t s_printedSealedWaitNs = 0;
+uint64_t s_printedFrameTotalNs = 0;
+std::mutex g_stagePrintMutex;
+
+void stage_time_print_window(uint64_t frame) {
+  std::lock_guard<std::mutex> lock(g_stagePrintMutex);
+  if (frame == s_printedFrame) {
+    return; // an on-demand print with no frames encoded since the last one
+  }
+  const uint64_t producerNs = g_stageProducerNs.load(std::memory_order_relaxed);
+  const uint64_t mapWaitNs = g_stageMapWaitNs.load(std::memory_order_relaxed);
+  const uint64_t encodeNs = g_stageEncodeNs.load(std::memory_order_relaxed);
+  const uint64_t sealedWaitNs = g_stageSealedWaitNs.load(std::memory_order_relaxed);
+  const uint64_t frameTotalNs = g_stageFrameTotalNs.load(std::memory_order_relaxed);
+  const auto ms = [](uint64_t ns) { return static_cast<double>(ns) / 1'000'000.0; };
+  std::fprintf(stderr,
+               "[frametime] frames %llu-%llu: producer %.1f ms (mapwait %.1f ms), encode %.1f ms, sealedwait %.1f "
+               "ms, frametotal %.1f ms\n",
+               static_cast<unsigned long long>(s_printedFrame + 1), static_cast<unsigned long long>(frame),
+               ms(producerNs - s_printedProducerNs), ms(mapWaitNs - s_printedMapWaitNs),
+               ms(encodeNs - s_printedEncodeNs), ms(sealedWaitNs - s_printedSealedWaitNs),
+               ms(frameTotalNs - s_printedFrameTotalNs));
+  s_printedFrame = frame;
+  s_printedProducerNs = producerNs;
+  s_printedMapWaitNs = mapWaitNs;
+  s_printedEncodeNs = encodeNs;
+  s_printedSealedWaitNs = sealedWaitNs;
+  s_printedFrameTotalNs = frameTotalNs;
+}
 
 void stage_time_add_map_wait(std::chrono::nanoseconds duration) noexcept {
   g_stageMapWaitNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
@@ -369,34 +408,17 @@ void stage_time_add_frametotal(std::chrono::nanoseconds duration) noexcept {
 
 void stage_time_add_encode(std::chrono::nanoseconds duration) noexcept {
   g_stageEncodeNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
-  static std::atomic<uint64_t> s_stageFrameCount{0};
-  static uint64_t s_printedProducerNs = 0;
-  static uint64_t s_printedMapWaitNs = 0;
-  static uint64_t s_printedEncodeNs = 0;
-  static uint64_t s_printedSealedWaitNs = 0;
-  static uint64_t s_printedFrameTotalNs = 0;
-  const uint64_t frame = s_stageFrameCount.fetch_add(1, std::memory_order_relaxed) + 1;
-  if (frame % 600 != 0) {
+  const uint64_t frame = g_stageFrameCount.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (frame % 600 == 0) {
+    stage_time_print_window(frame);
+  }
+}
+
+void stage_time_print_now() {
+  if (!stage_timers_enabled()) {
     return;
   }
-  const uint64_t producerNs = g_stageProducerNs.load(std::memory_order_relaxed);
-  const uint64_t mapWaitNs = g_stageMapWaitNs.load(std::memory_order_relaxed);
-  const uint64_t encodeNs = g_stageEncodeNs.load(std::memory_order_relaxed);
-  const uint64_t sealedWaitNs = g_stageSealedWaitNs.load(std::memory_order_relaxed);
-  const uint64_t frameTotalNs = g_stageFrameTotalNs.load(std::memory_order_relaxed);
-  const auto ms = [](uint64_t ns) { return static_cast<double>(ns) / 1'000'000.0; };
-  std::fprintf(stderr,
-               "[frametime] frames %llu-%llu: producer %.1f ms (mapwait %.1f ms), encode %.1f ms, sealedwait %.1f "
-               "ms, frametotal %.1f ms\n",
-               static_cast<unsigned long long>(frame - 599), static_cast<unsigned long long>(frame),
-               ms(producerNs - s_printedProducerNs), ms(mapWaitNs - s_printedMapWaitNs),
-               ms(encodeNs - s_printedEncodeNs), ms(sealedWaitNs - s_printedSealedWaitNs),
-               ms(frameTotalNs - s_printedFrameTotalNs));
-  s_printedProducerNs = producerNs;
-  s_printedMapWaitNs = mapWaitNs;
-  s_printedEncodeNs = encodeNs;
-  s_printedSealedWaitNs = sealedWaitNs;
-  s_printedFrameTotalNs = frameTotalNs;
+  stage_time_print_window(g_stageFrameCount.load(std::memory_order_relaxed));
 }
 
 static void discard_suspended_efb_pass() noexcept {

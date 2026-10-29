@@ -196,6 +196,15 @@ void diag_init();
 // interposer switches flip here, the five Aurora switches are forwarded to Aurora's own flags
 // (dk_aurora.h). False for an unknown name. Any thread.
 bool diag_set(const char* key, bool on);
+// Pushes every buffered diagnostic line to UserData/Logs/stderr.log now: Aurora's mtxlog
+// buffer, a partial perftimer window while perftimer is on, the stderr stream itself, and a
+// "[diag] logs flushed (<reason>)" marker last, so the pulled file's tail proves where the
+// flush point was. Any thread.
+void diag_flush_all(const char* reason);
+// The dk_cmd.txt command channel: the present path calls this once per present; when
+// UserData/dk_cmd.txt holds a command it is executed and the file truncated. The commands
+// are listed at diag_cmd_poll in device.cpp.
+void diag_cmd_poll();
 
 inline uint64_t now_ns() {
     uint64_t ticks;

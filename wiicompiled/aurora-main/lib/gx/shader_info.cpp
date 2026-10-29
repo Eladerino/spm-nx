@@ -14,6 +14,7 @@
 #endif
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -599,6 +600,31 @@ void nsmbw_set_mtx_log(bool on) { mtx_log_flag().store(on, std::memory_order_rel
 
 void nsmbw_set_uv_log(bool on) { uv_log_flag().store(on, std::memory_order_relaxed); }
 
+// The mtxlog line buffer, hoisted out of build_uniform so the flush can also run on demand
+// (nsmbw_mtxlog_flush, below): formatted lines accumulate here and reach stderr in one bulk
+// write per flush, because writing every fragment straight to the log file made the game
+// unusable on hardware. The buffer flushes at ~256 KB or every 5000 lines, whichever comes
+// first, so a killed session loses at most that bounded tail. Since the on-demand flush,
+// build_uniform's appends (FIFO thread) and a flush (present thread) can meet here, so both
+// hold g_mtxLogMutex.
+static std::string g_mtxLogBuffer;
+static int g_mtxLogBufferLines = 0;
+static std::mutex g_mtxLogMutex;
+
+// The flush itself, with g_mtxLogMutex already held.
+static void mtxlog_flush_locked() {
+  if (!g_mtxLogBuffer.empty()) {
+    std::fwrite(g_mtxLogBuffer.data(), 1, g_mtxLogBuffer.size(), stderr);
+    g_mtxLogBuffer.clear();
+    g_mtxLogBufferLines = 0;
+  }
+}
+
+void nsmbw_mtxlog_flush() {
+  std::lock_guard<std::mutex> lock(g_mtxLogMutex);
+  mtxlog_flush_locked();
+}
+
 UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
                             const FrameInterpolationDrawIdentity& drawIdentity, bool perspective,
                             uint16_t usedPnMtxMask) noexcept {
@@ -674,12 +700,6 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
   const bool mtxLogOn = mtx_log_flag().load(std::memory_order_relaxed);
   static unsigned long long mtxLogDraws = 0;
   static int mtxLogLines = 0;
-  // Formatted lines accumulate in memory and reach stderr in one bulk write per flush:
-  // writing every fragment straight to the log file made the game unusable on hardware.
-  // The buffer flushes at ~256 KB or every 5000 lines, whichever comes first, so a killed
-  // session loses at most that bounded tail.
-  static std::string mtxLogBuf;
-  static int mtxLogBufLines = 0;
   if (mtxLogOn) {
     const unsigned long long drawNo = ++mtxLogDraws;
     // The staged bytes at positionOffset are the appended values themselves: postexCount
@@ -705,22 +725,16 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
       logDraw = !std::equal(v.begin(), v.begin() + 8, kIdentity2x4.begin());
     }
     if (logDraw && mtxLogLines < 1000000) {
-      if (mtxLogBuf.capacity() == 0) {
-        mtxLogBuf.reserve(256 * 1024 + 4096);
+      std::lock_guard<std::mutex> mtxLock(g_mtxLogMutex);
+      if (g_mtxLogBuffer.capacity() == 0) {
+        g_mtxLogBuffer.reserve(256 * 1024 + 4096);
       }
-      const auto flushMtxLog = [&] {
-        if (!mtxLogBuf.empty()) {
-          std::fwrite(mtxLogBuf.data(), 1, mtxLogBuf.size(), stderr);
-          mtxLogBuf.clear();
-          mtxLogBufLines = 0;
-        }
-      };
       // Each fragment is formatted with the same format strings the direct fprintf calls
       // used, then appended; the assembled bytes are identical, only the writes are batched.
       char frag[1024];
       const auto appendFrag = [&](int n) {
         if (n > 0) {
-          mtxLogBuf.append(frag, static_cast<size_t>(std::min(n, static_cast<int>(sizeof(frag) - 1))));
+          g_mtxLogBuffer.append(frag, static_cast<size_t>(std::min(n, static_cast<int>(sizeof(frag) - 1))));
         }
       };
       appendFrag(std::snprintf(frag, sizeof(frag), "[mtxlog] draw %llu pn %u postex %u:", drawNo,
@@ -734,13 +748,13 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
                                  static_cast<unsigned>(stagedSlot(i)), v[0], v[1], v[2], v[3], v[4], v[5],
                                  v[6], v[7], v[8], v[9], v[10], v[11]));
       }
-      mtxLogBuf += '\n';
-      ++mtxLogBufLines;
+      g_mtxLogBuffer += '\n';
+      ++g_mtxLogBufferLines;
       if (++mtxLogLines == 1000000) {
-        mtxLogBuf += "[mtxlog] cap reached\n";
-        flushMtxLog();
-      } else if (mtxLogBuf.size() >= 256 * 1024 || mtxLogBufLines >= 5000) {
-        flushMtxLog();
+        g_mtxLogBuffer += "[mtxlog] cap reached\n";
+        mtxlog_flush_locked();
+      } else if (g_mtxLogBuffer.size() >= 256 * 1024 || g_mtxLogBufferLines >= 5000) {
+        mtxlog_flush_locked();
       }
     }
   }
