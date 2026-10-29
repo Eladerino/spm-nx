@@ -120,6 +120,61 @@ static void send_rumble(float low, float high) {
     }
 }
 
+// The settings menu opens on F10, a key the console does not have, so a long
+// press of Minus stands in for it (the gesture SwitchWaker uses for its own
+// menu). A short press must stay the game's Minus, and this shim only ever
+// publishes button samples, so a press is held back until it proves short or
+// long: released under the threshold, it is published as a brief press of its
+// own; still down at the threshold, the F10 key events are queued instead and
+// the press is swallowed for as long as it lasts. Holding Minus again closes
+// the menu, because the queued key toggles it.
+#define MINUS_MENU_HOLD_MS 500
+#define MINUS_TAP_MS 50
+
+static Uint64 g_minus_since;      // SDL_GetTicks() when the held press began; 0 when up
+static bool g_minus_consumed;     // the held press already fired the menu
+static Uint64 g_minus_tap_until;  // publish a synthetic short press until this tick
+
+static void queue_f10_tap(void) {
+    for (int i = 0; i < 2; ++i) {
+        SDL_Event event;
+        memset(&event, 0, sizeof event);
+        event.type = i == 0 ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+        event.key.type = event.type;
+        event.key.timestamp = SDL_GetTicks() * 1000000ULL;
+        event.key.scancode = SDL_SCANCODE_F10;
+        event.key.key = SDLK_F10;
+        event.key.down = i == 0;
+        sdl3_shim_queue_event(&event);
+    }
+}
+
+// Runs in the pump with g_lock held; returns the buttons to publish.
+static u64 minus_menu_filter(u64 buttons) {
+    const Uint64 now = SDL_GetTicks();
+    if ((buttons & HidNpadButton_Minus) != 0) {
+        if (!g_minus_consumed) {
+            if (g_minus_since == 0)
+                g_minus_since = now;
+            else if (now - g_minus_since >= MINUS_MENU_HOLD_MS) {
+                g_minus_consumed = true;
+                queue_f10_tap();
+            }
+        }
+    } else {
+        // Released short of the threshold: publish the press on its own for
+        // long enough that a frame's input latch cannot miss it.
+        if (g_minus_since != 0 && !g_minus_consumed)
+            g_minus_tap_until = now + MINUS_TAP_MS;
+        g_minus_since = 0;
+        g_minus_consumed = false;
+    }
+    buttons &= ~(u64)HidNpadButton_Minus;
+    if (now < g_minus_tap_until)
+        buttons |= HidNpadButton_Minus;
+    return buttons;
+}
+
 void sdl3_shim_gamepad_pump(void) {
     if (!g_initialized)
         return;
@@ -133,16 +188,17 @@ void sdl3_shim_gamepad_pump(void) {
     const bool attached = padIsConnected(&g_pad);
     bool connected = attached;
     mutexLock(&g_lock);
-    g_buttons = attached ? padGetButtons(&g_pad) : 0;
+    u64 buttons = attached ? padGetButtons(&g_pad) : 0;
     g_sticks[0] = padGetStickPos(&g_pad, 0);
     g_sticks[1] = padGetStickPos(&g_pad, 1);
     if (cos_switch_debug_input) {
         int32_t sticks[4] = {g_sticks[0].x, g_sticks[0].y, g_sticks[1].x, g_sticks[1].y};
-        if (cos_switch_debug_input(&g_buttons, sticks))
+        if (cos_switch_debug_input(&buttons, sticks))
             connected = true;
         g_sticks[0].x = sticks[0], g_sticks[0].y = sticks[1];
         g_sticks[1].x = sticks[2], g_sticks[1].y = sticks[3];
     }
+    g_buttons = minus_menu_filter(buttons);
     mutexUnlock(&g_lock);
     static int s_attached = -1;
     if ((int)attached != s_attached) {

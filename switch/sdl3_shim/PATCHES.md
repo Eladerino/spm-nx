@@ -6,7 +6,10 @@ calls Aurora makes; WiiCompiled's runtime makes more, so this copy adds them. Ch
 - `sdl3_shim_gamepad.c`: opening the pad is reference counted (`g_open`) so the runtime's gamepad
   and joystick views of the same controller can open and close it independently. New
   `sdl3_shim_gamepad_connected()` and `sdl3_shim_gamepad_if_open()` (declared in `sdl3_shim.h`)
-  let the joystick API in `sdl3_shim_wiicompiled.c` reuse it.
+  let the joystick API in `sdl3_shim_wiicompiled.c` reuse it. A long press of Minus (500 ms)
+  queues synthetic F10 key events so the runtime's settings menu can open on a console with
+  no keyboard; presses are held back until they prove short or long, so a short press still
+  reaches the game as an ordinary brief press and a long one is swallowed.
 - `sdl3_shim_audio.c`: a per-stream gain (starts at 1.0, applied when samples are queued) and
   `SDL_SetAudioStreamGain`, which the runtime's volume setting calls.
 - `sdl3_shim_events.c`: `SDL_PumpEvents`, a public wrapper over the shim's existing pump.
