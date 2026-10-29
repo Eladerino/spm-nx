@@ -51,23 +51,60 @@ void diag_init() {
         if (std::strstr(line, "arrayup")) g_diag.arrayUp = !off;
     }
     std::fclose(f);
-    // Aurora's command processor reads NSMBW_NO_MERGE once, on the first draw it handles; diag_init
-    // runs from webgpu::initialize, before any texture, buffer or draw exists, so setting it here
-    // lands in time. In-process libc env: Aurora's getenv sees what this setenv wrote.
+    // Aurora's switches initialise from these env vars on their first use; diag_init runs from
+    // webgpu::initialize, before any texture, buffer or draw exists, so setting them here lands
+    // in time. In-process libc env: Aurora's getenv sees what this setenv wrote. After init the
+    // values live in Aurora's own flags and diag_set below is what changes them.
     if (g_diag.noMerge) setenv("NSMBW_NO_MERGE", "1", 1);
-    // Same handshake for NSMBW_UV_LOG: build_uniform reads it once, on the first draw it stages.
+    // Same handshake for NSMBW_UV_LOG: build_uniform initialises its flag from it on the first draw it stages.
     if (g_diag.uvLog) setenv("NSMBW_UV_LOG", "1", 1);
     // Same handshake for NSMBW_MTX_LOG.
     if (g_diag.mtxLog) setenv("NSMBW_MTX_LOG", "1", 1);
     // Same handshake for NSMBW_STAGE_TIMERS.
     if (g_diag.perfTimer) setenv("NSMBW_STAGE_TIMERS", "1", 1);
-    // Same handshake for NSMBW_ARRAY_REUPLOAD: handle_draw reads it once, on the first draw it handles.
+    // Same handshake for NSMBW_ARRAY_REUPLOAD: handle_draw initialises its flag from it on the first draw it handles.
     if (g_diag.arrayUp) setenv("NSMBW_ARRAY_REUPLOAD", "1", 1);
     dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d nomerge=%d uvlog=%d mtxlog=%d perftimer=%d arrayup=%d",
           g_diag.depthOff ? 1 : 0, g_diag.cullOff ? 1 : 0, g_diag.magenta ? 1 : 0, g_diag.picDump ? 1 : 0,
           g_diag.efbClear ? 1 : 0, g_diag.bufDump ? 1 : 0, g_diag.texDump ? 1 : 0, g_diag.shaderDump ? 1 : 0,
           g_diag.noMerge ? 1 : 0, g_diag.uvLog ? 1 : 0, g_diag.mtxLog ? 1 : 0, g_diag.perfTimer ? 1 : 0,
           g_diag.arrayUp ? 1 : 0);
+}
+
+// diag_set (dk.h): the runtime path for the same switches. The eight interposer switches are
+// plain field flips (their use sites read g_diag per bind, per present, per compile); the five
+// Aurora switches also forward to Aurora's flags, which initialise from the env vars above and
+// are settable ever since. A flip lands from the switch's next use onward, not at a frame
+// boundary.
+bool diag_set(const char* key, bool on) {
+    if (!key) return false;
+    if (!std::strcmp(key, "depth_off")) g_diag.depthOff = on;
+    else if (!std::strcmp(key, "cull_off")) g_diag.cullOff = on;
+    else if (!std::strcmp(key, "magenta")) g_diag.magenta = on;
+    else if (!std::strcmp(key, "picdump")) g_diag.picDump = on;
+    else if (!std::strcmp(key, "efbclear")) g_diag.efbClear = on;
+    else if (!std::strcmp(key, "bufdump")) g_diag.bufDump = on;
+    else if (!std::strcmp(key, "texdump")) g_diag.texDump = on;
+    else if (!std::strcmp(key, "shaderdump")) g_diag.shaderDump = on;
+    else if (!std::strcmp(key, "nomerge")) {
+        g_diag.noMerge = on;
+        aurora::gx::fifo::nsmbw_set_no_merge(on ? 1 : 0);
+    } else if (!std::strcmp(key, "uvlog")) {
+        g_diag.uvLog = on;
+        aurora::gx::nsmbw_set_uv_log(on);
+    } else if (!std::strcmp(key, "mtxlog")) {
+        g_diag.mtxLog = on;
+        aurora::gx::nsmbw_set_mtx_log(on);
+    } else if (!std::strcmp(key, "perftimer")) {
+        g_diag.perfTimer = on;
+        aurora::gfx::stage_timers_set_enabled(on);
+    } else if (!std::strcmp(key, "arrayup")) {
+        g_diag.arrayUp = on;
+        aurora::gx::fifo::nsmbw_set_array_reupload(on);
+    } else {
+        return false;
+    }
+    return true;
 }
 
 namespace {

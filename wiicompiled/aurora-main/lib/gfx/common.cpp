@@ -321,12 +321,26 @@ void ensure_staging_space(const StagingSizes& demand) {
 // The encode hook is called exactly once per frame, so it owns the 600-frame window
 // print. Adds are relaxed atomic increments so the two threads never lock; while the
 // toggle is off, callers skip their clock reads and these are never called.
-bool stage_timers_enabled() noexcept {
-  static const bool enabled = [] {
+namespace {
+// The toggle's storage: initialised from NSMBW_STAGE_TIMERS on first use (the Switch side
+// setenvs it before the first frame) and settable at runtime afterwards through
+// stage_timers_set_enabled. This is the storage the one-time getenv latch inside
+// stage_timers_enabled used to be.
+std::atomic<bool>& stage_timers_flag() {
+  static std::atomic<bool> flag = [] {
     const char* v = std::getenv("NSMBW_STAGE_TIMERS");
     return v != nullptr && v[0] != '0';
   }();
-  return enabled;
+  return flag;
+}
+} // namespace
+
+bool stage_timers_enabled() noexcept {
+  return stage_timers_flag().load(std::memory_order_relaxed);
+}
+
+void stage_timers_set_enabled(bool on) noexcept {
+  stage_timers_flag().store(on, std::memory_order_relaxed);
 }
 
 namespace {

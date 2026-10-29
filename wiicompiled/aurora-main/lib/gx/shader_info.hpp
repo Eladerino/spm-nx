@@ -16,4 +16,9 @@ UniformRanges build_uniform(const ShaderInfo& info, uint32_t vtxStart, const Bin
                             const FrameInterpolationDrawIdentity& drawIdentity, bool perspective,
                             uint16_t usedPnMtxMask = 1) noexcept;
 u8 color_channel(GXChannelID id) noexcept;
+
+// NSMBW debugging: the runtime setters for the mtxlog and uvlog switches (shader_info.cpp).
+// Each flag still initialises from its env var (NSMBW_MTX_LOG / NSMBW_UV_LOG) on first use.
+void nsmbw_set_mtx_log(bool on);
+void nsmbw_set_uv_log(bool on);
 }; // namespace aurora::gx

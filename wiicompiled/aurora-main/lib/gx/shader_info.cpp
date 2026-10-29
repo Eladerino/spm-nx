@@ -575,6 +575,30 @@ static Mat4x4<float> effective_projection() noexcept {
 }
 } // namespace
 
+// NSMBW debugging switches (mtxlog, uvlog): each flag's storage, initialised from its env
+// var on first use (the Switch side setenvs them before the first draw) and settable at
+// runtime afterwards through the setters below. These are the storage the one-time getenv
+// latches inside build_uniform used to be.
+static std::atomic<bool>& mtx_log_flag() {
+  static std::atomic<bool> flag = [] {
+    const char* v = std::getenv("NSMBW_MTX_LOG");
+    return v != nullptr && v[0] != '0';
+  }();
+  return flag;
+}
+
+static std::atomic<bool>& uv_log_flag() {
+  static std::atomic<bool> flag = [] {
+    const char* v = std::getenv("NSMBW_UV_LOG");
+    return v != nullptr && v[0] != '0';
+  }();
+  return flag;
+}
+
+void nsmbw_set_mtx_log(bool on) { mtx_log_flag().store(on, std::memory_order_relaxed); }
+
+void nsmbw_set_uv_log(bool on) { uv_log_flag().store(on, std::memory_order_relaxed); }
+
 UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGroupRanges& ranges,
                             const FrameInterpolationDrawIdentity& drawIdentity, bool perspective,
                             uint16_t usedPnMtxMask) noexcept {
@@ -646,10 +670,8 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
   // NSMBW debugging: NSMBW_MTX_LOG logs the postex matrices staged for a draw whenever the
   // draw is not the plain default case (a texture matrix is staged, or the current matrix
   // index is not 0), so the tiles of one object can be compared for coherence after the fact.
-  static const bool mtxLogOn = [] {
-    const char* v = std::getenv("NSMBW_MTX_LOG");
-    return v != nullptr && v[0] != '0';
-  }();
+  // Runtime-settable (mtx_log_flag, above).
+  const bool mtxLogOn = mtx_log_flag().load(std::memory_order_relaxed);
   static unsigned long long mtxLogDraws = 0;
   static int mtxLogLines = 0;
   // Formatted lines accumulate in memory and reach stderr in one bulk write per flush:
@@ -793,11 +815,8 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
     }
   }
   // NSMBW debugging: NSMBW_UV_LOG logs every staged texture whose texcoord scale disagrees
-  // with its size (checked in the loop below).
-  static const bool uvLogOn = [] {
-    const char* v = std::getenv("NSMBW_UV_LOG");
-    return v != nullptr && v[0] != '0';
-  }();
+  // with its size (checked in the loop below). Runtime-settable (uv_log_flag, above).
+  const bool uvLogOn = uv_log_flag().load(std::memory_order_relaxed);
   static int uvLogLines = 0;
   for (int i = 0; i < info.sampledTextures.size(); ++i) {
     if (!info.sampledTextures.test(i)) {

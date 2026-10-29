@@ -320,6 +320,9 @@ void seal_frame(SealedFrame& out) noexcept;
 // frames. All the functions are cheap no-ops while the toggle is off: callers gate
 // their clock reads on stage_timers_enabled().
 bool stage_timers_enabled() noexcept;
+// The runtime setter for the same toggle: the flag still initialises from
+// NSMBW_STAGE_TIMERS on first use; this is what changes it afterwards.
+void stage_timers_set_enabled(bool on) noexcept;
 void stage_time_add_producer(std::chrono::nanoseconds duration) noexcept;
 void stage_time_add_encode(std::chrono::nanoseconds duration) noexcept;
 void stage_time_add_sealedwait(std::chrono::nanoseconds duration) noexcept;
