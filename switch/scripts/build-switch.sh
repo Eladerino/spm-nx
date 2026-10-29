@@ -78,7 +78,7 @@ else
     if [[ -n $out && $out != none ]]; then
         dest=$out/switch/spm-nx
         mkdir -p "$dest"
-        cp "$work/build/spm-nx.nro" "$work/build/dsp_coef.bin" "$work/build/initial_pipeline_cache.db" \
+        cp "$work/build/spm-nx.nro" "$work/build/dsp_coef.bin" \
             "$work/build/cacert.pem" "$dest/"
         cp -r "$work/build/wii_bootstrap" "$dest/"
         # The license pack travels with the binary: the root LICENSE (GPLv3), the third-party

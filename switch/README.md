@@ -25,7 +25,7 @@ European disc (R8PP01) does not work with the Switch build yet.
 1. Download the Switch release and unzip it.
 2. Copy the `switch` folder to the root of the SD card. You should end up with
    `sdmc:/switch/spm-nx/` holding `spm-nx.nro`, its companion files (`dsp_coef.bin`,
-   `initial_pipeline_cache.db`, `cacert.pem` and `wii_bootstrap/`) and a `licenses/` folder.
+   `cacert.pem` and `wii_bootstrap/`) and a `licenses/` folder.
 3. Extract your disc image and put the extracted disc (the folder containing `files` and `sys`)
    in `sdmc:/switch/spm-nx/game/`. One way to extract it is the upstream launcher's `--extract`
    command, shown in the root README's "Building from source".
@@ -107,13 +107,17 @@ machine), plus a few GB of disk for the copied sources and build output under `~
 
 After a full build the script also stages the SD card layout for you: under WSL it lands in the
 Windows profile's `Downloads\spm-nx-sd\switch\spm-nx\` (the NRO plus `dsp_coef.bin`,
-`initial_pipeline_cache.db`, `cacert.pem`, `wii_bootstrap/` and a `licenses/` folder). Drag that
+`cacert.pem`, `wii_bootstrap/` and a `licenses/` folder). Drag that
 `switch` folder onto the SD card. (`--out DIR` chooses the staging folder, `--out none` skips
 it; without staging, copy those files from `~/spm-switch/build/` to `sdmc:/switch/spm-nx/` by
 hand.) Put your extracted disc (`Disc\DATA`, the folder with `files` and `sys`) in
 `sdmc:/switch/spm-nx/game/`. Launch it with title takeover (hold R while starting a game), not
 from the album: the applet doesn't get enough memory. Logs land in
 `sdmc:/switch/spm-nx/UserData/Logs/`.
+
+The package ships no prebuilt pipeline cache. On the first run the port builds its pipeline
+cache as new effects appear, so the first session can stutter in places; the cache it builds
+is kept on the SD card and reused, so later runs do not repeat it.
 
 ## Troubleshooting
 

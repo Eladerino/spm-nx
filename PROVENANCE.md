@@ -18,7 +18,6 @@ None of these files is new in this fork. They are all in the public upstream rep
 | --- | --- | --- | --- |
 | `wiicompiled/runtime/assets/dsp/dsp_coef.bin` | Dolphin `Data/Sys/GC/dsp_coef.bin`, GPL-2.0-or-later | No | Byte-identical to Dolphin master |
 | `wiicompiled/runtime/assets/wii/shared2/wc24/**` (12 files) | Dolphin `Data/Sys/Wii/shared2/wc24`, GPL-2.0-or-later | No code or assets; see notes | All 12 byte-identical to Dolphin master |
-| `wiicompiled/runtime/assets/pipeline/initial_pipeline_cache.db` | Recorded by Aurora while a game was played | No code, textures or audio; see notes | Opened and inspected the schema and rows |
 | `wiicompiled/runtime/assets/certs/cacert.pem` | curl's extract of Mozilla's root store, MPL-2.0 | No | File header |
 | `wiicompiled/translator/tests/.../payload.RMCPD00.bin` | RetroWFC payload for Mario Kart Wii, test fixture | Not Nintendo's, but MKW-specific; license unrecorded | Test source; not checked further |
 
@@ -47,27 +46,19 @@ Checks were run on 2026-10-24 against `dolphin-emu/dolphin` master.
   fact about a service, not Nintendo code or art.
 - License: GPL-2.0-or-later, as Dolphin ships it.
 
-## Pipeline cache seed: `initial_pipeline_cache.db`
+## Pipeline cache seed: removed
 
-- 4.8 MB SQLite database (schema 1, one `pipeline_cache` table, 1156 rows).
-- Each row is a description of a GPU pipeline Aurora built while a game was being played: which GX TEV
-  stages, blend modes, vertex formats and so on were in use, plus a hash and the frame it first appeared
-  on. Aurora loads these at startup and compiles the pipelines ahead of time, so effects do not stutter the
-  first time they appear.
-- It contains no compiled shader code, no textures, models, audio or game code. It is a list of render-state
-  settings. It is still "derived from running the game", in the sense that it records which settings the
-  game asked for. That is the weakest-provenance file on this list, though the content is functional
-  settings rather than creative material.
-- Which game it was recorded from is not certain. The tool that builds it,
-  `wiicompiled/projects/nsmbw/tools/make_pipeline_seed.py`, and a comment in
-  `projects/nsmbw/tools/stage-android.ps1` describe it as NSMBW's pipelines. Upstream may or may not have
-  re-recorded it for Super Paper Mario before the squash; the history does not say.
-- It is optional. If it is missing, Aurora logs "No bundled initial pipeline cache found" and builds
-  pipelines as they come up. `wiicompiled/runtime/cmake/PublicProducts.cmake` and the packaging scripts
-  copy it, so removing it would mean touching those too.
-- If we want a clean answer here, the options are: re-record it from Super Paper Mario on our own hardware
-  (the Switch port will need its own anyway, since its pipelines are compiled differently), or drop it and
-  accept first-run stutter.
+- The repository used to carry `wiicompiled/runtime/assets/pipeline/initial_pipeline_cache.db`
+  (4.8 MB, 1156 rows of GX render-state descriptions recorded by Aurora while a game was being
+  played). Which game it was recorded from was never certain, which made it the
+  weakest-provenance file on this list.
+- It was removed in the pre-release cleanup, and nothing replaces it: the package ships no
+  pipeline cache seed. Aurora logs that no bundled cache was found, builds pipelines as they
+  come up (some stutter the first time an effect appears), and keeps the cache it builds on
+  the SD card for later runs.
+- A future release may add a seed again, re-recorded from Super Paper Mario itself with
+  `wiicompiled/projects/nsmbw/tools/make_pipeline_seed.py`. Aurora picks the file up
+  automatically under the same name.
 
 ## CA bundle: `cacert.pem`
 

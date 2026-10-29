@@ -293,15 +293,16 @@ function(mkw_configure_product target)
 
     # Aurora imports this portable recipe database into each user's writable
     # pipeline cache. Keep the upstream filename so its default resourcesPath
-    # lookup works without application-specific configuration.
+    # lookup works without application-specific configuration. No seed is
+    # bundled at present, so the copy only happens when the file exists;
+    # without one, Aurora builds pipelines on first use.
     set(MKW_INITIAL_PIPELINE_CACHE
         "${MKW_RUNTIME_SOURCE_DIR}/assets/pipeline/initial_pipeline_cache.db")
-    if(NOT EXISTS "${MKW_INITIAL_PIPELINE_CACHE}")
-        message(FATAL_ERROR "Missing transferable Aurora pipeline cache: ${MKW_INITIAL_PIPELINE_CACHE}")
+    if(EXISTS "${MKW_INITIAL_PIPELINE_CACHE}")
+        add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${MKW_INITIAL_PIPELINE_CACHE}"
+            "$<TARGET_FILE_DIR:${target}>/initial_pipeline_cache.db")
     endif()
-    add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${MKW_INITIAL_PIPELINE_CACHE}"
-        "$<TARGET_FILE_DIR:${target}>/initial_pipeline_cache.db")
 
     # Non-Windows TLS (runtime/src/hle/net/network_ssl.cpp's mbed TLS path) needs a trusted root
     # CA bundle to verify server certificates against - Windows gets this for free from the OS via
