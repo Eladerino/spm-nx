@@ -1503,8 +1503,21 @@ void DrawStartupScreen() {
                 const auto u = GameLayout::Utf16(kCredit);
                 GameLayout::DrawText(list, view, *pmFont, u, 0.0f, cardY - 22.0f + bob, Fit(u, 17.0f), 0x3A2A18FFu,
                                      0x3A2A18FFu, 1.0f, 1, 1);
+#if defined(__SWITCH__)
+                // The port's own credit, under the original and in its ink.
+                const auto portCredit = GameLayout::Utf16("Switch port by Elad");
+                GameLayout::DrawText(list, view, *pmFont, portCredit, 0.0f, cardY - 44.0f + bob,
+                                     Fit(portCredit, 13.0f), 0x3A2A18FFu, 0x3A2A18FFu, 1.0f, 1, 1);
+#endif
                 // How to reach the settings, along the card's bottom edge.
+#if defined(__SWITCH__)
+                // No function keys on Switch: the settings menu is the - hold the gamepad shim
+                // turns into F10, and F11's fullscreen toggle has no Switch meaning, so it is
+                // omitted rather than shown wrong.
+                const auto hint = GameLayout::Utf16("Hold - = settings menu");
+#else
                 const auto hint = GameLayout::Utf16("F10 = settings menu   F11 = fullscreen / window");
+#endif
                 GameLayout::DrawText(list, view, *pmFont, hint, 0.0f, cardY - hh + 16.0f + bob, Fit(hint, 12.0f),
                                      0x6A5A48FFu, 0x6A5A48FFu, 1.0f, 1, 1);
             }
@@ -1522,6 +1535,13 @@ void DrawStartupScreen() {
                 const float pop = 1.0f + 0.06f * std::sin(t * 5.0f), py = cardY - 80.0f + bob;
                 // The start button of what the player is holding: the controller's own jump button (its icon), else
                 // the keyboard's jump key. Both are 2 on the Wii Remote, which the cover waits for (frame_input.cpp).
+#if defined(__SWITCH__)
+                // No button_icons pack ships on Switch, so the icon path below would lay out a
+                // blank gap where the button should be. The cover waits for the pad's A button;
+                // name it in text instead.
+                const std::string icon;
+                const auto press = GameLayout::Utf16("Press A to start!");
+#else
                 const int padStyle = aurora_button_icon_style();
                 static const char* const kStyleDirs[3] = {"xbox", "playstation", "nintendo"};
                 const std::string icon = padStyle >= 0 && padStyle < 3
@@ -1529,6 +1549,7 @@ void DrawStartupScreen() {
                                                           kStyleDirs[padStyle] / "ui" / "jump.png")
                     : std::string();
                 const auto press = GameLayout::Utf16(icon.empty() ? "Press " + Keybinds::KeyLabel(Keybinds::kJump) + " to start!" : "Press");
+#endif
                 const auto rest = GameLayout::Utf16("to start!");
                 const float fs = Fit(icon.empty() ? press : GameLayout::Utf16("Press A or 2 to start!"), 26.0f) * pop;
                 const float iconSize = 34.0f * pop, gap = 8.0f;
@@ -1588,6 +1609,10 @@ void DrawStartupScreen() {
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrapWidth);
             ImGui::TextUnformatted(kCredit);
             ImGui::PopTextWrapPos();
+#if defined(__SWITCH__)
+            ImGui::SetCursorPosX((viewport->Size.x - wrapWidth) * 0.5f);
+            ImGui::TextUnformatted("Switch port by Elad");
+#endif
             startY = ImGui::GetCursorPosY();
             const ImVec2 reportSize = ImGui::CalcTextSize(kReport);
             ImGui::SetCursorPos(ImVec2(std::max(0.0f, (viewport->Size.x - reportSize.x) * 0.5f),
@@ -2213,14 +2238,9 @@ void Draw() noexcept {
 }
 
 bool StartupScreenVisible() noexcept {
-    // Switch: never. The card held the game input-blocked until a strap
-    // press and the boot pipeline queue both cleared, up to the 3-minute
-    // shader wait, and the game has its own strap screen behind it — so
-    // boot goes straight there and shader compiles surface through the
-    // in-game indicator instead. Every consumer (the card's draw, the
-    // input block, the KPAD strap watch, VI's black-frame draw) keys off
-    // this one function, so short-circuiting it is the whole bypass.
-    return false;
+    return !g_strapInputAccepted.load(std::memory_order_acquire) ||
+           !g_bootShadersReady.load(std::memory_order_acquire) ||
+           g_presentedFrame < g_startupDismissFrame.load(std::memory_order_relaxed);
 }
 
 void NotifyStrapInputAccepted() noexcept {
