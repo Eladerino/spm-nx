@@ -46,6 +46,12 @@ static u64 g_rumble_until;  // system tick; 0 when not rumbling
 // has no debug server.
 __attribute__((weak)) int cos_switch_debug_input(uint64_t* buttons, int32_t sticks[4]);
 
+// The runtime's answer to "is the settings menu open" (settings_overlay.cpp, which owns the
+// state). The menu navigation filter below polls it so the pad follows the menu's real state
+// instead of guessing. Weak: a build without the overlay leaves the filter tracking its own
+// F10 taps, which is exact as long as nothing else opens or closes the menu.
+__attribute__((weak)) int spm_settings_menu_open(void);
+
 static const struct {
     SDL_GamepadButton button;
     u64 mask;
@@ -134,19 +140,23 @@ static void send_rumble(float low, float high) {
 static Uint64 g_minus_since;      // SDL_GetTicks() when the held press began; 0 when up
 static bool g_minus_consumed;     // the held press already fired the menu
 static Uint64 g_minus_tap_until;  // publish a synthetic short press until this tick
+static bool g_menu_track_open;    // menu state from this filter's own F10 taps (fallback)
+
+static void queue_key_event(SDL_Scancode scancode, SDL_Keycode key, bool down) {
+    SDL_Event event;
+    memset(&event, 0, sizeof event);
+    event.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+    event.key.type = event.type;
+    event.key.timestamp = SDL_GetTicks() * 1000000ULL;
+    event.key.scancode = scancode;
+    event.key.key = key;
+    event.key.down = down;
+    sdl3_shim_queue_event(&event);
+}
 
 static void queue_f10_tap(void) {
-    for (int i = 0; i < 2; ++i) {
-        SDL_Event event;
-        memset(&event, 0, sizeof event);
-        event.type = i == 0 ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
-        event.key.type = event.type;
-        event.key.timestamp = SDL_GetTicks() * 1000000ULL;
-        event.key.scancode = SDL_SCANCODE_F10;
-        event.key.key = SDLK_F10;
-        event.key.down = i == 0;
-        sdl3_shim_queue_event(&event);
-    }
+    queue_key_event(SDL_SCANCODE_F10, SDLK_F10, true);
+    queue_key_event(SDL_SCANCODE_F10, SDLK_F10, false);
 }
 
 // Runs in the pump with g_lock held; returns the buttons to publish.
@@ -158,6 +168,7 @@ static u64 minus_menu_filter(u64 buttons) {
                 g_minus_since = now;
             else if (now - g_minus_since >= MINUS_MENU_HOLD_MS) {
                 g_minus_consumed = true;
+                g_menu_track_open = !g_menu_track_open;
                 queue_f10_tap();
             }
         }
@@ -173,6 +184,109 @@ static u64 minus_menu_filter(u64 buttons) {
     if (now < g_minus_tap_until)
         buttons |= HidNpadButton_Minus;
     return buttons;
+}
+
+// While the settings menu is open, the pad drives it instead of the game:
+// the console has no keyboard, so DPad and the left stick become arrow keys,
+// A becomes Return, B becomes Escape and L/R become Tab and Shift+Tab,
+// queued as key events for ImGui's keyboard navigation. The translated
+// buttons are held back from the published sample while the menu is open.
+// Only honest down/up edges are queued — ImGui repeats a held navigation
+// key itself — and the stick gets a dead band with hysteresis, so a held
+// direction is one press, not a stream of them.
+enum {
+    NAV_UP = 1u << 0,
+    NAV_DOWN = 1u << 1,
+    NAV_LEFT = 1u << 2,
+    NAV_RIGHT = 1u << 3,
+    NAV_ACCEPT = 1u << 4,     // A -> Return
+    NAV_BACK = 1u << 5,       // B -> Escape
+    NAV_TAB = 1u << 6,        // L -> Tab
+    NAV_SHIFT_TAB = 1u << 7,  // R -> Shift+Tab
+};
+#define NAV_SUPPRESS_BUTTONS                                                                 \
+    (HidNpadButton_Up | HidNpadButton_Down | HidNpadButton_Left | HidNpadButton_Right |      \
+     HidNpadButton_A | HidNpadButton_B | HidNpadButton_L | HidNpadButton_R)
+#define STICK_ENGAGE 16000   // libnx stick units (of 32767) that start a direction
+#define STICK_RELEASE 10000  // and the level it has to fall back under to end it
+
+static unsigned g_nav_held;         // nav inputs currently fed to ImGui as held keys
+static bool g_nav_menu_was_open;    // the previous pump found the menu open
+
+static bool menu_is_open(void) {
+    if (spm_settings_menu_open)
+        return spm_settings_menu_open() != 0;
+    return g_menu_track_open;
+}
+
+static void nav_emit(unsigned bit, bool down) {
+    switch (bit) {
+    case NAV_UP: queue_key_event(SDL_SCANCODE_UP, SDLK_UP, down); break;
+    case NAV_DOWN: queue_key_event(SDL_SCANCODE_DOWN, SDLK_DOWN, down); break;
+    case NAV_LEFT: queue_key_event(SDL_SCANCODE_LEFT, SDLK_LEFT, down); break;
+    case NAV_RIGHT: queue_key_event(SDL_SCANCODE_RIGHT, SDLK_RIGHT, down); break;
+    case NAV_ACCEPT: queue_key_event(SDL_SCANCODE_RETURN, SDLK_RETURN, down); break;
+    case NAV_BACK: queue_key_event(SDL_SCANCODE_ESCAPE, SDLK_ESCAPE, down); break;
+    case NAV_TAB: queue_key_event(SDL_SCANCODE_TAB, SDLK_TAB, down); break;
+    case NAV_SHIFT_TAB:
+        // ImGui reads Shift+Tab as "previous": the modifier goes down first
+        // and comes up last.
+        if (down) {
+            queue_key_event(SDL_SCANCODE_LSHIFT, SDLK_LSHIFT, true);
+            queue_key_event(SDL_SCANCODE_TAB, SDLK_TAB, true);
+        } else {
+            queue_key_event(SDL_SCANCODE_TAB, SDLK_TAB, false);
+            queue_key_event(SDL_SCANCODE_LSHIFT, SDLK_LSHIFT, false);
+        }
+        break;
+    }
+}
+
+// One stick direction, with hysteresis: engages past STICK_ENGAGE, then
+// holds until the stick falls back under STICK_RELEASE.
+static bool stick_direction(bool held, s32 value, bool positive) {
+    const s32 directed = positive ? value : -value;
+    return held ? directed > STICK_RELEASE : directed > STICK_ENGAGE;
+}
+
+// Runs in the pump with g_lock held, after minus_menu_filter; returns the
+// buttons to publish.
+static u64 menu_nav_filter(u64 buttons) {
+    if (!menu_is_open()) {
+        if (g_nav_menu_was_open) {
+            // The menu closed under a held input: release every fed key, or
+            // ImGui would keep it held for good.
+            for (unsigned bit = NAV_UP; bit <= NAV_SHIFT_TAB; bit <<= 1) {
+                if (g_nav_held & bit)
+                    nav_emit(bit, false);
+            }
+            g_nav_held = 0;
+        }
+        g_nav_menu_was_open = false;
+        return buttons;
+    }
+    g_nav_menu_was_open = true;
+    unsigned nav = 0;
+    if (buttons & HidNpadButton_Up) nav |= NAV_UP;
+    if (buttons & HidNpadButton_Down) nav |= NAV_DOWN;
+    if (buttons & HidNpadButton_Left) nav |= NAV_LEFT;
+    if (buttons & HidNpadButton_Right) nav |= NAV_RIGHT;
+    if (buttons & HidNpadButton_A) nav |= NAV_ACCEPT;
+    if (buttons & HidNpadButton_B) nav |= NAV_BACK;
+    if (buttons & HidNpadButton_L) nav |= NAV_TAB;
+    if (buttons & HidNpadButton_R) nav |= NAV_SHIFT_TAB;
+    const HidAnalogStickState stick = g_sticks[0];  // libnx: y is up-positive
+    if (stick_direction(g_nav_held & NAV_UP, stick.y, true)) nav |= NAV_UP;
+    if (stick_direction(g_nav_held & NAV_DOWN, stick.y, false)) nav |= NAV_DOWN;
+    if (stick_direction(g_nav_held & NAV_LEFT, stick.x, false)) nav |= NAV_LEFT;
+    if (stick_direction(g_nav_held & NAV_RIGHT, stick.x, true)) nav |= NAV_RIGHT;
+    const unsigned changed = nav ^ g_nav_held;
+    for (unsigned bit = NAV_UP; bit <= NAV_SHIFT_TAB; bit <<= 1) {
+        if (changed & bit)
+            nav_emit(bit, (nav & bit) != 0);
+    }
+    g_nav_held = nav;
+    return buttons & ~(u64)NAV_SUPPRESS_BUTTONS;
 }
 
 void sdl3_shim_gamepad_pump(void) {
@@ -198,7 +312,7 @@ void sdl3_shim_gamepad_pump(void) {
         g_sticks[0].x = sticks[0], g_sticks[0].y = sticks[1];
         g_sticks[1].x = sticks[2], g_sticks[1].y = sticks[3];
     }
-    g_buttons = minus_menu_filter(buttons);
+    g_buttons = menu_nav_filter(minus_menu_filter(buttons));
     mutexUnlock(&g_lock);
     static int s_attached = -1;
     if ((int)attached != s_attached) {

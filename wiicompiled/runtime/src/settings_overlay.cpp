@@ -1895,6 +1895,13 @@ void HandleEvents(const AuroraEvent* events) noexcept {
     }
 }
 
+// The Switch gamepad shim (switch/sdl3_shim) polls this through a weak
+// reference, once per pump: while the settings menu is open it feeds the pad
+// to the menu as keyboard navigation instead of publishing it as game input.
+// It lives here because this file owns g_topBarVisible; the shim falls back
+// to tracking its own F10 taps when the symbol is absent.
+extern "C" int spm_settings_menu_open(void) { return g_topBarVisible ? 1 : 0; }
+
 bool g_spinningCoins = RuntimeConfigFile::SpinningCoins(true);
 
 void SetSpinningCoins(bool enabled) noexcept {
