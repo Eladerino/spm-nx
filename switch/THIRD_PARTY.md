@@ -15,7 +15,7 @@ is under the repository's GPLv3 license.
 | `scripts/Containerfile` | based on SwitchWaker `scripts/switch/Containerfile.native` (same image digest and packages, plus rsync) | MIT (`licenses/SwitchWaker-MIT.txt`) |
 | `deko3d/` | [deko3d](https://github.com/devkitPro/deko3d) 0.5.0 (`5cc144d`), copied from SwitchWakerHD `runtime/third_party/deko3d` at `bed2af7` with its patches, plus the local changes in `deko3d/PATCHES.md`; built from source instead of devkitPro's `libdeko3d.a` | zlib (`deko3d/LICENSE`) |
 | `uam/` | [uam](https://github.com/devkitPro/uam) 1.1.0, vendored from SwitchWakerHD with the local changes in `uam/PATCHES.md`; the `mesa-imported/` parts are Mesa's GLSL frontend and nouveau's nv50_ir | zlib (`uam/LICENSE`), MIT (the mesa-imported parts) |
-| `deko/` | this fork's WebGPU-to-deko3d interposer, adapted from SwitchWaker/SwitchWakerHD's deko3d backend | MPL-2.0 |
+| `deko/` | this fork's WebGPU-to-deko3d interposer, adapted from SwitchWaker/SwitchWakerHD's deko3d backend | MPL-2.0 (`licenses/MPL-2.0.txt`) |
 
 Fetched at build time, not stored here:
 

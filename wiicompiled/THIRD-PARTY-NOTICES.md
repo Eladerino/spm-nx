@@ -110,6 +110,15 @@ fallback - though this project's x86_64-only target only ever compiles amd64.c) 
 Source: <https://github.com/higan-emu/libco>. Full license text:
 `runtime/third_party/libco/LICENSE`.
 
+### Mozilla CA certificate bundle (cacert.pem) - MPL-2.0
+
+Mozilla's root certificate store, in the form extracted by the curl project.
+The runtime's HTTPS support verifies certificates against it. It is bundled in
+this repository at `runtime/assets/certs/cacert.pem` and is staged beside the
+Switch NRO in the SD card layout.
+Source: <https://curl.se/docs/caextract.html>. The certificate data is
+Mozilla's, under the Mozilla Public License 2.0.
+
 ---
 
 ## Fetched at build time and redistributed in release builds
