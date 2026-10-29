@@ -45,3 +45,9 @@ wiicompiled/buildtools/artifacts/
 launcher/linux/bin/
 launcher/linux/obj/
 launcher/linux/publish/
+
+# Runtime output: logs, built NROs, shader caches and the staged SD package
+*.log
+*.nro
+dksh_cache.bin
+spm-nx-sd/
