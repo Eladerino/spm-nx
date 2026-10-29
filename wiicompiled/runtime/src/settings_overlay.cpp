@@ -2206,9 +2206,14 @@ void Draw() noexcept {
 }
 
 bool StartupScreenVisible() noexcept {
-    return !g_strapInputAccepted.load(std::memory_order_acquire) ||
-           !g_bootShadersReady.load(std::memory_order_acquire) ||
-           g_presentedFrame < g_startupDismissFrame.load(std::memory_order_relaxed);
+    // Switch: never. The card held the game input-blocked until a strap
+    // press and the boot pipeline queue both cleared, up to the 3-minute
+    // shader wait, and the game has its own strap screen behind it — so
+    // boot goes straight there and shader compiles surface through the
+    // in-game indicator instead. Every consumer (the card's draw, the
+    // input block, the KPAD strap watch, VI's black-frame draw) keys off
+    // this one function, so short-circuiting it is the whole bypass.
+    return false;
 }
 
 void NotifyStrapInputAccepted() noexcept {
