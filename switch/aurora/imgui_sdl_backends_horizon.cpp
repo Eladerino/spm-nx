@@ -15,6 +15,10 @@
 #include "backends/imgui_impl_sdl3.h"
 #include "backends/imgui_impl_sdlrenderer3.h"
 
+#include <SDL3/SDL_events.h>
+#include <SDL3/SDL_keyboard.h>
+#include <SDL3/SDL_scancode.h>
+
 bool ImGui_ImplSDL3_InitForSDLRenderer(SDL_Window*, SDL_Renderer*) { return true; }
 void ImGui_ImplSDL3_Shutdown() {}
 
