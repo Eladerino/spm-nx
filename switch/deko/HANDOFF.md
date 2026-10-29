@@ -3,9 +3,10 @@
 ## Status
 
 The renderer is wired into the build and runs on hardware: the game boots, plays, and presents
-through the deko3d swapchain. Work in progress is tracked in the pull requests. The standing open
-problems are performance in busy scenes (the frame time sits on the game thread, not in this
-replay) and a corruption that affects small, distant sprites, under investigation.
+through the deko3d swapchain. The standing open defect is the large doors' open animation,
+which renders bigger than the door itself and off centre; it is visual only, and the cause is
+under investigation. Performance is CPU-bound in the guest execution on the game thread, not
+in this replay. Changes land as direct pushes to main.
 
 ## What it is
 
