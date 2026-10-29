@@ -35,6 +35,8 @@ static ImGuiKey ImGuiKeyFromScancode(SDL_Scancode scancode) {
     case SDL_SCANCODE_TAB: return ImGuiKey_Tab;
     case SDL_SCANCODE_LSHIFT: return ImGuiKey_LeftShift;
     case SDL_SCANCODE_RSHIFT: return ImGuiKey_RightShift;
+    case SDL_SCANCODE_LALT: return ImGuiKey_LeftAlt;
+    case SDL_SCANCODE_RALT: return ImGuiKey_RightAlt;
     case SDL_SCANCODE_SPACE: return ImGuiKey_Space;
     default: break;
     }
@@ -58,6 +60,8 @@ bool ImGui_ImplSDL3_ProcessEvent(const SDL_Event* event) {
         // physical ones; Shift+Tab only reads as "previous" with both set.
         if (key == ImGuiKey_LeftShift || key == ImGuiKey_RightShift)
             io.AddKeyEvent(ImGuiMod_Shift, down);
+        if (key == ImGuiKey_LeftAlt || key == ImGuiKey_RightAlt)
+            io.AddKeyEvent(ImGuiMod_Alt, down);
         io.AddKeyEvent(key, down);
         return true;
     }

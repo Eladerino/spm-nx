@@ -1661,6 +1661,9 @@ void DrawExitPrompt() {
 }
 
 void DrawTopBar() {
+    static bool s_wasVisible = false;
+    const bool justOpened = g_topBarVisible && !s_wasVisible;
+    s_wasVisible = g_topBarVisible;
     if (!g_topBarVisible) {
         return;
     }
@@ -1686,6 +1689,13 @@ void DrawTopBar() {
     }
     ImGui::End();
     if (!ImGui::BeginMainMenuBar()) return;
+    if (justOpened) {
+        // Navigation only reads keys for the focused window, and nothing on
+        // the console ever focuses this one (there is no mouse to click it),
+        // so claim focus on the frame the bar appears. The gamepad shim's
+        // synthetic Alt tap then moves navigation into the menu layer.
+        ImGui::SetWindowFocus();
+    }
 
     ImGui::TextUnformatted("New Super Paper Bros.");
     ImGui::Separator();
