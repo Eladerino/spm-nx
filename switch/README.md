@@ -52,13 +52,16 @@ mapping keeps the same jobs on the Switch buttons:
 | + | + |
 | -, L or ZL | - |
 
+Holding `-` for half a second opens the settings menu (the PC version's F10 menu). A short
+press is still the game's `-`.
+
 ## Known issues and performance
 
 - **Doors.** The open animation of the game's large doors renders bigger than the door itself
   and off centre. It is visual only; the door still works. The cause is under investigation.
 - **Title card.** The startup title card does not show a button icon at its continue prompt;
-  press A to continue. The card also lists F10 and F11 shortcuts from the PC version; they do
-  not apply on Switch.
+  press A to continue. The card also lists F10 and F11 shortcuts from the PC version: F11
+  does not apply on Switch, and F10's settings menu opens by holding `-` instead.
 - **Performance.** The port is CPU-bound: the translated game code, not the renderer, sets the
   frame rate. At a high CPU overclock (around 1963 MHz) lighter 2D areas run at or near 60 fps
   and busy 3D areas around 40 fps. At stock clocks everything runs slower, so a CPU overclock
