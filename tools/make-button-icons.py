@@ -7,6 +7,10 @@ controller.png (the Controls screen picture) and remote/ (the Controls screen's 
 The game picks the set for the controller in use (aurora texture_replacement.cpp, virtual_remote.cpp).
 
     python tools/make-button-icons.py [--src <8x PNG pack Interface folder>] [--out Play/UserData/button_icons]
+    python tools/make-button-icons.py --clean [--out <dir>]
+        Only the Switch package's set: the nintendo files that come from the vendored CC0 art alone
+        (controller.png, ui/, panel.txt, the sideways boot texture, marker1's transparent textures).
+        No HD pack is needed and the composites into the pack's artwork are never made in this mode.
 Needs ImageMagick (magick) to render the SVGs.
 """
 import argparse
@@ -240,11 +244,55 @@ def render(src, kind, buttons, style):
     return img if changed else None
 
 
+def panel_and_ui(out, style):
+    """panel.txt (where each action's button sits on controller.png) and ui/ (the Controls panel's
+    per-action icons). controller.png must already be saved in out. Pure Kenney, so the clean set
+    uses this too."""
+    with open(os.path.join(out, "panel.txt"), "w", encoding="ascii") as f:
+        # <action> <x> <y>: where the action's button is, in fractions of controller.png
+        for name, (fx, fy) in BUTTON_SPOTS[style].items():
+            print(name, fx, fy, file=f)
+        # Stylish move (shake) = the right shoulder: the top of the picture's outline above x = 0.78.
+        pad = Image.open(os.path.join(out, "controller.png"))
+        x = int(pad.width * 0.78)
+        top = next(y for y in range(pad.height) if pad.getpixel((x, y))[3] > 128)
+        print("stylish", 0.78, round(top / pad.height + 0.02, 3), file=f)
+    # The panel's button icons, one per action.
+    os.makedirs(os.path.join(out, "ui"), exist_ok=True)
+    icons = {"move": "stick_l", "flip": "A", "jump": "2", "pixl": "1", "tippi": "stick", "stylish": "shake"}
+    for action, button in icons.items():
+        render_svg(style, STYLES[style][button], 128).save(os.path.join(out, "ui", action + ".png"))
+
+
+def build_clean(out_root):
+    """The Switch package's set (the nintendo style only): everything that needs nothing but the
+    vendored CC0 art in tools/button-art. The composites into the HD pack's artwork (the TEXTURES
+    renders, the marker2 files included) are never made here, so no pack is required and no game
+    art ships. What it buys: the boot screen's sideways picture becomes the Switch controller,
+    marker1 hides the Controls screen's 3D remote, and the Controls panel's own files are in
+    place (the panel itself still waits on marker2, which only the full set has)."""
+    style = "nintendo"
+    out = os.path.join(out_root, style)
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(os.path.join(out, "marker1"), exist_ok=True)
+    for w, h, hsh, fmt in REMOTE_TEXTURES:
+        Image.new("RGBA", (w, h), (0, 0, 0, 0)).save(os.path.join(out, "marker1", f"tex1_{w}x{h}_{hsh}_{fmt}.png"))
+    controller_picture(style).save(os.path.join(out, "controller.png"))
+    sideways_picture(Image.open(os.path.join(out, "controller.png"))).save(os.path.join(out, SIDEWAYS_TEXTURE))
+    panel_and_ui(out, style)
+    print(f"{style} (clean): -> {out}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", default=os.path.join(ROOT, "Play", "UserData", "texture_pack_png_8x", "R8PE01", "Interface"))
     ap.add_argument("--out", default=os.path.join(ROOT, "Play", "UserData", "button_icons"))
+    ap.add_argument("--clean", action="store_true",
+                    help="only the Switch package's clean set (nintendo, from the vendored CC0 art; no --src pack)")
     args = ap.parse_args()
+    if args.clean:
+        build_clean(args.out)
+        return
     for style in STYLES:
         out = os.path.join(args.out, style)
         shutil.rmtree(out, ignore_errors=True)
@@ -262,20 +310,7 @@ def main():
             Image.new("RGBA", (w, h), (0, 0, 0, 0)).save(os.path.join(out, "marker1", f"tex1_{w}x{h}_{hsh}_{fmt}.png"))
         controller_picture(style).save(os.path.join(out, "controller.png"))
         sideways_picture(Image.open(os.path.join(out, "controller.png"))).save(os.path.join(out, SIDEWAYS_TEXTURE))
-        with open(os.path.join(out, "panel.txt"), "w", encoding="ascii") as f:
-            # <action> <x> <y>: where the action's button is, in fractions of controller.png
-            for name, (fx, fy) in BUTTON_SPOTS[style].items():
-                print(name, fx, fy, file=f)
-            # Stylish move (shake) = the right shoulder: the top of the picture's outline above x = 0.78.
-            pad = Image.open(os.path.join(out, "controller.png"))
-            x = int(pad.width * 0.78)
-            top = next(y for y in range(pad.height) if pad.getpixel((x, y))[3] > 128)
-            print("stylish", 0.78, round(top / pad.height + 0.02, 3), file=f)
-        # The panel's button icons, one per action.
-        os.makedirs(os.path.join(out, "ui"), exist_ok=True)
-        icons = {"move": "stick_l", "flip": "A", "jump": "2", "pixl": "1", "tippi": "stick", "stylish": "shake"}
-        for action, button in icons.items():
-            render_svg(style, STYLES[style][button], 128).save(os.path.join(out, "ui", action + ".png"))
+        panel_and_ui(out, style)
         print(f"{style}: {n} textures -> {out}")
     # For players without a controller (button_icons/common, looked up after a style's own set): the boot screen
     # shows a keyboard instead of the hands holding a Wii Remote.
