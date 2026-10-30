@@ -12,12 +12,12 @@ Installing and building the Switch version are documented in [`switch/README.md`
 
 The easy path is the release: download it, copy it to the SD card, add the files from your own disc, and launch. There is no launcher on the Switch; the NRO boots by title takeover to a startup screen. Fresh installs start from Switch defaults: 1.5x rendering (the 720p screen's native size), 16:9 and frame interpolation off. The European disc (R8PP01) is PC-only for now, because only the USA game has been translated for the Switch.
 
-![Flipside in cinematic 2.39:1 widescreen](screenshots/mac_02_cinematic.png)
+## Upstream PC version
 
-| | |
-|---|---|
-| ![Gloam Valley](screenshots/mi1_01.png) | ![Lineland Road](screenshots/he1_02.png) |
-| ![The Bitlands](screenshots/ta1_02.png) | ![Sammer's Kingdom](screenshots/wa1_02.png) |
+The folded sections below are the upstream PC project's own documentation (New Super Paper Bros by JosiahG), kept on this page for reference. The Switch port itself is covered above and in [`switch/README.md`](switch/README.md).
+
+<details>
+<summary>Upstream PC version: features</summary>
 
 ## Features
 
@@ -32,6 +32,11 @@ The easy path is the release: download it, copy it to the SD card, add the files
 - Android (a RetroArch libretro core with save states, or a standalone app) and macOS builds from source
 
 **No game data is included**: the game's files are read from your own copy of the game.
+
+</details>
+
+<details>
+<summary>Upstream PC version: installing and playing</summary>
 
 ## How to play
 
@@ -65,6 +70,11 @@ to switch them on and off.
 **Linux:** download `NewSuperPaperBros-linux.tar.gz` instead, unpack it and open `New Super Paper Bros` (the same
 launcher). You need 64-bit Linux from 2022 or newer (glibc 2.35) with Vulkan graphics drivers. Linux support is new:
 please report problems in [Issues](../../issues).
+
+</details>
+
+<details>
+<summary>Upstream PC version: building from source</summary>
 
 ## Building from source
 
@@ -121,6 +131,20 @@ For the Switch build, the translation above is the input: the Building section o
 [`switch/README.md`](switch/README.md) runs the same preparation and translation, then compiles
 the result for Horizon instead of Windows.
 
+</details>
+
+<details>
+<summary>Upstream PC version: screenshots</summary>
+
+![Flipside in cinematic 2.39:1 widescreen](screenshots/mac_02_cinematic.png)
+
+| | |
+|---|---|
+| ![Gloam Valley](screenshots/mi1_01.png) | ![Lineland Road](screenshots/he1_02.png) |
+| ![The Bitlands](screenshots/ta1_02.png) | ![Sammer's Kingdom](screenshots/wa1_02.png) |
+
+</details>
+
 ## Credits
 
 - **Original project and PC port:** JosiahG, creator of New Super Paper Bros, the PC recomp this
@@ -152,10 +176,6 @@ the result for Horizon instead of Windows.
 Full credits and licenses ship in the PC release as `CREDITS.txt`, `LICENSE.txt` and `engine\licenses\`;
 the Switch package carries them in the `licenses\` folder beside the NRO.
 
-## AI assistance
-
-This project is developed with help from AI coding tools. All code is reviewed and tested by the maintainer before it is committed.
-
 ## License
 
 GPLv3, see [`LICENSE`](LICENSE). Bundled third-party components keep their own licenses.
@@ -182,3 +202,7 @@ Nintendo's material.
 
 This project distributes no game data. A legally obtained copy of the game is required, and users
 extract the files from their own disc.
+
+## AI assistance
+
+This project is developed with help from AI coding tools. All code is reviewed and tested by the maintainer before it is committed.
