@@ -53,6 +53,7 @@ struct RuntimeUserConfig {
     std::optional<bool> showFps;
     std::optional<bool> spinningCoins;  // NSMBW: [video] spinning_coins, animated tiles
     std::optional<bool> frameGraph;     // NSMBW: [video] frame_graph, frame times under the FPS counter
+    std::optional<bool> showDeveloperOptions;  // [dev] show_developer_options: the Switch menu's Developer section gate
     std::optional<bool> vsync;          // NSMBW: [video] vsync, presents wait for the display (Windows)
     std::optional<uint32_t> disabledPostProcessingPaths;
     std::optional<float> audioVolume;
@@ -588,6 +589,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
+    config.showDeveloperOptions = FindConfigValue<bool>(document, "dev", "show_developer_options");
     config.spinningCoins = FindConfigValue<bool>(document, "video", "spinning_coins");
     config.frameGraph = FindConfigValue<bool>(document, "video", "frame_graph");
     config.vsync = FindConfigValue<bool>(document, "video", "vsync");
@@ -851,6 +853,15 @@ inline bool SetVSync(bool value) {
 inline bool SetShowFps(bool value) {
     Mutable().showFps = value;
     return WriteSetting("video", "show_fps", value ? "true" : "false");
+}
+
+inline bool ShowDeveloperOptions(bool fallback = false) {
+    return Get().showDeveloperOptions.value_or(fallback);
+}
+
+inline bool SetShowDeveloperOptions(bool value) {
+    Mutable().showDeveloperOptions = value;
+    return WriteSetting("dev", "show_developer_options", value ? "true" : "false");
 }
 
 inline bool SetDisabledPostProcessingPaths(uint32_t value) {

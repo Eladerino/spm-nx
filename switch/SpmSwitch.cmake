@@ -1,0 +1,330 @@
+# The Nintendo Switch (Horizon homebrew) layer of the WiiCompiled runtime build.
+#
+# wiicompiled/runtime/CMakeLists.txt includes this right after it recognises the devkitPro Switch
+# toolchain (CMAKE_SYSTEM_NAME NintendoSwitch), and calls the spm_switch_* functions below at the few
+# points where the Switch differs. Everything Switch-specific lives under switch/; the upstream tree
+# only carries those hook calls and a handful of `__SWITCH__` branches (switch/README.md lists them).
+#
+# Compilers: devkitA64's GCC stays CMake's compiler, so it drives every link with libnx's specs. Dawn
+# (with abseil) and the SDL 3 shim are configured first and compile with GCC, exactly as SwitchWaker
+# proved them. Every target created after this file (Crypto++, pugixml, Aurora and its extern
+# libraries, the runtime, the translated game) compiles with clang through cmake/clang-launcher.sh,
+# because WiiCompiled only supports Clang. Both use devkitA64's newlib and libstdc++ headers, so the
+# objects link together.
+#
+# SPM_SWITCH_AUDIT=ON with MKW_BUILD_PRODUCTS=OFF skips Dawn, the SDL shim and Aurora and compiles
+# just the runtime's own sources for the Switch (mkw_switch_audit), which needs no network and no
+# translated game: the quick check that the runtime still builds for Horizon after an upstream merge.
+
+cmake_path(GET CMAKE_CURRENT_LIST_DIR PARENT_PATH SPM_SWITCH_DIR)
+# Included from wiicompiled/runtime/CMakeLists.txt, so this is the runtime's directory.
+set(MKW_RUNTIME_DIR_FOR_SWITCH "${CMAKE_CURRENT_SOURCE_DIR}")
+
+option(SPM_SWITCH_AUDIT "Switch: compile only the runtime's sources (no Dawn, SDL shim or Aurora)" OFF)
+set(SPM_SWITCH_NRO_NAME "spm-nx" CACHE STRING "Switch: file name of the NRO and its ELF")
+set(SPM_SWITCH_SDL3_HEADERS "" CACHE PATH
+    "Switch: an SDL 3.4.4 source tree for its headers (empty: download the pinned release)")
+set(SPM_SWITCH_IMGUI_DIR "" CACHE PATH
+    "Switch audit only: an ImGui v1.91.9b-docking tree for its headers (empty: download it)")
+
+set(DEVKITPRO_ROOT "$ENV{DEVKITPRO}" CACHE PATH "devkitPro installation root")
+if(NOT DEVKITPRO_ROOT)
+    set(DEVKITPRO_ROOT "/opt/devkitpro")
+endif()
+set(SWITCH_PORTLIBS "${DEVKITPRO_ROOT}/portlibs/switch")
+
+include(FetchContent)
+# HostContext's context switch is assembly (spm_switch_runtime_sources); enable_language only works
+# at directory scope, so here rather than in the function.
+enable_language(ASM)
+
+# ---- SDL 3 headers (Aurora's pin) ---------------------------------------------------------------
+if(SPM_SWITCH_SDL3_HEADERS)
+    set(SPM_SWITCH_SDL3_INCLUDE "${SPM_SWITCH_SDL3_HEADERS}/include")
+else()
+    FetchContent_Declare(spm_sdl3_headers
+        URL https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.4.tar.gz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        SOURCE_SUBDIR do-not-build)
+    FetchContent_MakeAvailable(spm_sdl3_headers)
+    set(SPM_SWITCH_SDL3_INCLUDE "${spm_sdl3_headers_SOURCE_DIR}/include")
+endif()
+
+if(NOT SPM_SWITCH_AUDIT)
+    # ---- Dawn: Null backend + Tint's GLSL writer, patched for Horizon (switch/dawn) --------------
+    include("${SPM_SWITCH_DIR}/dawn/dawn.cmake")
+
+    # ---- deko3d renderer (switch/deko): takes Aurora's wgpu calls over at link time ------------
+    # Vendored deko3d 0.5.0 and uam 1.1.0 build from their own CMakeLists, then the interposer as
+    # spm_deko. Still GCC scope like Dawn above: the clang launcher is only set further down.
+    # uam's CMakeLists keys its Switch path (no Threads package, no host tool) off NX_ROOT.
+    if(NOT DEFINED NX_ROOT)
+        set(NX_ROOT "${DEVKITPRO_ROOT}")
+    endif()
+    add_subdirectory("${SPM_SWITCH_DIR}/deko3d" "${CMAKE_BINARY_DIR}/spm_deko3d")
+    add_subdirectory("${SPM_SWITCH_DIR}/uam" "${CMAKE_BINARY_DIR}/spm_uam")
+    file(GLOB _spm_deko_sources CONFIGURE_DEPENDS "${SPM_SWITCH_DIR}/deko/*.cpp")
+    add_library(spm_deko STATIC ${_spm_deko_sources})
+    target_compile_features(spm_deko PUBLIC cxx_std_20)
+    # Dawn's own tree for the "src/tint/..." includes in the shader translation; the generated
+    # webgpu headers land in Dawn's binary dir (the tint targets also carry these transitively).
+    target_include_directories(spm_deko PRIVATE
+        "${dawn_SOURCE_DIR}" "${dawn_BINARY_DIR}/gen/include" "${dawn_BINARY_DIR}/gen")
+    target_link_libraries(spm_deko PUBLIC
+        deko3d_release uamlib
+        tint_api tint_lang_glsl_writer tint_lang_wgsl_reader tint_lang_wgsl_inspector
+        nx)
+
+    # ---- SDL 3 as the libnx shim (switch/sdl3_shim) ----------------------------------------------
+    file(GLOB _spm_shim_sources CONFIGURE_DEPENDS "${SPM_SWITCH_DIR}/sdl3_shim/*.c")
+    add_library(SDL3-static STATIC ${_spm_shim_sources})
+    add_library(SDL3::SDL3-static ALIAS SDL3-static)
+    target_include_directories(SDL3-static PUBLIC "${SPM_SWITCH_SDL3_INCLUDE}")
+    target_include_directories(SDL3-static PRIVATE "${SPM_SWITCH_DIR}/sdl3_shim")
+    target_link_libraries(SDL3-static PUBLIC nx)
+
+    # ---- Tracy: Aurora's profiler is off, and its client has no Horizon port ("Unsupported
+    # platform!"). A headers-only TracyClient from Aurora's own pinned Tracy keeps Aurora's no-op
+    # profiling macros compiling; Aurora skips its own Tracy when the target exists (as SwitchWaker).
+    FetchContent_Declare(tracy
+        URL https://github.com/wolfpld/tracy/archive/a64b9a20294d59421a2f57aeca3c6383d8c48169.tar.gz
+        URL_HASH SHA256=24d342b5127d7f659dc3cf94f24347b348cc736f25b17a691fd7f69541937658
+        DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+        SOURCE_SUBDIR do-not-build)
+    FetchContent_MakeAvailable(tracy)
+    add_library(TracyClient INTERFACE)
+    target_include_directories(TracyClient INTERFACE "${tracy_SOURCE_DIR}/public")
+    add_library(Tracy::TracyClient ALIAS TracyClient)
+
+    # Aurora's providers find the targets above and use them as they are.
+    set(AURORA_SDL3_PROVIDER vendor CACHE STRING "" FORCE)
+    set(AURORA_SDL3_LINKAGE static CACHE STRING "" FORCE)
+    set(AURORA_DAWN_PROVIDER vendor CACHE STRING "" FORCE)
+    set(AURORA_DAWN_LINKAGE static CACHE STRING "" FORCE)
+    # No zstd for the cache entries on Horizon, as in SwitchWaker.
+    set(AURORA_CACHE_USE_ZSTD OFF CACHE BOOL "" FORCE)
+    set(AURORA_SDL3_LIBUSB OFF CACHE BOOL "" FORCE)
+endif()
+
+# mbed TLS (fetched later by the runtime for its guest TLS): Horizon's entropy, clock and socket
+# pieces instead of the Unix ones (include/spm_mbedtls_config.h, runtime/horizon_mbedtls.c). The
+# config define is PUBLIC on mbed TLS's targets, so the runtime's TLS code sees the same config.
+set(MBEDTLS_USER_CONFIG_FILE "${SPM_SWITCH_DIR}/include/spm_mbedtls_config.h" CACHE FILEPATH "" FORCE)
+
+# ---- From here on, every target compiles with clang ----------------------------------------------
+# CMAKE_<LANG>_COMPILER_LAUNCHER seeds the property of each target created after this point.
+set(CMAKE_C_COMPILER_LAUNCHER "${SPM_SWITCH_DIR}/cmake/clang-launcher.sh")
+set(CMAKE_CXX_COMPILER_LAUNCHER "${SPM_SWITCH_DIR}/cmake/clang-launcher.sh")
+
+# The Dawn backend toggles the runtime's aurora block reads: only the Null device exists here.
+macro(spm_switch_dawn_backends)
+    set(DAWN_ENABLE_D3D12 OFF CACHE BOOL "" FORCE)
+    set(DAWN_ENABLE_VULKAN OFF CACHE BOOL "" FORCE)
+    set(DAWN_ENABLE_METAL OFF CACHE BOOL "" FORCE)
+    set(DAWN_ENABLE_NULL ON CACHE BOOL "" FORCE)
+    set(TINT_BUILD_HLSL_WRITER OFF CACHE BOOL "" FORCE)
+endmacro()
+
+# Called where the runtime applies its project-wide definitions (right after Aurora): the shims in
+# switch/include come before every other include directory of the project's own targets, and
+# spm_switch_compat.h is force-included into each of their translation units.
+macro(spm_switch_enter_project_scope)
+    include_directories(BEFORE SYSTEM "${SPM_SWITCH_DIR}/include")
+    # C and C++ only: the context-switch assembly must not see C declarations.
+    add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-include ${SPM_SWITCH_DIR}/include/spm_switch_compat.h>")
+    if(TARGET aurora_core)
+        foreach(_spm_t aurora_core aurora_gx aurora_pad aurora_si aurora_mtx aurora_vi aurora_main)
+            if(TARGET ${_spm_t})
+                target_include_directories(${_spm_t} SYSTEM BEFORE PRIVATE "${SPM_SWITCH_DIR}/include")
+                target_include_directories(${_spm_t} PRIVATE "${SWITCH_PORTLIBS}/include")
+                # So lib/webgpu/gpu.cpp and lib/aurora.cpp find "deko/dk_aurora.h".
+                target_include_directories(${_spm_t} PRIVATE "${SPM_SWITCH_DIR}")
+            endif()
+        endforeach()
+        target_link_libraries(aurora_core PUBLIC nx)
+    endif()
+    # sqlite (Aurora's caches), as SwitchWaker builds it: no WAL or memory-mapped files (Horizon has
+    # no mmap, and these drop sqlite's <sys/mman.h> use), exclusive locking in one process, temp files
+    # in memory, and aurora/sqlite_horizon.c for the lock-free VFS and the POSIX calls newlib lacks.
+    if(TARGET sqlite3)
+        target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_WAL=1 SQLITE_MAX_MMAP_SIZE=0
+            SQLITE_OMIT_LOAD_EXTENSION=1 SQLITE_THREADSAFE=1 SQLITE_DEFAULT_LOCKING_MODE=1
+            SQLITE_TEMP_STORE=3)
+        target_sources(sqlite3 PRIVATE "${SPM_SWITCH_DIR}/aurora/sqlite_horizon.c")
+        get_target_property(_spm_sqlite_sources sqlite3 SOURCES)
+        list(GET _spm_sqlite_sources 0 _spm_sqlite_amalgamation)
+        get_filename_component(_spm_sqlite_dir "${_spm_sqlite_amalgamation}" DIRECTORY)
+        target_include_directories(sqlite3 PRIVATE "${_spm_sqlite_dir}")
+    endif()
+    # ImGui without its SDL backends: the shim has no windows, cursors or SDL_Renderer, so
+    # aurora/imgui_sdl_backends_horizon.cpp stands in for imgui_impl_sdl3 and imgui_impl_sdlrenderer3
+    # (as SwitchWaker). ImGui's default "open in shell" needs fork/exec/waitpid, which Horizon lacks.
+    if(TARGET imgui_backends)
+        get_target_property(_spm_imgui_backends imgui_backends SOURCES)
+        list(FILTER _spm_imgui_backends EXCLUDE REGEX "imgui_impl_sdl(renderer)?3\\.cpp$")
+        list(APPEND _spm_imgui_backends "${SPM_SWITCH_DIR}/aurora/imgui_sdl_backends_horizon.cpp")
+        set_property(TARGET imgui_backends PROPERTY SOURCES ${_spm_imgui_backends})
+    endif()
+    if(TARGET imgui)
+        target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS)
+    endif()
+endmacro()
+
+# The runtime's source list on Horizon: the Horizon guest-memory layer replaces the desktop one, and
+# HostContext uses the AArch64 ELF context switch Android already has (x18 left alone, which suits
+# Horizon too). `list_var` is the runtime's SOURCES variable.
+function(spm_switch_runtime_sources list_var)
+    set(_sources ${${list_var}})
+    list(REMOVE_ITEM _sources
+        "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/guest_flat_memory.cpp"
+        "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/guest_flat_memory_macos.cpp")
+    list(APPEND _sources
+        "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/platform/android/co_switch.S"
+        "${SPM_SWITCH_DIR}/runtime/guest_flat_memory_horizon.cpp"
+        "${SPM_SWITCH_DIR}/runtime/horizon_mman.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_net.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_pthread.c"
+        "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp"
+        "${SPM_SWITCH_DIR}/menu/spm_switch_menu.cpp")
+    # The runtime's precompiled header is C++ (mkw_pch.h); these are the only C files in its targets.
+    # They also stay out of its unity build: CMake would merge them into a generated unity_*_c.c
+    # file that still gets the PCH, whatever these files' own SKIP_PRECOMPILE_HEADERS says.
+    set_source_files_properties(
+        "${SPM_SWITCH_DIR}/runtime/horizon_mman.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_net.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_pthread.c"
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
+    set(${list_var} ${_sources} PARENT_SCOPE)
+endfunction()
+
+# MKW_BUILD_PRODUCTS=OFF: the compile-only audit of the runtime's sources, modelled on the runtime's
+# own macOS audit (mkw_macos_native_compile). abi_bridge.cpp and os_alarm.cpp need the translator's
+# generated/RuntimeConfig.h and stay out, as they do there.
+function(spm_switch_add_audit_target sources)
+    set(_audit ${sources})
+    list(REMOVE_ITEM _audit
+        "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/abi_bridge.cpp"
+        "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/hle/os/os_alarm.cpp")
+    if(SPM_SWITCH_IMGUI_DIR)
+        set(_imgui "${SPM_SWITCH_IMGUI_DIR}")
+    else()
+        FetchContent_Declare(spm_imgui_headers
+            URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b-docking.tar.gz
+            URL_HASH SHA256=466fdef9b18de15f0bb6e288e3d00ffa3d82200ec458ce5e4f724a161d9528a5
+            DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+            SOURCE_SUBDIR do-not-build)
+        FetchContent_MakeAvailable(spm_imgui_headers)
+        set(_imgui "${spm_imgui_headers_SOURCE_DIR}")
+    endif()
+    add_library(mkw_switch_audit OBJECT ${_audit})
+    target_include_directories(mkw_switch_audit PRIVATE
+        "${MKW_RUNTIME_DIR_FOR_SWITCH}/include" "${MKW_RUNTIME_DIR_FOR_SWITCH}/src"
+        "${MKW_RUNTIME_DIR_FOR_SWITCH}/.." "${MKW_RUNTIME_DIR_FOR_SWITCH}/../aurora-main/include"
+        "${SPM_SWITCH_DIR}/include")
+    # xxHash comes from devkitPro's portlibs here; the full build gets Aurora's pinned copy.
+    target_include_directories(mkw_switch_audit SYSTEM PRIVATE
+        "${SPM_SWITCH_SDL3_INCLUDE}" "${_imgui}" "${SWITCH_PORTLIBS}/include")
+    target_compile_features(mkw_switch_audit PRIVATE cxx_std_20)
+    target_compile_definitions(mkw_switch_audit PRIVATE SDL_MAIN_HANDLED TARGET_PC)
+    target_link_libraries(mkw_switch_audit PRIVATE mkw::pugixml mkw::toml11 mkw::cryptopp mkw::mbedtls)
+    set_target_properties(mkw_switch_audit PROPERTIES UNITY_BUILD OFF)
+endfunction()
+
+# After cmake/PublicProducts.cmake: the game links libnx and deko3d and becomes an NRO.
+function(spm_switch_configure_products)
+    if(NOT TARGET WiiCompiled)
+        return()
+    endif()
+    set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME "${SPM_SWITCH_NRO_NAME}" SUFFIX ".elf")
+    # The game links the vendored deko3d (through spm_deko) instead of devkitPro's libdeko3d.
+    target_link_libraries(WiiCompiled PRIVATE SDL3::SDL3-static spm_deko deko3d_release nx)
+    # The renderer takes over Aurora's WebGPU calls at link time: every __wrap_wgpu* defined in
+    # switch/deko/wgpu_objects.cpp and switch/deko/wgpu_encode.cpp needs its --wrap here, or that
+    # call silently goes to Dawn only. This list is generated, not typed:
+    #   grep -ho '__wrap_wgpu[A-Za-z]*' switch/deko/*.cpp | sort -u | sed 's/__wrap_//'
+    # (64 functions; re-run it when switch/deko changes.)
+    set(_spm_dk_wraps
+        wgpuBindGroupAddRef
+        wgpuBindGroupLayoutAddRef
+        wgpuBindGroupLayoutRelease
+        wgpuBindGroupRelease
+        wgpuBufferAddRef
+        wgpuBufferGetConstMappedRange
+        wgpuBufferGetMappedRange
+        wgpuBufferMapAsync
+        wgpuBufferRelease
+        wgpuCommandBufferAddRef
+        wgpuCommandBufferRelease
+        wgpuCommandEncoderAddRef
+        wgpuCommandEncoderBeginComputePass
+        wgpuCommandEncoderBeginRenderPass
+        wgpuCommandEncoderCopyBufferToBuffer
+        wgpuCommandEncoderCopyBufferToTexture
+        wgpuCommandEncoderCopyTextureToBuffer
+        wgpuCommandEncoderCopyTextureToTexture
+        wgpuCommandEncoderFinish
+        wgpuCommandEncoderRelease
+        wgpuComputePassEncoderAddRef
+        wgpuComputePassEncoderDispatchWorkgroups
+        wgpuComputePassEncoderEnd
+        wgpuComputePassEncoderRelease
+        wgpuComputePassEncoderSetBindGroup
+        wgpuComputePassEncoderSetPipeline
+        wgpuComputePipelineAddRef
+        wgpuComputePipelineRelease
+        wgpuDeviceCreateBindGroup
+        wgpuDeviceCreateBindGroupLayout
+        wgpuDeviceCreateBuffer
+        wgpuDeviceCreateCommandEncoder
+        wgpuDeviceCreateComputePipeline
+        wgpuDeviceCreateRenderPipeline
+        wgpuDeviceCreateSampler
+        wgpuDeviceCreateShaderModule
+        wgpuDeviceCreateTexture
+        wgpuQueueSubmit
+        wgpuQueueWriteBuffer
+        wgpuQueueWriteTexture
+        wgpuRenderPassEncoderAddRef
+        wgpuRenderPassEncoderDraw
+        wgpuRenderPassEncoderDrawIndexed
+        wgpuRenderPassEncoderEnd
+        wgpuRenderPassEncoderRelease
+        wgpuRenderPassEncoderSetBindGroup
+        wgpuRenderPassEncoderSetBlendConstant
+        wgpuRenderPassEncoderSetIndexBuffer
+        wgpuRenderPassEncoderSetPipeline
+        wgpuRenderPassEncoderSetScissorRect
+        wgpuRenderPassEncoderSetStencilReference
+        wgpuRenderPassEncoderSetVertexBuffer
+        wgpuRenderPassEncoderSetViewport
+        wgpuRenderPipelineAddRef
+        wgpuRenderPipelineRelease
+        wgpuSamplerAddRef
+        wgpuSamplerRelease
+        wgpuShaderModuleAddRef
+        wgpuShaderModuleRelease
+        wgpuTextureAddRef
+        wgpuTextureCreateView
+        wgpuTextureRelease
+        wgpuTextureViewAddRef
+        wgpuTextureViewRelease)
+    foreach(_spm_dk_fn IN LISTS _spm_dk_wraps)
+        target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=${_spm_dk_fn}")
+    endforeach()
+    # Every pthread and std::thread gets a 4 MiB stack and the application cores, and detaching one
+    # works (runtime/horizon_pthread.c): libnx's default 128 KiB overflows in Tint, and libnx has no
+    # pthread_detach, so std::thread::detach() threw and ended the game.
+    target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=pthread_create" "LINKER:--wrap=pthread_detach")
+    # rename() over an existing file, which Horizon refuses and the NAND saves rely on
+    # (runtime/horizon_unistd.c).
+    target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=rename")
+    nx_generate_nacp("${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nacp"
+        NAME "Super Paper Mario NX" AUTHOR "NewSuperPaperBros + spm-nx" VERSION "0.0.1")
+    nx_create_nro(WiiCompiled
+        OUTPUT "${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nro"
+        NACP "${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nacp")
+endfunction()
