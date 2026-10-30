@@ -2688,7 +2688,7 @@ void DrawMainWindow() {
     ImGui::End();
 }
 
-[[maybe_unused]] void DrawTopBar() {
+void DrawTopBar() {
 #if defined(__SWITCH__)
     // The Switch settings menu replaces this bar: the bar's dropdowns are
     // driven by ImGui navigation, which has no working pad path on the
@@ -4008,6 +4008,7 @@ void Draw() noexcept {
     DrawFpsOverlay();
     DrawDebugHud();
     DrawMainWindow();
+    DrawTopBar();
     DrawExitPrompt();
     controller_mapping_wizard::Draw();
     ApplyInputBlockState();
