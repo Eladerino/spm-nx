@@ -171,9 +171,9 @@ void diag_flush_all(const char* reason) {
     log_flush();
 }
 
-// The command channel (dk.h): UserData/dk_cmd.txt, one command per write, executed by the
-// present path once per present and truncated whether or not it parsed, so a command can
-// never run twice. Commands:
+// The command channel (dk.h): UserData/dk_cmd.txt, one command per write, looked for by the
+// present path every 30th present (twice a second; the look is an SD card file open) and
+// truncated whether or not it parsed, so a command can never run twice. Commands:
 //   flush           diag_flush_all, now
 //   mark <text>     a "[diag] mark" line bracketing what follows it in the log, then a flush
 //   set <key> <0|1> diag_set for any dk_diag.txt switch; the flip is logged with its present

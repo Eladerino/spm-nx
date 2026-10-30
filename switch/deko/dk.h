@@ -208,7 +208,7 @@ uint64_t diag_present_count();
 // "[diag] logs flushed (<reason>)" marker last, so the pulled file's tail proves where the
 // flush point was. Any thread.
 void diag_flush_all(const char* reason);
-// The dk_cmd.txt command channel: the present path calls this once per present; when
+// The dk_cmd.txt command channel: the present path calls this every 30th present; when
 // UserData/dk_cmd.txt holds a command it is executed and the file truncated. The commands
 // are listed at diag_cmd_poll in device.cpp.
 void diag_cmd_poll();
