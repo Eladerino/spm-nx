@@ -11,8 +11,9 @@ The game picks the set for the controller in use (aurora texture_replacement.cpp
         Only the Switch package's set: the nintendo files that come from the vendored CC0 art alone
         (controller.png, ui/, panel.txt, the sideways boot texture), plus the Controls screen's
         marker textures as transparent files (a marker only reports that the game drew it; the
-        Controls panel draws the labels itself). No HD pack is needed and the composites into the
-        pack's artwork are never made in this mode.
+        Controls panel draws the labels itself), and the prompt textures whose pictures are drawn
+        from scratch: the text-box glyphs and the shake icon. No HD pack is needed and the
+        composites into the pack's artwork are never made in this mode.
 Needs ImageMagick (magick) to render the SVGs.
 """
 import argparse
@@ -74,6 +75,14 @@ TEXTURES = [
 MARKERS = {"tex1_248x184_fd844c6227d275cf_5.png": 2, "tex1_248x200_55ef64a9d7e806f7_5.png": 2,
            "tex1_152x144_eba7359cd27cf8b6_5.png": 3, "tex1_176x168_6208c1ec2d692b4f_5.png": 4,
            "tex1_200x152_8394740b60e9c228_5.png": 5, "tex1_168x136_42b4c0a037f4bbee_5.png": 6}
+
+# Prompt textures whose render never reads the pack artwork it replaces: "glyph" paints the whole
+# texture white before drawing, "shake" builds a new transparent picture, so both come out the same
+# from a blank canvas at the pack's size, and the clean set can ship them. Every other kind draws
+# on the artwork itself (disc, face, tippi) or is the artwork (none), so those stay full-set only.
+# None of these four is a marker texture: the full set saves them at the style's root, and so does
+# the clean set.
+PROMPT_CLEAN_KINDS = ("glyph", "shake")
 
 # Where each action's button is on the controller picture (fractions of controller.png): Move = left stick, Flip = top
 # face button, Jump = bottom, Use a Pixl = the 1 button's, Use Tippi = right stick. The panel's callouts point there.
@@ -275,7 +284,9 @@ def build_clean(out_root):
     here, so no pack is required and no game art ships. What it buys: the boot screen's sideways
     picture becomes the Switch controller, marker1 hides the Controls screen's 3D remote, the
     markers 2-6 report that screen's action bubbles, and the Controls panel's own files are in
-    place, so the panel opens over the screen and lists the actions itself.
+    place, so the panel opens over the screen and lists the actions itself. It also buys
+    the in-game prompt textures whose renders never touch the pack artwork (PROMPT_CLEAN_KINDS:
+    the text-box glyphs and the shake icon), so those prompts show Switch buttons.
 
     The marker textures ship transparent because a marker is only a trip signal: the game draws
     the texture on the Controls screen, Aurora reports that it was drawn, and the panel then
@@ -306,6 +317,20 @@ def build_clean(out_root):
     panel_and_ui(out, style,
                  icon_names={"flip": "switch_button_y", "pixl": "switch_button_x"},
                  spots={"flip": spots["pixl"], "pixl": spots["flip"]})
+    # The pack-independent prompt textures (PROMPT_CLEAN_KINDS): rendered from a blank canvas at
+    # the pack's 8x size and saved at 4x under their own names, like the full set, so the in-game
+    # prompts they belong to (the button glyphs inside text boxes, the shake prompt's icon) show
+    # Switch buttons in the package too.
+    for name, kind, buttons in TEXTURES:
+        if kind not in PROMPT_CLEAN_KINDS:
+            continue
+        w, h = (int(v) for v in name.split("_")[1].split("x"))
+        with tempfile.TemporaryDirectory() as tmp:
+            blank = os.path.join(tmp, name)
+            Image.new("RGBA", (w * 8, h * 8), (0, 0, 0, 0)).save(blank)
+            img = render(blank, kind, buttons, style)
+        img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
+        img.save(os.path.join(out, name))
     print(f"{style} (clean): -> {out}")
 
 
