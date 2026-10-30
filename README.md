@@ -1,12 +1,16 @@
-# New Super Paper Bros.
+# spm-nx: New Super Paper Bros for Nintendo Switch
 
-> **This repository is spm-nx**, a Nintendo Switch port of [New Super Paper Bros](https://github.com/josiahg2502-glitch/NewSuperPaperBros) by JosiahG. The Switch port is by Elad (Eladerino). It carries the Switch port of that project (the deko3d renderer and Horizon support); the original PC project lives at the link above, and full credits are in the [Credits](#credits) section below.
+**This is the Nintendo Switch port of New Super Paper Bros, created by JosiahG. The original PC project lives at https://github.com/josiahg2502-glitch/NewSuperPaperBros. This repository is the Switch port of it, and everything here builds on his work.**
 
-A native PC port of **Super Paper Mario** (Wii, 2007), made by statically recompiling the game's PowerPC code to C++
-with [WiiCompiled](https://github.com/patchzyy/Wiicompiled). No emulator: the game runs as a Windows or Linux program.
-A native port of **Super Paper Mario** (Wii, 2007), made by statically recompiling the game's PowerPC code to C++
-with [WiiCompiled](https://github.com/patchzyy/Wiicompiled). No emulator: the game runs as a Windows, Linux, macOS or
-Android program, or as a RetroArch core on Android.
+spm-nx runs the New Super Paper Bros recomp as a homebrew NRO on a modded Nintendo Switch (Horizon), rendered by the port's deko3d backend, and it boots and plays on real hardware. It needs the files from your own USA disc (R8PE01, revision 0), placed in `/switch/spm-nx/game` on the SD card. No game data is included in this repository or in the release zips.
+
+The port tracks upstream closely: release v1.0.6 of the PC project is merged in wholesale, and upstream's in-game Options menu is the port's menu (hold Minus to open it), bringing save anywhere, fast-forward, character switch, cheats and Gecko codes, and data mods. Player 1 remapping lives in that menu's Controls page, and the port's own developer tools sit behind its Developer tools entry. Performance in heavy areas is the port's known open problem.
+
+Installing and building the Switch version are documented in [`switch/README.md`](switch/README.md). Full credits are in the [Credits](#credits) section below.
+
+## Nintendo Switch port
+
+The easy path is the release: download it, copy it to the SD card, add the files from your own disc, and launch. There is no launcher on the Switch; the NRO boots by title takeover to a startup screen. Fresh installs start from Switch defaults: 1.5x rendering (the 720p screen's native size), 16:9 and frame interpolation off. The European disc (R8PP01) is PC-only for now, because only the USA game has been translated for the Switch.
 
 ![Flipside in cinematic 2.39:1 widescreen](screenshots/mac_02_cinematic.png)
 
@@ -14,25 +18,6 @@ Android program, or as a RetroArch core on Android.
 |---|---|
 | ![Gloam Valley](screenshots/mi1_01.png) | ![Lineland Road](screenshots/he1_02.png) |
 | ![The Bitlands](screenshots/ta1_02.png) | ![Sammer's Kingdom](screenshots/wa1_02.png) |
-
-## Nintendo Switch port
-
-This fork also runs on a modded Nintendo Switch as a homebrew NRO (`spm-nx.nro`): the game boots
-and plays on hardware, rendered by a deko3d interposer that draws Aurora's WebGPU frames on the
-Switch GPU. The easy path is the release: download it, copy it to the SD card, add the files from
-your own disc, and launch. Building the NRO from source instead is the alternative, and it is
-documented in full as well.
-
-Two things differ from the PC build. The Switch build currently needs the **USA disc (R8PE01,
-revision 0)**; the European disc (R8PP01) is PC-only for now, because only the USA game has been
-translated for the Switch. And there is no launcher on the Switch: the NRO boots by title
-takeover to a startup screen, and settings live in the game's Options menu (hold `-` for about
-half a second to open it); its Controls page remaps player 1's gamepad, and a small Developer
-shell with this port's diagnostics sits behind the Options menu's Developer tools row. Fresh
-Switch installs start from Switch defaults
-(1.5x rendering, which is the 720p screen's native size, 16:9, frame interpolation off), not
-the PC ones above. Installing, building and the state of the port are documented in
-[`switch/README.md`](switch/README.md).
 
 ## Features
 
