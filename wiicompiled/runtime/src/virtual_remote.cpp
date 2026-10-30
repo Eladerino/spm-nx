@@ -23,6 +23,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -146,7 +147,8 @@ Intent KeyboardIntent() {
 // action's default with SDL gamepad names: buttons by position (a = bottom, b = right, x = left, y = top,
 // back, start, leftshoulder, dpup, touchpad ...) and axes with a direction (rightx-) or none for a
 // trigger (lefttrigger). The left stick always moves the remote's D-pad on top of that. The launcher
-// writes these; parsed once at the first read.
+// writes these; the table is parsed at the first read and re-parsed whenever
+// ReloadPadLayouts swaps a fresh table in after an in-game edit.
 struct PadInput {
     bool axis = false;
     int id = 0;
@@ -208,19 +210,32 @@ std::vector<PadInput> ParsePadInputs(const std::string& text) {
     return inputs;
 }
 
-const std::array<PadLayout, kPadStyleCount>& PadLayouts() {
-    static const std::array<PadLayout, kPadStyleCount> layouts = [] {
-        std::array<PadLayout, kPadStyleCount> result;
-        for (int style = 0; style < kPadStyleCount; ++style) {
-            for (int action = 0; action < Keybinds::kActionCount; ++action) {
-                const std::string custom =
-                    RuntimeConfigFile::GamepadBinding(std::string(kPadStyleNames[style]) + "_" + kPadActionKeys[action]);
-                result[style][action] = ParsePadInputs(custom.empty() ? kPadDefaults[action][style] : custom);
-            }
+std::array<PadLayout, kPadStyleCount> BuildPadLayouts() {
+    std::array<PadLayout, kPadStyleCount> result;
+    for (int style = 0; style < kPadStyleCount; ++style) {
+        for (int action = 0; action < Keybinds::kActionCount; ++action) {
+            const std::string custom =
+                RuntimeConfigFile::GamepadBinding(std::string(kPadStyleNames[style]) + "_" + kPadActionKeys[action]);
+            result[style][action] = ParsePadInputs(custom.empty() ? kPadDefaults[action][style] : custom);
         }
-        return result;
-    }();
-    return layouts;
+    }
+    return result;
+}
+
+// The live layouts, behind a shared pointer so a reload never mutates a
+// table a frame is reading: a built table is immutable, GamepadIntent holds
+// one snapshot for its whole read, and a reload publishes a whole new table
+// by swapping the pointer under the mutex (held only for the copy). The old
+// table is freed when the last reader's snapshot goes away.
+std::mutex g_layoutsMutex;
+std::shared_ptr<const std::array<PadLayout, kPadStyleCount>> g_layouts;
+
+std::shared_ptr<const std::array<PadLayout, kPadStyleCount>> CurrentPadLayouts() {
+    std::lock_guard<std::mutex> lock(g_layoutsMutex);
+    if (g_layouts == nullptr) {
+        g_layouts = std::make_shared<const std::array<PadLayout, kPadStyleCount>>(BuildPadLayouts());
+    }
+    return g_layouts;
 }
 
 PadStyle StyleFor(SDL_Gamepad* gamepad) {
@@ -249,7 +264,7 @@ bool PadInputHeld(SDL_Gamepad* gamepad, const PadInput& input) {
 
 Intent GamepadIntent() {
     Intent intent;
-    const auto& layouts = PadLayouts();  // parsed (and bad [gamepad] entries logged) on the first read
+    const auto layouts = CurrentPadLayouts();  // one snapshot for the whole read; bad entries logged as it was built
     // On-screen button prompts follow the pad last pressed (else the first one); none = the game's Wii Remote icons.
     static int s_lastPressedStyle = -1;
     int firstStyle = -1;
@@ -282,7 +297,7 @@ Intent GamepadIntent() {
             continue;  // a real Wii Remote: the game reads it through KPAD
         }
         const PadStyle style = StyleFor(gamepad);
-        const PadLayout& layout = layouts[style];
+        const PadLayout& layout = (*layouts)[style];
         if (firstStyle < 0) firstStyle = style;
         const Intent before = intent;
         const auto held = [&](int action) {
@@ -560,6 +575,29 @@ bool Sample(uint32_t chan, WiiRemoteInput::KpadSample& sample) {
     ApplyMotion(g_motion[chan], intent, sample);
     if (chan == 0) UpdatePointer(sample);
     return true;
+}
+
+void ReloadPadLayouts() {
+    // Parse off to the side first; the mutex is held only to publish.
+    auto fresh = std::make_shared<const std::array<PadLayout, kPadStyleCount>>(BuildPadLayouts());
+    std::lock_guard<std::mutex> lock(g_layoutsMutex);
+    g_layouts = std::move(fresh);
+}
+
+int PadStyleOf(SDL_Gamepad* gamepad) { return static_cast<int>(StyleFor(gamepad)); }
+
+const char* PadStyleName(int style) {
+    return style >= 0 && style < kPadStyleCount ? kPadStyleNames[style] : nullptr;
+}
+
+const char* PadActionKey(int action) {
+    return action >= 0 && action < Keybinds::kActionCount ? kPadActionKeys[action] : nullptr;
+}
+
+const char* PadDefaultBinding(int style, int action) {
+    return style >= 0 && style < kPadStyleCount && action >= 0 && action < Keybinds::kActionCount
+               ? kPadDefaults[action][style]
+               : nullptr;
 }
 
 uint32_t LastButtons() { return g_lastButtons.load(std::memory_order_relaxed); }

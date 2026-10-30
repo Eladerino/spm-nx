@@ -4,6 +4,8 @@
 
 #include <cstdint>
 
+struct SDL_Gamepad;
+
 // New Super Mario Bros. Wii reads nothing but Wii Remotes (held sideways, or with a Nunchuk), so a
 // keyboard or an ordinary gamepad has to become one. Every port with no real Wii Remote but with an
 // aurora PAD source (an SDL gamepad, or the keyboard when it is switched on for that port in the
@@ -37,5 +39,21 @@ enum TouchButton : uint32_t {
 void SetTouchState(uint32_t touchButtons, bool shake, float tilt);
 // Player 1's Wii Remote buttons (WPAD bits) from keyboard, gamepads and touch, as last handed to the game.
 uint32_t LastButtons();
+
+// Re-parse the [gamepad] layouts from the current config and swap them in
+// atomically, so an edit made in the settings menu applies in game at once.
+void ReloadPadLayouts();
+// The layout style index for a pad (0 xbox, 1 playstation, 2 nintendo), the
+// same choice GamepadIntent makes for it.
+int PadStyleOf(SDL_Gamepad* gamepad);
+// The config style name ("xbox" / "playstation" / "nintendo") for an index
+// from PadStyleOf, or nullptr when out of range.
+const char* PadStyleName(int style);
+// The config action key ("jump", "tilt_left", ...) for an action index in
+// Keybinds order, or nullptr when out of range.
+const char* PadActionKey(int action);
+// The built-in default binding string for one style and action: what the
+// parser uses while the config key is absent.
+const char* PadDefaultBinding(int style, int action);
 
 } // namespace VirtualRemote
