@@ -1,7 +1,8 @@
 // GuestFlat for Horizon (the Switch build replaces runtime/src/guest_flat_memory.cpp with this file).
 //
 // Bring-up mode (this file today): every guest access takes the checked Memory::* path, so there is
-// no flat 4 GiB view at all. Each backing store (MEM1, MEM2, and each "owned" region such as the
+// no flat 4 GiB view at all (RequiresCheckedAccess() is a compile-time true on __SWITCH__, in
+// guest_flat_memory.h). Each backing store (MEM1, MEM2, and each "owned" region such as the
 // locked cache) is one page-aligned heap block, and HostPointer() hands out pointers into it, the
 // same "host view" the other platforms create. The mirrors (MEM1 at 0x00000000, 0x80000000 and
 // 0xC0000000, MEM2 at 0x10000000, 0x90000000 and 0xD0000000) need no aliasing here: the page table
@@ -30,7 +31,6 @@
 #include "runtime_log.h"
 
 namespace GuestFlat {
-bool g_requiresCheckedAccess = true;
 
 namespace {
 

@@ -1323,7 +1323,7 @@ bool aurora_switch_dk_present(void* texture) {
     const uint64_t a0 = now_ns();
     const int slot = swapchain_acquire(&imageFence);
     const uint64_t acquireNs = now_ns() - a0;
-    std::lock_guard<std::mutex> lock(queue_mutex());
+    std::unique_lock<std::mutex> lock(queue_mutex());
     swapchain_wait(&imageFence);
     const DkImage& target = swapchain_image(slot);
     DkImageView dst;
@@ -1412,8 +1412,10 @@ bool aurora_switch_dk_present(void* texture) {
               g_renderPipelines.size());
         log_flush();
     }
-    // a dk_cmd.txt command, if one is waiting, runs here: once per present (device.cpp)
-    diag_cmd_poll();
+    // a dk_cmd.txt command, if one is waiting (device.cpp): looked for every 30th present, twice a
+    // second, and outside the queue lock, because the look is a file open on the SD card
+    lock.unlock();
+    if (R.presents % 30 == 0) diag_cmd_poll();
     return true;
 }
 

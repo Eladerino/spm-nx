@@ -29,7 +29,13 @@ inline void InvokeIndirectCpu(uint32_t target, CpuContext* ctx);
 // field is always removed, bloom when the user disabled it)
 // It is also where code mods hook game functions (mod_runtime.h): true when a mod replaced the call.
 namespace ModHooks {
+#if defined(__SWITCH__)
+// Code mods never load on Switch (LoadCodeMods returns at once), so no hook can be active, and every
+// generated call skips the flag load and its branch.
+inline constexpr bool g_active = false;
+#else
 extern bool g_active;
+#endif
 bool Run(uint32_t target, CpuContext* ctx);
 }
 inline bool ApplyRuntimeCallOptions(uint32_t target, CpuContext* ctx) {

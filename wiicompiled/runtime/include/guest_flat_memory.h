@@ -83,7 +83,12 @@ bool IsActive();
 #define MKW_GUEST_FLAT_FIXED_PAGE_SIZE 1
 #endif
 
-#if defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
+#if defined(__SWITCH__)
+// The Switch build maps no flat view (switch/runtime/guest_flat_memory_horizon.cpp), so every access
+// is checked, and saying so at compile time keeps the flag load, its branch and the dead flat arm
+// out of each of the translated game's guest loads and stores.
+inline constexpr bool RequiresCheckedAccess() noexcept { return true; }
+#elif defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
 inline constexpr bool RequiresCheckedAccess() noexcept { return false; }
 #else
 extern bool g_requiresCheckedAccess;
