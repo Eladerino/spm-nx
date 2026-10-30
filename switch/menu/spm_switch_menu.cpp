@@ -527,8 +527,9 @@ SDL_Gamepad* AcquirePad() {
 // One snapshot of the pad, in the framework's slot order. The face buttons
 // fill by label (the shim maps buttons by label: Switch A is SDL "south",
 // Switch B is SDL "east"); the stick slots carry the axis magnitude in
-// their direction; the right stick is read for completeness of the slot
-// map but nothing here navigates with it, as in the framework.
+// their direction and the trigger slots the trigger axes' pull; the right
+// stick is read for completeness of the slot map but nothing here
+// navigates with it, as in the framework.
 PadValues ReadPadValues() {
     PadValues values{};
     SDL_Gamepad* pad = AcquirePad();
@@ -540,8 +541,6 @@ PadValues ReadPadValues() {
     values[kPadY] = button(SDL_GAMEPAD_BUTTON_NORTH);
     values[kPadLB] = button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
     values[kPadRB] = button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
-    values[kPadLT] = button(SDL_GAMEPAD_BUTTON_LEFT_TRIGGER);
-    values[kPadRT] = button(SDL_GAMEPAD_BUTTON_RIGHT_TRIGGER);
     values[kPadMenu] = button(SDL_GAMEPAD_BUTTON_START);
     values[kPadOptions] = button(SDL_GAMEPAD_BUTTON_BACK);
     values[kPadDUp] = button(SDL_GAMEPAD_BUTTON_DPAD_UP);
@@ -549,6 +548,13 @@ PadValues ReadPadValues() {
     values[kPadDLeft] = button(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
     values[kPadDRight] = button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
     auto axis = [&](SDL_GamepadAxis a) { return static_cast<float>(SDL_GetGamepadAxis(pad, a)) / 32767.0f; };
+    // The triggers are axes in SDL3, not buttons. The framework's slots are
+    // analogue 0..1 and its SDL host fills these two from the trigger axes,
+    // clamped at rest, so the same here; the feed's thresholds do the rest.
+    const float lt = axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+    const float rt = axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+    values[kPadLT] = lt > 0.0f ? lt : 0.0f;
+    values[kPadRT] = rt > 0.0f ? rt : 0.0f;
     const float lx = axis(SDL_GAMEPAD_AXIS_LEFTX);
     const float ly = axis(SDL_GAMEPAD_AXIS_LEFTY);
     values[kPadLSUp] = ly < 0.0f ? -ly : 0.0f;
@@ -806,7 +812,10 @@ void Draw() {
                 }
             }
         }
-        if (ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_FittingPolicyShrink)) {
+        // FittingPolicyResizeDown is the shrink-to-fit policy's name in the
+        // vendored ImGui (v1.91.9b); ImGui 1.92 renamed it FittingPolicyShrink,
+        // the name SwitchWakerHD builds against.
+        if (ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_FittingPolicyResizeDown)) {
             for (int i = 0; i < kSectionCount; ++i) {
                 const ImGuiTabItemFlags flags = g_selectTab == i ? ImGuiTabItemFlags_SetSelected : 0;
                 if (ImGui::BeginTabItem(kSections[i], nullptr, flags)) {
