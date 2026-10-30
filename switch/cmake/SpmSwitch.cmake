@@ -239,6 +239,22 @@ function(spm_switch_configure_products)
     if(NOT TARGET WiiCompiled)
         return()
     endif()
+    # The translated game and the runtime link into this one NRO and nothing else: no other
+    # binary consumes their symbols and nothing looks them up by name at runtime. devkitPro's
+    # toolchain compiles every translation unit -fPIE with default visibility, so a reference
+    # to a symbol defined in another unit (each of the ~9.9k extern "C" guest functions is
+    # declared in its callers' units and defined in exactly one shard) goes through the GOT.
+    # Hidden visibility on the first-party targets below lets the compiler bind those
+    # references inside the link unit instead, the same flag SwitchWakerHD uses for the same
+    # reason. Dawn, Aurora, deko3d and the third-party libraries keep their own settings:
+    # they are not guest code, and their symbols cross between their own targets.
+    foreach(_spm_visibility_target IN ITEMS
+            mkw_base_shared mkw_base_sensitive mkw_retro_sensitive mkw_retro_rewind_functions
+            mkw_runtime_common WiiCompiled RetroRewind)
+        if(TARGET ${_spm_visibility_target})
+            target_compile_options(${_spm_visibility_target} PRIVATE -fvisibility=hidden)
+        endif()
+    endforeach()
     set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME "${SPM_SWITCH_NRO_NAME}" SUFFIX ".elf")
     # The game links the vendored deko3d (through spm_deko) instead of devkitPro's libdeko3d.
     target_link_libraries(WiiCompiled PRIVATE SDL3::SDL3-static spm_deko deko3d_release nx)
