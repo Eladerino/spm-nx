@@ -81,20 +81,19 @@ Two of those deserve a line each:
 ## Settings menu
 
 Holding `-` for about half a second opens the Switch settings menu; a short press is still the
-game's `-`. The menu is a top bar made for the pad: Left and Right (D-pad or left stick) move along
-the bar between its Graphics, Display, Audio, Game and Developer sections, A or Down
-opens the focused section, Up and Down move inside it, Left and Right adjust the
-focused row (on a row they do not adjust, they switch to the next section instead),
-and B closes the section, then the menu. A short description of the focused row, or
-of the section when none is open, is shown at the bottom of the screen. While the
-menu is open the game does not receive pad input, so nothing moves behind it.
+game's `-`. The menu's framework is adapted from SwitchWakerHD's settings overlay by centollOS
+(see "Licenses" below): a panel with a tab bar across the top (Graphics, Display, Audio, Game
+and Developer), one scrolling page per tab. Use the D-pad or left stick to move, A to select
+or adjust, L and R to switch tabs, and B to close. Holding the focus on a row shows a short
+description of what it does. While the menu is open the game does not receive pad input, so
+nothing moves behind it.
 
 - **Graphics:** Resolution (0.75x, 1x, 1.5x or Auto), Aspect (original 4:3, 16:9, Fill Window or
   cinematic 2.39:1; switching between 4:3 and widescreen takes effect after a restart, and the
   menu says so on the row), Frame interpolation (Off, 120 or 180), Vsync, Bloom, Disable copy
   filter, Skip draws while shaders compile, and Texture replacements (the master switch for
   the replacement button icons and prompt pictures; takes effect after a restart, as the
-  row's description at the bottom of the screen says).
+  row's own description says).
 - **Display:** Show FPS and Frame graph.
 - **Audio:** Master, Music, Sound effects, UI and Voices volume sliders, Mute, and the Audio
   mix worker toggle.
@@ -212,9 +211,9 @@ include/                     Horizon stand-ins for POSIX headers newlib lacks (s
 runtime/                     guest memory for Horizon, mmap/mprotect over svcSetMemoryPermission,
                              mbed TLS entropy/clock/recv, getifaddrs stub
 source/spm_switch_init.cpp   libnx startup: SD folders, stderr log, sockets, crash dump
-menu/spm_switch_menu.cpp     the Switch settings menu (plus include/spm_switch_menu.h): one ImGui
-                             window that polls the pad itself; drawn from the overlay's Draw pass
-                             in place of the PC top bar
+menu/spm_switch_menu.cpp     the Switch settings menu (plus include/spm_switch_menu.h): its
+                             framework is adapted from SwitchWakerHD's settings overlay;
+                             drawn from the overlay's Draw pass in place of the PC top bar
 sdl3_shim/                   SDL 3 implemented on libnx (sdl3_shim/PATCHES.md)
 dawn/                        SwitchWaker's Dawn recipe and Horizon patches
 aurora/                      Horizon shims for Aurora: the ImGui SDL backends and the sqlite journal
@@ -299,10 +298,11 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
 The fork is GPLv3 like upstream. Code taken from SwitchWaker stays MIT and Dawn's patches stay
 BSD-3-Clause. The `deko/` interposer is MPL-2.0 (text in `licenses/MPL-2.0.txt`), as is the
 Mozilla CA bundle (`cacert.pem`) the runtime's HTTPS uses. `THIRD_PARTY.md` lists each file and
-its origin. The settings menu in `menu/` is this fork's own code under GPLv3; its design follows
-SwitchWakerHD's overlay patterns (pad polling with edge detection, the developer options gate,
-confirm on the face-down button and back on face-right), which is a design reference, not copied
-code.
+its origin. The settings menu framework in `menu/` (its window, tab bar, gamepad navigation,
+widget helpers and style) is adapted from SwitchWakerHD's settings overlay by
+[centollOS](https://github.com/centollOS/SwitchWakerHD), which builds on the ZeldaWWHDRecomp
+overlay, and stays MPL-2.0 like its source (`licenses/MPL-2.0.txt`); the menu's rows, settings
+and diagnostic plumbing are this fork's own code under GPLv3.
 
 The button prompt icons staged into `UserData/button_icons/` are "Input Prompts" by
 [Kenney](https://kenney.nl), CC0, generated at build time from the SVGs vendored in

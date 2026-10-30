@@ -1,32 +1,45 @@
-// The Switch settings menu (spm_switch_menu.h). Drawn from the runtime
-// overlay's Draw pass in place of the PC top bar: a top bar of sections with
-// one dropdown open at a time (JSRF-style), and a description window pinned
-// to the bottom of the screen. The layout is deliberate: the previous single
-// list ran to 38 rows and roughly 1,100 px of content with the Developer
-// gate on, drawn in one centred window with no scroll region in a 720 px
-// canvas, so the selection walked into rows below the visible area and the
-// highlight seemed to vanish (on hardware the walk died at the matrix trace
-// row, the last Developer row that fit). Here the longest dropdown
-// (Developer, gate on: a warning line plus 19 rows at the 23 px row advance,
-// under the bar, with the status line shown) needs about 520 px from the
-// top of the canvas, inside it with the description window's roughly 65 px
-// reserved at the bottom, and every drawn row is always on screen.
+// The Switch settings menu (spm_switch_menu.h).
 //
-// Input is the part that has to be boring: while the menu is visible it polls
-// the player-1 gamepad directly, once per frame, through the same SDL getters
-// gameplay input reads (they return the shim's latest published sample), keeps
-// the previous frame's sample for edge detection, and adds a held-repeat for
-// directions and adjustments. Selection is this file's own index into the row
-// list, and rows draw with that state explicitly. Nothing here uses ImGui
-// navigation, window focus, or synthetic key events: two attempts at feeding
-// this port's pad to ImGui nav failed on hardware, so the menu does not ask.
+// The framework of this menu (its window, tab bar, focus and gamepad
+// navigation) is adapted from SwitchWakerHD's settings overlay by centollOS
+// (https://github.com/centollOS/SwitchWakerHD, commit b2e51df), which builds
+// on the ZeldaWWHDRecomp overlay: a centred settings panel with a tab bar,
+// each tab a scrolling page of ordinary ImGui widgets, the gamepad polled
+// once per frame and fed to Dear ImGui's own gamepad navigation
+// (io.AddKeyAnalogEvent + ImGuiConfigFlags_NavEnableGamepad), L / R
+// switching tabs and B closing, through the overlay's edge-detected presses.
+// Taken over, with credit and under MPL-2.0 (see THIRD_PARTY.md): the
+// gamepad feed (their gamepad_nav.h), the settings window's shape and tab
+// machinery (their overlay.cpp settings_window), the widget helpers and
+// tooltip help (their widgets.h / tooltip.h), and the style (their
+// setup_style: dark sea-blue palette, gold navigation cursor). The rows,
+// getters, apply calls and diagnostic plumbing below the framework are this
+// port's own, as they were before the framework arrived.
 //
-// Rows are a view over live state, never a copy: every row reads its backing
-// getter when it draws and when it acts. Rows the overlay exports accessors
-// for go through settings_overlay.h. The rest live in settings_overlay.cpp
-// file statics, so those rows read RuntimeConfigFile (the overlay persists
-// every change there immediately, and nothing else mutates those settings on
-// Switch) and write through the same apply calls the PC handlers use.
+// Adaptations at this port's seams, and nothing else:
+// - Input values are read from the runtime's PAD HLE gamepad handle (the
+//   SDL getters the game itself reads) once per frame inside Draw, where
+//   Waker's SDL host polls its own input pump. The feed runs after Aurora's
+//   NewFrame in this stack, so navigation consumes it on the next frame.
+// - The trace hooks and the mouse-ownership handoff in their gamepad feed
+//   have no host here (no trace sink, no mouse), so the controller is
+//   simply always the navigation owner.
+// - Their style is applied at start-up to their own ImGui context; this
+//   context is shared with the runtime overlay, so the same values are
+//   pushed around this window each frame and popped after it.
+// - Their font (a 17 px system font) stays the host's; the panel geometry
+//   and widget shapes are unchanged, only the glyphs are the overlay's.
+// - The face buttons feed by label, as theirs do: the shim maps the pad by
+//   label, so slot A is SDL south (confirm) and slot B is SDL east (back),
+//   the mapping this menu has always used.
+// - Open and close stay this port's seams: the overlay's hold-Minus / F10
+//   handling calls SetVisible, and the guest pad block follows Visible().
+//
+// Rows are a view over live state, never a copy: every row reads its
+// backing getter when it draws and writes through the same apply calls the
+// PC handlers use when it changes. Rows the overlay exports accessors for
+// go through settings_overlay.h; the rest read RuntimeConfigFile (the
+// overlay persists every change there immediately) as before.
 
 #include "spm_switch_menu.h"
 
@@ -43,6 +56,7 @@
 #include "runtime_config.h"
 #include "settings_overlay.h"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -75,14 +89,9 @@ void log_flush();
 namespace spm_switch_menu {
 
 bool g_visible = false;
-// Menu focus state: which bar section is focused, whether its dropdown is
-// open, and which row inside the open dropdown is focused. The open section
-// is always the focused bar section; opening a dropdown starts at its first
-// row, and switching section from inside a dropdown lands on the
-// neighbour's first row too, so the focus is never ambiguous.
-int g_barSection = 0;
-bool g_dropdownOpen = false;
-int g_row = 0;
+bool g_justOpened = false;  // the next drawn frame claims navigation focus
+int g_tab = 0;              // the open tab; kept between opens, as theirs is
+int g_selectTab = -1;       // a tab the shoulders asked for, consumed by the tab bar
 
 // ---------------------------------------------------------------------------
 // Rows
@@ -123,19 +132,14 @@ struct RowDef {
     const char* description;
 };
 
-// Description budget, measured from the draw code below: the window is
-// 560 px wide with the default 8 px window padding on each side, leaving
-// 544 px. The built-in 13 px font advances 7 px per character, so a line
-// holds 77 characters and the fixed two-line area holds 154. Every row's
-// description stays inside that budget (the host harness checks it).
-constexpr size_t kMaxDescriptionChars = 154;
-
+// Description budget: a tooltip wraps at the tooltip window's own width, so
+// the old two-line description-area budget no longer binds; the texts are
+// kept as written for the description build (they are the row help now).
 constexpr RowId DiagRow(int n) {
     return static_cast<RowId>(static_cast<int32_t>(RowId::kDiagFirst) + n);
 }
 
-// Section order per the replacement-menu spec: Graphics, Display, Audio,
-// Game, Developer.
+// Section order: Graphics, Display, Audio, Game, Developer.
 constexpr RowDef kRows[] = {
     {"Graphics", RowId::kResolution, "Resolution", "Scales the rendered picture from the game's 480-line base. Auto matches the screen size; lower values reduce renderer work."},
     {"Graphics", RowId::kFrameInterp, "Frame interpolation", "Presents extra frames between the game's own frames. On the 60 Hz screen it mainly duplicates frames and costs worker time. Off is recommended."},
@@ -177,42 +181,11 @@ constexpr RowDef kRows[] = {
     {"Developer", RowId::kClearShaderCache, "Clear shader cache", "Requests deletion of the compiled shader cache at the next launch. Use it for a cache that has gone wrong; shaders then compile again as needed."},
 };
 
-constexpr bool DescriptionsWithinBudget() {
-    for (const RowDef& row : kRows) {
-        size_t length = 0;
-        while (row.description[length] != '\0') ++length;
-        if (length == 0 || length > kMaxDescriptionChars) return false;
-    }
-    return true;
-}
-static_assert(DescriptionsWithinBudget(), "every menu row needs a description inside the two-line budget");
-
-// The bar's sections, in bar order; kRows groups its rows under these names.
-// While no dropdown is open, the description area shows the focused
-// section's own line instead of a row's, so each section carries one too.
-// A section line is a single line at the same measured width as a row
-// description line (77 characters), checked below.
+// The tab bar's sections, in bar order; kRows groups its rows under these
+// names.
 const char* const kSections[] = {"Graphics", "Display", "Audio", "Game", "Developer"};
 constexpr int kSectionCount = 5;
 constexpr int kDeveloperSection = 4;
-constexpr const char* const kSectionDescriptions[] = {
-    "Render size, picture shape, and frame presentation.",
-    "On-screen frame rate display and the frame-time graph.",
-    "Volume levels, mute, and how the game audio is mixed.",
-    "Controller vibration and animated tile patches.",
-    "Renderer diagnostics for test runs and bug reports.",
-};
-static_assert(sizeof(kSectionDescriptions) / sizeof(kSectionDescriptions[0]) == kSectionCount,
-              "one description per bar section");
-constexpr bool SectionDescriptionsFitOneLine() {
-    for (const char* description : kSectionDescriptions) {
-        size_t length = 0;
-        while (description[length] != '\0') ++length;
-        if (length == 0 || length > 77) return false;
-    }
-    return true;
-}
-static_assert(SectionDescriptionsFitOneLine(), "section descriptions are one line at the menu's width");
 
 // The dk_diag.txt keys, in the spec's table order; kDiagFirst + n indexes it.
 const char* const kDiagKeys[] = {
@@ -229,6 +202,10 @@ bool IsSlider(RowId id) {
 
 bool IsAction(RowId id) {
     return id == RowId::kFlushLogs || id == RowId::kMarkLog || id == RowId::kClearShaderCache;
+}
+
+bool IsCycle(RowId id) {
+    return id == RowId::kResolution || id == RowId::kFrameInterp || id == RowId::kAspect;
 }
 
 bool DevGateOn() { return RuntimeConfigFile::ShowDeveloperOptions(false); }
@@ -255,13 +232,6 @@ const RowDef& SectionRowAt(int section, int index) {
     }
     return kRows[0];  // unreachable: callers clamp the index to the count
 }
-
-// Rows Left and Right adjust in place. On any other row inside a dropdown,
-// Left and Right move along the bar instead (see StepInput).
-bool IsCycle(RowId id) {
-    return id == RowId::kResolution || id == RowId::kFrameInterp || id == RowId::kAspect;
-}
-bool IsAdjustable(RowId id) { return IsCycle(id) || IsSlider(id); }
 
 // ---------------------------------------------------------------------------
 // Row state: read live from the backing getter, every time.
@@ -347,9 +317,8 @@ void WriteDiagFileBack() {
     std::fclose(file);
 }
 
-void FlipDiag(RowId id) {
+void SetDiag(RowId id, bool on) {
     const char* key = kDiagKeys[static_cast<int>(id) - static_cast<int>(RowId::kDiagFirst)];
-    const bool on = !swdk::diag_get(key);
     if (!swdk::diag_set(key, on)) return;
     // diag_cmd_poll's marker format (device.cpp): diag_set does not log, so
     // the menu emits the marker itself, then persists the file like the file
@@ -360,8 +329,7 @@ void FlipDiag(RowId id) {
     WriteDiagFileBack();
 }
 
-void FlipToggle(RowId id) {
-    const bool on = !ToggleState(id);
+void ApplyToggle(RowId id, bool on) {
     switch (id) {
         case RowId::kVsync: settings_overlay::SetVSync(on); break;
         case RowId::kBloom: {
@@ -411,7 +379,7 @@ void FlipToggle(RowId id) {
             break;
         case RowId::kDevGate: RuntimeConfigFile::SetShowDeveloperOptions(on); break;
         default:
-            if (IsDiag(id)) FlipDiag(id);
+            if (IsDiag(id)) SetDiag(id, on);
             break;
     }
 }
@@ -459,77 +427,42 @@ void FireAction(RowId id) {
     }
 }
 
-// Resolution cycles the Switch subset only (the full PC table goes to 8x,
-// which the console's frame budget cannot feed). From a value outside the
-// subset (an older config's 2.25x, say), cycling starts at 1x.
+// The cycle rows' option sets. Resolution cycles the Switch subset only
+// (the full PC table goes to 8x, which the console's frame budget cannot
+// feed); frame interpolation the Switch subset of Aurora's targets (240
+// needs a 240 Hz panel this console does not have).
 const float kResolutionSubset[] = {0.75f, 1.0f, 1.5f, 0.0f};
-
-void CycleResolution(int dir) {
-    const float current = settings_overlay::RenderScale();
-    int index = -1;
-    for (int i = 0; i < 4; ++i) {
-        if (std::fabs(current - kResolutionSubset[i]) < 0.01f) index = i;
-    }
-    const float next = index < 0 ? 1.0f : kResolutionSubset[(index + dir + 4) % 4];
-    settings_overlay::SetRenderScale(next);
-}
-
-// Frame interpolation cycles the Switch subset of Aurora's targets: the
-// overlay's table is {0, 120, 180, 240}, and 240 needs a 240 Hz panel this
-// console does not have. From a value outside the subset (a 240 a PC config
-// wrote, say), cycling starts at Off.
+const char* const kResolutionLabels[] = {"0.75x", "1x", "1.5x", "Auto"};
 const uint32_t kFrameInterpSubset[] = {0, 120, 180};
-
-void CycleFrameInterp(int dir) {
-    const uint32_t current = RuntimeConfigFile::FrameInterpolationFps(0);
-    int index = -1;
-    for (int i = 0; i < 3; ++i) {
-        if (current == kFrameInterpSubset[i]) index = i;
-    }
-    const uint32_t next = index < 0 ? 0 : kFrameInterpSubset[(index + dir + 3) % 3];
-    // The PC combo's apply pair (settings_overlay.cpp): the Aurora call
-    // retargets the running frame pacing, the config write persists it.
-    aurora_set_frame_interpolation_fps(next);
-    RuntimeConfigFile::SetFrameInterpolationFps(next);
-}
-
+const char* const kFrameInterpLabels[] = {"Off", "120", "180"};
 const char* const kAspectLabels[] = {"Original 4:3", "16:9", "Fill Window", "Cinematic 2.39:1"};
 
-void CycleAspect(int dir) {
-    const int32_t current = settings_overlay::Aspect();
-    const int32_t next = (current + dir + 4) % 4;
-    settings_overlay::SetAspect(next);
+// Index of the current value in the subset, or -1 when the config holds a
+// value outside it (an older config's 2.25x, a PC-written 240): the combo
+// then shows the value itself as its preview and checks no item.
+int ResolutionIndex() {
+    const float current = settings_overlay::RenderScale();
+    for (int i = 0; i < 4; ++i) {
+        if (std::fabs(current - kResolutionSubset[i]) < 0.01f) return i;
+    }
+    return -1;
+}
+int FrameInterpIndex() {
+    const uint32_t current = RuntimeConfigFile::FrameInterpolationFps(0);
+    for (int i = 0; i < 3; ++i) {
+        if (current == kFrameInterpSubset[i]) return i;
+    }
+    return -1;
 }
 
-void ActivateRow(RowId id) {
-    if (IsAction(id)) {
-        FireAction(id);
-    } else if (id == RowId::kResolution) {
-        CycleResolution(1);
-    } else if (id == RowId::kFrameInterp) {
-        CycleFrameInterp(1);
-    } else if (id == RowId::kAspect) {
-        CycleAspect(1);
-    } else if (IsSlider(id)) {
-        SetVolumePercent(id, VolumePercent(id) + 10);
-    } else {
-        FlipToggle(id);
-    }
+void SetResolutionValue(float scale) { settings_overlay::SetRenderScale(scale); }
+void SetFrameInterpValue(uint32_t fps) {
+    // The PC combo's apply pair (settings_overlay.cpp): the Aurora call
+    // retargets the running frame pacing, the config write persists it.
+    aurora_set_frame_interpolation_fps(fps);
+    RuntimeConfigFile::SetFrameInterpolationFps(fps);
 }
-
-void AdjustRow(RowId id, int dir) {
-    if (id == RowId::kResolution) {
-        CycleResolution(dir);
-    } else if (id == RowId::kFrameInterp) {
-        CycleFrameInterp(dir);
-    } else if (id == RowId::kAspect) {
-        CycleAspect(dir);
-    } else if (IsSlider(id)) {
-        SetVolumePercent(id, VolumePercent(id) + 2 * dir);
-    } else if (!IsAction(id)) {
-        FlipToggle(id);
-    }
-}
+void SetAspectValue(int32_t aspect) { settings_overlay::SetAspect(aspect); }
 
 std::string ValueText(RowId id) {
     if (id == RowId::kResolution) {
@@ -560,31 +493,26 @@ std::string ValueText(RowId id) {
 }
 
 // ---------------------------------------------------------------------------
-// Pad polling: one sample per frame, previous sample for edges, held-repeat
-// for directions and adjustments. The shim maps buttons by label: Switch A
-// is SDL "south" (confirm), Switch B is SDL "east" (back).
+// The framework: gamepad feed, navigation and drawing, adapted from
+// SwitchWakerHD's settings overlay (see the note at the top of this file).
 
-struct Sample {
-    bool up = false;
-    bool down = false;
-    bool left = false;
-    bool right = false;
-    bool confirm = false;
-    bool back = false;
+// Pad slots, in SwitchWakerHD's input_map order: every device combined,
+// analogue values 0..1 (a pressed button is 1).
+enum PadSlot : int {
+    kPadNone,
+    kPadA, kPadB, kPadX, kPadY, kPadLB, kPadRB, kPadLT, kPadRT,
+    kPadMenu, kPadOptions, kPadHome, kPadL3, kPadR3,
+    kPadDUp, kPadDDown, kPadDLeft, kPadDRight,
+    kPadLSUp, kPadLSDown, kPadLSLeft, kPadLSRight,
+    kPadRSUp, kPadRSDown, kPadRSLeft, kPadRSRight,
+    kPadCapture, kPadRightPaddle1, kPadLeftPaddle1, kPadRightPaddle2, kPadLeftPaddle2, kPadTouchpad,
+    kPadMisc2, kPadMisc3, kPadMisc4, kPadMisc5, kPadMisc6,
+    kPadCount
 };
+using PadValues = std::array<float, kPadCount>;
 
-Sample g_prev;
-bool g_stickUp = false;
-bool g_stickDown = false;
-bool g_stickLeft = false;
-bool g_stickRight = false;
-
-struct RepeatState {
-    bool down = false;
-    double since = 0.0;
-    double fired = 0.0;
-};
-RepeatState g_repeat[4];
+PadValues g_values{};
+PadValues g_prev{};
 
 SDL_Gamepad* AcquirePad() {
     static SDL_Gamepad* pad = nullptr;
@@ -596,117 +524,233 @@ SDL_Gamepad* AcquirePad() {
     return pad;
 }
 
-bool StickEngage(Sint16 value, bool negative, bool was) {
-    // SDL stick Y is down-positive. Engage past 17000, release inside 10500:
-    // the pump's old navigation filter used the same hysteresis shape.
-    const int v = negative ? -static_cast<int>(value) : static_cast<int>(value);
-    return was ? v > 10500 : v > 17000;
+// One snapshot of the pad, in the framework's slot order. The face buttons
+// fill by label (the shim maps buttons by label: Switch A is SDL "south",
+// Switch B is SDL "east"); the stick slots carry the axis magnitude in
+// their direction; the right stick is read for completeness of the slot
+// map but nothing here navigates with it, as in the framework.
+PadValues ReadPadValues() {
+    PadValues values{};
+    SDL_Gamepad* pad = AcquirePad();
+    if (pad == nullptr) return values;
+    auto button = [&](SDL_GamepadButton b) { return SDL_GetGamepadButton(pad, b) ? 1.0f : 0.0f; };
+    values[kPadA] = button(SDL_GAMEPAD_BUTTON_SOUTH);
+    values[kPadB] = button(SDL_GAMEPAD_BUTTON_EAST);
+    values[kPadX] = button(SDL_GAMEPAD_BUTTON_WEST);
+    values[kPadY] = button(SDL_GAMEPAD_BUTTON_NORTH);
+    values[kPadLB] = button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+    values[kPadRB] = button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+    values[kPadLT] = button(SDL_GAMEPAD_BUTTON_LEFT_TRIGGER);
+    values[kPadRT] = button(SDL_GAMEPAD_BUTTON_RIGHT_TRIGGER);
+    values[kPadMenu] = button(SDL_GAMEPAD_BUTTON_START);
+    values[kPadOptions] = button(SDL_GAMEPAD_BUTTON_BACK);
+    values[kPadDUp] = button(SDL_GAMEPAD_BUTTON_DPAD_UP);
+    values[kPadDDown] = button(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    values[kPadDLeft] = button(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    values[kPadDRight] = button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    auto axis = [&](SDL_GamepadAxis a) { return static_cast<float>(SDL_GetGamepadAxis(pad, a)) / 32767.0f; };
+    const float lx = axis(SDL_GAMEPAD_AXIS_LEFTX);
+    const float ly = axis(SDL_GAMEPAD_AXIS_LEFTY);
+    values[kPadLSUp] = ly < 0.0f ? -ly : 0.0f;
+    values[kPadLSDown] = ly > 0.0f ? ly : 0.0f;
+    values[kPadLSLeft] = lx < 0.0f ? -lx : 0.0f;
+    values[kPadLSRight] = lx > 0.0f ? lx : 0.0f;
+    const float rx = axis(SDL_GAMEPAD_AXIS_RIGHTX);
+    const float ry = axis(SDL_GAMEPAD_AXIS_RIGHTY);
+    values[kPadRSUp] = ry < 0.0f ? -ry : 0.0f;
+    values[kPadRSDown] = ry > 0.0f ? ry : 0.0f;
+    values[kPadRSLeft] = rx < 0.0f ? -rx : 0.0f;
+    values[kPadRSRight] = rx > 0.0f ? rx : 0.0f;
+    return values;
 }
 
-Sample ReadSample(SDL_Gamepad* pad) {
-    Sample sample;
-    if (pad == nullptr) return sample;
-    sample.confirm = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_SOUTH);
-    sample.back = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_EAST);
-    sample.up = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_UP);
-    sample.down = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_DOWN);
-    sample.left = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_LEFT);
-    sample.right = SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
-    const Sint16 x = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
-    const Sint16 y = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
-    g_stickUp = StickEngage(y, true, g_stickUp);
-    g_stickDown = StickEngage(y, false, g_stickDown);
-    g_stickLeft = StickEngage(x, true, g_stickLeft);
-    g_stickRight = StickEngage(x, false, g_stickRight);
-    sample.up = sample.up || g_stickUp;
-    sample.down = sample.down || g_stickDown;
-    sample.left = sample.left || g_stickLeft;
-    sample.right = sample.right || g_stickRight;
-    return sample;
+// The framework's gamepad navigation (their gamepad_nav.h): the pad is fed
+// to Dear ImGui's gamepad navigation as analogue key events, and the
+// navigation keys belong to the controller whenever it is enabled. Their
+// mouse-ownership handoff and trace hooks are the parts with no host here:
+// there is no mouse, so the controller is always the owner, and there is no
+// trace sink. The face mapping is by label, as theirs: the values in slots
+// A, B, X, Y are the pad's labelled buttons, and ImGui confirms with
+// FaceDown (A) and goes back with FaceRight (B), as the game does.
+class GamepadNavigation {
+public:
+    bool pressed(const float* values, const float* previous, int input) const {
+        return values[input] > 0.5f && previous[input] <= 0.5f;
+    }
+    void feed(ImGuiIO& io, const float* values, const float* previous, bool enabled) const {
+        constexpr int navigation[] = {kPadA, kPadB, kPadX, kPadY,
+            kPadDUp, kPadDDown, kPadDLeft, kPadDRight,
+            kPadLSUp, kPadLSDown, kPadLSLeft, kPadLSRight,
+            kPadLT, kPadRT, kPadLB, kPadRB, kPadMenu};
+        (void)navigation;  // the set the framework watches for ownership; ownership is constant here
+        (void)previous;
+        // Suspending gamepad navigation clears the flag, as theirs does
+        // when the mouse owns the menu: the keys are then fed as zero.
+        if (enabled) io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+        else io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableGamepad;
+        auto key = [&](ImGuiKey k, int p) {
+            const float v = enabled && values[p] >= 0.35f ? values[p] : 0.0f;
+            io.AddKeyAnalogEvent(k, v > 0.5f, v);
+        };
+        key(ImGuiKey_GamepadFaceDown, kPadA);
+        key(ImGuiKey_GamepadFaceRight, kPadB);
+        key(ImGuiKey_GamepadFaceLeft, kPadX);
+        key(ImGuiKey_GamepadFaceUp, kPadY);
+        key(ImGuiKey_GamepadDpadUp, kPadDUp);
+        key(ImGuiKey_GamepadDpadDown, kPadDDown);
+        key(ImGuiKey_GamepadDpadLeft, kPadDLeft);
+        key(ImGuiKey_GamepadDpadRight, kPadDRight);
+        key(ImGuiKey_GamepadLStickUp, kPadLSUp);
+        key(ImGuiKey_GamepadLStickDown, kPadLSDown);
+        key(ImGuiKey_GamepadLStickLeft, kPadLSLeft);
+        key(ImGuiKey_GamepadLStickRight, kPadLSRight);
+        // Right-stick movement is not overlay navigation.
+        key(ImGuiKey_GamepadL2, kPadLT);
+        key(ImGuiKey_GamepadR2, kPadRT);
+        key(ImGuiKey_GamepadStart, kPadMenu);
+    }
+};
+
+GamepadNavigation g_navigation;
+
+// The framework's own edge-detected presses, for the inputs the window
+// handles itself (the shoulders switch tabs, B closes): the same values
+// and previous snapshot the feed consumed.
+bool NavigationPressed(int slot) {
+    return g_navigation.pressed(g_values.data(), g_prev.data(), slot);
 }
 
-// True on the press edge, then again while held: first repeat after 0.40 s,
-// then every 0.08 s.
-bool DirectionFired(int dir, bool down, double now) {
-    RepeatState& state = g_repeat[dir];
-    if (!down) {
-        state.down = false;
-        return false;
-    }
-    if (!state.down) {
-        state.down = true;
-        state.since = now;
-        state.fired = now;
-        return true;
-    }
-    if (now - state.since >= 0.40 && now - state.fired >= 0.08) {
-        state.fired = now;
-        return true;
-    }
-    return false;
+// Their setup_style, scoped to this window: SwitchWakerHD sets these once
+// on its own ImGui context at start-up; this context is shared with the
+// runtime overlay, so the same values are pushed around the settings
+// window each frame and popped after it. StyleColorsDark is their base,
+// then their metrics, then their deep-sea palette with the gold
+// navigation cursor.
+void PushMenuStyle() {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 5.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_TabRounding, 6.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 14.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(9.0f, 5.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 7.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowTitleAlign, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.03f, 0.07f, 0.12f, 0.975f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.13f, 0.20f, 0.35f));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.05f, 0.11f, 0.18f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.30f, 0.62f, 0.70f, 0.45f));
+    ImGui::PushStyleColor(ImGuiCol_TitleBg, ImVec4(0.05f, 0.20f, 0.30f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_TitleBgActive, ImVec4(0.06f, 0.27f, 0.38f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.10f, 0.22f, 0.32f, 0.85f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.14f, 0.34f, 0.46f, 0.90f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.17f, 0.42f, 0.54f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.36f, 0.48f, 0.90f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.50f, 0.62f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.22f, 0.60f, 0.70f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.12f, 0.36f, 0.48f, 0.70f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.18f, 0.50f, 0.62f, 0.85f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.22f, 0.60f, 0.70f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.08f, 0.24f, 0.34f, 0.90f));
+    ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.20f, 0.52f, 0.64f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_TabSelected, ImVec4(0.16f, 0.44f, 0.56f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(0.55f, 0.95f, 0.85f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.40f, 0.80f, 0.80f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.55f, 0.95f, 0.90f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Separator, ImVec4(0.30f, 0.62f, 0.70f, 0.35f));
+    ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(1.0f, 0.85f, 0.35f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_TableHeaderBg, ImVec4(0.08f, 0.24f, 0.34f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_TableRowBgAlt, ImVec4(1.0f, 1.0f, 1.0f, 0.03f));
 }
 
-// The pad model. On the bar: Left and Right move between sections, A or
-// Down opens the focused section's dropdown, B closes the menu. Inside a
-// dropdown: Up and Down move between its rows; Left and Right adjust the
-// focused row where the row adjusts (cycles and sliders, as before), and on
-// any other row they switch to the neighbouring section's dropdown; A
-// activates the row; B closes the dropdown, and B on the bar closes the
-// menu. Only the left stick feeds the direction state (ReadSample): the
-// right stick is the guest's pointer stick, and this file never reads it.
-void StepInput() {
-    const Sample sample = ReadSample(AcquirePad());
-    const double now = ImGui::GetTime();
-    const bool up = DirectionFired(0, sample.up, now);
-    const bool down = DirectionFired(1, sample.down, now);
-    const bool left = DirectionFired(2, sample.left, now);
-    const bool right = DirectionFired(3, sample.right, now);
-    const bool confirm = sample.confirm && !g_prev.confirm;
-    const bool back = sample.back && !g_prev.back;
-    g_prev = sample;
+void PopMenuStyle() {
+    ImGui::PopStyleColor(25);
+    ImGui::PopStyleVar(12);
+}
 
-    if (!g_dropdownOpen) {
-        if (left) g_barSection = (g_barSection + kSectionCount - 1) % kSectionCount;
-        if (right) g_barSection = (g_barSection + 1) % kSectionCount;
-        if (confirm || down) {
-            g_dropdownOpen = true;
-            g_row = 0;
-        }
-        if (back) SetVisible(false);
-        return;
-    }
+// Their widget helpers (widgets.h / tooltip.h): a row's help is a tooltip
+// of the item before it, and a note is a grey wrapped line of its own.
+bool TooltipHovered(ImGuiHoveredFlags flags = 0) {
+    return ImGui::GetIO().MouseSource != ImGuiMouseSource_TouchScreen && ImGui::IsItemHovered(flags);
+}
 
-    const int count = SectionRowCount(g_barSection);
-    if (count == 0) {
-        g_dropdownOpen = false;
-        return;
-    }
-    if (g_row >= count) g_row = count - 1;
-    if (g_row < 0) g_row = 0;
-    if (up) g_row = (g_row + count - 1) % count;
-    if (down) g_row = (g_row + 1) % count;
-    if (left || right) {
-        const int dir = right ? 1 : -1;
-        const RowDef& row = SectionRowAt(g_barSection, g_row);
-        if (IsAdjustable(row.id)) {
-            AdjustRow(row.id, dir);
-        } else {
-            g_barSection = (g_barSection + dir + kSectionCount) % kSectionCount;
-            g_row = 0;
+void Help(const char* text) {
+    if (TooltipHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_ForTooltip))
+        ImGui::SetTooltip("%s", text);
+}
+
+void Note(const char* text) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.70f, 0.78f, 0.84f, 1.0f));
+    ImGui::TextWrapped("%s", text);
+    ImGui::PopStyleColor();
+}
+
+// ---------------------------------------------------------------------------
+// Pages: one tab's rows, drawn inside the tab's scrolling child window.
+
+void DrawCycleRow(const RowDef& row) {
+    const std::string preview = ValueText(row.id);
+    if (!ImGui::BeginCombo(row.label, preview.c_str())) return;
+    if (row.id == RowId::kResolution) {
+        const int current = ResolutionIndex();
+        for (int i = 0; i < 4; ++i) {
+            const bool selected = i == current;
+            if (ImGui::Selectable(kResolutionLabels[i], selected)) SetResolutionValue(kResolutionSubset[i]);
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+    } else if (row.id == RowId::kFrameInterp) {
+        const int current = FrameInterpIndex();
+        for (int i = 0; i < 3; ++i) {
+            const bool selected = i == current;
+            if (ImGui::Selectable(kFrameInterpLabels[i], selected)) SetFrameInterpValue(kFrameInterpSubset[i]);
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+    } else {  // kAspect
+        const int32_t current = settings_overlay::Aspect();
+        for (int i = 0; i < 4; ++i) {
+            const bool selected = i == current;
+            if (ImGui::Selectable(kAspectLabels[i], selected)) SetAspectValue(i);
+            if (selected) ImGui::SetItemDefaultFocus();
         }
     }
-    if (confirm) {
-        ActivateRow(SectionRowAt(g_barSection, g_row).id);
-        // A flip can change the section's own list (the Developer gate):
-        // re-clamp against the new count before anything draws.
-        const int nextCount = SectionRowCount(g_barSection);
-        if (nextCount == 0) {
-            g_dropdownOpen = false;
-        } else if (g_row >= nextCount) {
-            g_row = nextCount - 1;
-        }
+    ImGui::EndCombo();
+}
+
+void DrawRow(const RowDef& row) {
+    ImGui::PushID(static_cast<int>(row.id));
+    if (IsCycle(row.id)) {
+        DrawCycleRow(row);
+    } else if (IsSlider(row.id)) {
+        int percent = VolumePercent(row.id);
+        if (ImGui::SliderInt(row.label, &percent, 0, 100, "%d%%")) SetVolumePercent(row.id, percent);
+    } else if (IsAction(row.id)) {
+        if (ImGui::Button(row.label)) FireAction(row.id);
+    } else {
+        bool value = ToggleState(row.id);
+        if (ImGui::Checkbox(row.label, &value)) ApplyToggle(row.id, value);
     }
-    if (back) g_dropdownOpen = false;
+    Help(row.description);
+    ImGui::PopID();
+    if (row.id == RowId::kAspect &&
+        (settings_overlay::Aspect() != DisplaySettings::kAspect4x3) != DisplaySettings::GameWidescreen()) {
+        Note("Switching between 4:3 and widescreen takes effect after a restart");
+    }
+    if (row.id == RowId::kDevGate && DevGateOn()) {
+        Note("Diagnostics can hurt performance or distort the picture.");
+    }
+}
+
+void DrawSectionPage(int section) {
+    if (section == kDeveloperSection && !g_status.empty() && ImGui::GetTime() < g_statusUntil) {
+        Note(g_status.c_str());
+    }
+    for (const RowDef& row : kRows) {
+        if (std::strcmp(row.section, kSections[section]) != 0 || !RowVisible(row)) continue;
+        DrawRow(row);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -716,122 +760,80 @@ bool Visible() { return g_visible; }
 
 void SetVisible(bool visible) {
     g_visible = visible;
-    if (visible) g_dropdownOpen = false;  // the menu always opens on the bar
+    if (visible) g_justOpened = true;
     // Re-baseline input on the pad's current state: whatever is held as the
-    // menu opens or closes counts as already down, so nothing acts on it
-    // until a fresh press (a held direction starts its repeat delay over).
-    g_stickUp = g_stickDown = g_stickLeft = g_stickRight = false;
-    const Sample sample = ReadSample(AcquirePad());
-    g_prev = sample;
-    const double now = ImGui::GetTime();
-    const bool dirs[4] = {sample.up, sample.down, sample.left, sample.right};
-    for (int i = 0; i < 4; ++i) {
-        g_repeat[i].down = dirs[i];
-        g_repeat[i].since = now;
-        g_repeat[i].fired = now;
-    }
+    // menu opens or closes counts as already down in both snapshots, so
+    // nothing acts on it until a fresh press.
+    const PadValues now = ReadPadValues();
+    g_values = now;
+    g_prev = now;
 }
 
 void Draw() {
-    if (!g_visible) return;
-    // Under the startup card the menu neither draws nor polls: the card is
-    // full-screen, input is blocked, and its strap A-press must not double
-    // as a menu activation. Visibility survives; the menu appears once the
-    // card dismisses.
-    if (settings_overlay::StartupScreenVisible()) return;
+    // The pad is read and fed every frame, open or not (the framework
+    // reads its controller in its frame loop the same way): while the menu
+    // is closed or the startup screen is up, the feed runs disabled, which
+    // hands the navigation keys back and feeds them as zero.
+    g_prev = g_values;
+    g_values = ReadPadValues();
+    ImGuiIO& io = ImGui::GetIO();
+    const bool enabled = g_visible && !settings_overlay::StartupScreenVisible();
+    g_navigation.feed(io, g_values.data(), g_prev.data(), enabled);
+    if (!enabled) return;
 
-    StepInput();
-    if (!g_visible) return;  // B closed it this frame
+    PushMenuStyle();
 
-    if (g_dropdownOpen) {
-        const int count = SectionRowCount(g_barSection);
-        if (count == 0) {
-            g_dropdownOpen = false;
-        } else {
-            if (g_row >= count) g_row = count - 1;
-            if (g_row < 0) g_row = 0;
-        }
+    // Their settings window: a centred panel, sized to the display, with
+    // the tab bar across the top and one scrolling page per tab.
+    const ImVec2 ds = io.DisplaySize;
+    const ImVec2 size(std::min(960.0f, ds.x * 0.94f), std::min(620.0f, ds.y * 0.92f));
+    ImGui::SetNextWindowPos(ImVec2(ds.x * 0.5f, ds.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                                        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
+                                        ImGuiWindowFlags_NoDocking;
+    bool open = true;
+    if (g_justOpened) {
+        ImGui::SetNextWindowFocus();  // keyboard / controller navigation starts in the menu
+        g_justOpened = false;
     }
-
-    // The same full-screen dim the top bar drew.
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::GetBackgroundDrawList()->AddRectFilled(
-        viewport->Pos, ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y),
-        IM_COL32(0, 0, 0, 110));
-    // NoNav: this menu is driven by its own pad polling above; ImGui's
-    // navigation must never move anything here.
-    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                                        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                                        ImGuiWindowFlags_AlwaysAutoResize |
-                                        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav;
-    const float centerX = viewport->Pos.x + viewport->Size.x * 0.5f;
-
-    // The bar, pinned to the top of the screen, with the open section's
-    // dropdown under it. Only one dropdown is open at a time, and its
-    // height is bounded by the longest section (see the note at the top of
-    // this file), so every row it draws is on screen.
-    ImGui::SetNextWindowPos(ImVec2(centerX, viewport->Pos.y), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
-    ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Always);
-    if (ImGui::Begin("Switch Settings", nullptr, kFlags)) {
-        for (int section = 0; section < kSectionCount; ++section) {
-            if (section > 0) ImGui::SameLine();
-            ImGui::PushID(section);
-            ImGui::Selectable(kSections[section], section == g_barSection, ImGuiSelectableFlags_None);
-            ImGui::PopID();
-        }
-        if (g_dropdownOpen) {
-            ImGui::Separator();
-            if (g_barSection == kDeveloperSection && DevGateOn()) {
-                ImGui::TextDisabled("Diagnostics can hurt performance or distort the picture.");
-            }
-            const int count = SectionRowCount(g_barSection);
-            for (int index = 0; index < count; ++index) {
-                const RowDef& row = SectionRowAt(g_barSection, index);
-                ImGui::PushID(static_cast<int>(row.id));
-                const std::string value = ValueText(row.id);
-                const std::string text =
-                    value.empty() ? std::string(row.label) : (std::string(row.label) + "   " + value);
-                ImGui::Selectable(text.c_str(), index == g_row, ImGuiSelectableFlags_None);
-                ImGui::PopID();
-                if (row.id == RowId::kAspect &&
-                    (settings_overlay::Aspect() != DisplaySettings::kAspect4x3) !=
-                        DisplaySettings::GameWidescreen()) {
-                    ImGui::TextDisabled("Switching between 4:3 and widescreen takes effect after a restart");
+    if (ImGui::Begin("Super Paper Bros - Settings", &open, kFlags)) {
+        // L / R on a controller switch tabs (not while a list is open).
+        if (!ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+            for (int direction : {-1, +1}) {
+                if (NavigationPressed(direction < 0 ? kPadLB : kPadRB)) {
+                    g_selectTab = (g_tab + direction + kSectionCount) % kSectionCount;
                 }
             }
-            if (!g_status.empty() && ImGui::GetTime() < g_statusUntil) {
-                ImGui::Separator();
-                ImGui::Text("%s", g_status.c_str());
+        }
+        if (ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_FittingPolicyShrink)) {
+            for (int i = 0; i < kSectionCount; ++i) {
+                const ImGuiTabItemFlags flags = g_selectTab == i ? ImGuiTabItemFlags_SetSelected : 0;
+                if (ImGui::BeginTabItem(kSections[i], nullptr, flags)) {
+                    g_tab = i;
+                    // The page ends one row above the bottom of the window:
+                    // the bottom row is the controls line below.
+                    ImGui::BeginChild("page", ImVec2(0.0f, -ImGui::GetFrameHeightWithSpacing()),
+                                      ImGuiChildFlags_NavFlattened);
+                    DrawSectionPage(i);
+                    ImGui::EndChild();
+                    ImGui::EndTabItem();
+                }
             }
+            g_selectTab = -1;
+            ImGui::EndTabBar();
         }
-    }
-    ImGui::End();
-
-    // The description window, pinned to the bottom of the screen: the
-    // focused row's description while a dropdown is open, the focused
-    // section's own line while none is. Its height is the same whether the
-    // text fills it or not (two text lines are reserved), so nothing above
-    // it ever moves while navigating.
-    ImGui::SetNextWindowPos(ImVec2(centerX, viewport->Pos.y + viewport->Size.y), ImGuiCond_Always,
-                            ImVec2(0.5f, 1.0f));
-    ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Always);
-    if (ImGui::Begin("Switch Settings Description", nullptr, kFlags)) {
-        const char* description = g_dropdownOpen ? SectionRowAt(g_barSection, g_row).description
-                                                 : kSectionDescriptions[g_barSection];
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-        if (ImGui::BeginChild("Selected row description",
-                              ImVec2(0.0f, ImGui::GetTextLineHeight() * 2.0f), false,
-                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
-                                  ImGuiWindowFlags_NoNav)) {
-            ImGui::TextWrapped("%s", description);
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleVar();
         ImGui::Separator();
-        ImGui::TextDisabled(g_dropdownOpen ? "[Up/Down] Move   [Left/Right] Adjust   [A] Select   [B] Back"
-                                           : "[Left/Right] Section   [A] Open   [B] Close menu");
+        ImGui::TextDisabled("[L/R] Tab   [Up/Down] Move   [Left/Right] Adjust   [A] Select   [B] Close");
     }
     ImGui::End();
+    PopMenuStyle();
+
+    if (!open) SetVisible(false);
+    // B (not while choosing from a list) closes the menu.
+    if (NavigationPressed(kPadB) && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+        SetVisible(false);
+    }
 }
 
 }  // namespace spm_switch_menu
