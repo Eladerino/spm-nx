@@ -36,6 +36,9 @@ echo "copying sources to $work"
 rsync -a --delete "$root/switch/" "$work/switch/"
 rsync -a --delete "$root/wiicompiled/runtime/" "$work/wiicompiled/runtime/"
 rsync -a --delete "$root/wiicompiled/aurora-main/" "$work/wiicompiled/aurora-main/"
+# save_state.cpp includes ../../projects/spm/resumable_functions.inc by relative
+# path, so the projects tree has to sit next to runtime/ in the build tree too.
+rsync -a --delete "$root/wiicompiled/projects/" "$work/wiicompiled/projects/"
 if [[ $audit == 0 ]]; then
     src=$root/wiicompiled
     [[ -f $src/generated/build_shards/shards.cmake ]] ||
