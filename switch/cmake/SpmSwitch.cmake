@@ -186,7 +186,8 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_pthread.c"
-        "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp")
+        "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp"
+        "${SPM_SWITCH_DIR}/menu/spm_switch_menu.cpp")
     # The runtime's precompiled header is C++ (mkw_pch.h); these are the only C files in its targets.
     # They also stay out of its unity build: CMake would merge them into a generated unity_*_c.c
     # file that still gets the PCH, whatever these files' own SKIP_PRECOMPILE_HEADERS says.
@@ -222,7 +223,8 @@ function(spm_switch_add_audit_target sources)
     add_library(mkw_switch_audit OBJECT ${_audit})
     target_include_directories(mkw_switch_audit PRIVATE
         "${MKW_RUNTIME_DIR_FOR_SWITCH}/include" "${MKW_RUNTIME_DIR_FOR_SWITCH}/src"
-        "${MKW_RUNTIME_DIR_FOR_SWITCH}/.." "${MKW_RUNTIME_DIR_FOR_SWITCH}/../aurora-main/include")
+        "${MKW_RUNTIME_DIR_FOR_SWITCH}/.." "${MKW_RUNTIME_DIR_FOR_SWITCH}/../aurora-main/include"
+        "${SPM_SWITCH_DIR}/include")
     # xxHash comes from devkitPro's portlibs here; the full build gets Aurora's pinned copy.
     target_include_directories(mkw_switch_audit SYSTEM PRIVATE
         "${SPM_SWITCH_SDL3_INCLUDE}" "${_imgui}" "${SWITCH_PORTLIBS}/include")
