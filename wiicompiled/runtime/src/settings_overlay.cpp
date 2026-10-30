@@ -105,7 +105,11 @@ bool OverlayMenuVisible() {
 bool g_exitPromptOpen = false;
 bool g_rumbleEnabled = RuntimeConfigFile::RumbleEnabled(true);
 int g_controllerPort = 0;
+#if defined(__SWITCH__)
+float g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.5f);
+#else
 float g_resolutionScale = RuntimeConfigFile::ResolutionMultiplier(1.0f);
+#endif
 int g_audioVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::AudioVolume(1.0f) * 100.0f));
 int g_musicVolumePercent = static_cast<int>(std::lround(RuntimeConfigFile::MusicVolume(1.0f) * 100.0f));
 int g_soundEffectsVolumePercent =

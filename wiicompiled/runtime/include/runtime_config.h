@@ -387,8 +387,23 @@ inline void EnsureConfigFile() {
     if (!output) {
         return;
     }
+#if defined(__SWITCH__)
+    // Switch seed: 1.5x renders at the 720p panel's own size instead of
+    // supersampling a 2581x1080 cinematic target, 16:9 fills the panel, and
+    // frame interpolation stays off (against a 60 Hz panel it only
+    // duplicates frames, at guest CPU cost this port cannot spare).
+    const char* const resolutionMultiplier = "1.5";
+    const char* const frameInterpolationFps = "0";
+    const char* const aspectMode = "1";
+#else
+    const char* const resolutionMultiplier = "2.25";
+    const char* const frameInterpolationFps = "120";
+    const char* const aspectMode = "3";
+#endif
     // New Super Paper Bros. defaults: borderless 1080p (2.25 x 480 lines; 4.5 = 4K, 0 = the screen's own
     // size), cinematic 2.39:1, 120 fps interpolation, HD textures on. The launcher writes the same keys.
+    // On Switch three values seed differently (the seed block below): the panel is 720p and the
+    // guest is CPU-bound, so 1.5x, 16:9, interpolation off.
     output << "# New Super Paper Bros. user configuration\n"
               "# paths.dvd_root is your Super Paper Mario (USA, R8PE01) extracted to a DATA folder; the\n"
               "# launcher's Game disc page fills it in from a .iso/.ciso/.wbfs.\n\n"
@@ -396,13 +411,13 @@ inline void EnsureConfigFile() {
               "widescreen = true\n"
               "force_16_9 = false\n"
               "# render height = 480 x resolution_multiplier: 1.5 = 720p, 2.25 = 1080p, 4.5 = 4K, 0 = screen size\n"
-              "resolution_multiplier = 2.25\n"
+              "resolution_multiplier = " << resolutionMultiplier << "\n"
               "# 0 (off), 120 or 180\n"
-              "frame_interpolation_fps = 120\n"
+              "frame_interpolation_fps = " << frameInterpolationFps << "\n"
               "# wait for the display when presenting: no screen tearing\n"
               "vsync = true\n"
               "# 0 = original 4:3, 1 = 16:9, 2 = fill the screen, 3 = cinematic 2.39:1\n"
-              "aspect_mode = 3\n"
+              "aspect_mode = " << aspectMode << "\n"
               "display_mode = \"borderless\"\n"
               "graphics_api = \"auto\"\n"
               "skip_unready_pipelines = true\n"
