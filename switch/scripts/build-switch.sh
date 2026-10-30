@@ -94,7 +94,9 @@ else
         # nothing is copied by wildcard. The names mirror the generator's SIDEWAYS_TEXTURE,
         # REMOTE_TEXTURES and ui action map. The license travels with the icons. If the host
         # lacks python3, Pillow or ImageMagick the icons are skipped with a warning; the game
-        # runs without them (its own prompt art, text labels).
+        # runs without them (its own prompt art, text labels). The list also carries the four
+        # prompt textures from the generator's PROMPT_CLEAN_KINDS (the text-box glyphs and the
+        # shake icon), the prompt pictures it can draw without the pack's artwork.
         icons_gen=$work/button-icons
         icons_dest=$dest/UserData/button_icons
         if python3 -c 'import PIL' >/dev/null 2>&1 && command -v magick >/dev/null &&
@@ -102,6 +104,8 @@ else
             mkdir -p "$icons_dest/nintendo/ui" "$icons_dest/nintendo/marker1"
             cp "$root/tools/button-art/Kenney-License.txt" "$icons_dest/"
             for f in controller.png panel.txt tex1_464x288_36a6f13147d63352_14.png \
+                     tex1_40x40_21ecf92a70736554_14.png tex1_40x40_db14bc3d6c7b16a5_14.png \
+                     tex1_40x40_e73bd2aadadde9d9_14.png tex1_96x40_61b1a30a17d36df5_5.png \
                      ui/move.png ui/flip.png ui/jump.png ui/pixl.png ui/tippi.png ui/stylish.png \
                      marker1/tex1_256x64_ddc0097f76e8016b_14.png \
                      marker1/tex1_256x64_a2fd9566973811d6_14.png \

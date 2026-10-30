@@ -298,10 +298,14 @@ The button prompt icons staged into `UserData/button_icons/` are "Input Prompts"
 [Kenney](https://kenney.nl), CC0, generated at build time from the SVGs vendored in
 `tools/button-art/`; the CC0 text travels with them as `UserData/button_icons/Kenney-License.txt`.
 Only the files drawn from that CC0 art alone ship: the generator's other outputs composite the
-glyphs into the HD texture pack's redrawn game textures, and those are never staged. The full
-set (the in-game prompt pictures replaced, and a Controls panel that opens) stays a
-do-it-yourself drop-in: run `tools/make-button-icons.py` against your own copy of the HD pack
-and copy the resulting `button_icons/` into `UserData/`.
+glyphs into the HD texture pack's redrawn game textures, and those are never staged. The prompt
+pictures that can be drawn from scratch do ship: the small button glyphs inside text boxes and
+the shake prompt's icon show Switch buttons in the package. The bigger prompt pictures (the
+round button pictures in signs and tutorials, the 3D buttons' faces, the Use Tippi picture)
+composite into the pack's artwork, so those stay Wii in the package. The full set (every prompt
+picture replaced, and a Controls panel that opens) stays a do-it-yourself drop-in: run
+`tools/make-button-icons.py` against your own copy of the HD pack and copy the resulting
+`button_icons/` into `UserData/`.
 
 For the project's position on Nintendo's trademarks and copyrighted material, see the Legal notice
 in the root [`README.md`](../README.md).
