@@ -177,7 +177,11 @@ function(spm_switch_runtime_sources list_var)
     set(_sources ${${list_var}})
     list(REMOVE_ITEM _sources
         "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/guest_flat_memory.cpp"
-        "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/guest_flat_memory_macos.cpp")
+        "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/guest_flat_memory_macos.cpp"
+        # The built-in updater checks GitHub and hands over to a shell script that
+        # overwrites the program folder; neither exists on Horizon. updater_horizon.cpp
+        # below stands in with an inert Updater, so the update rows never appear.
+        "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/updater.cpp")
     list(APPEND _sources
         "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/platform/android/co_switch.S"
         "${SPM_SWITCH_DIR}/runtime/guest_flat_memory_horizon.cpp"
@@ -186,6 +190,7 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_pthread.c"
+        "${SPM_SWITCH_DIR}/runtime/updater_horizon.cpp"
         "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp"
         "${SPM_SWITCH_DIR}/menu/spm_switch_menu.cpp")
     # The runtime's precompiled header is C++ (mkw_pch.h); these are the only C files in its targets.
@@ -344,3 +349,4 @@ function(spm_switch_configure_products)
         OUTPUT "${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nro"
         NACP "${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nacp")
 endfunction()
+
