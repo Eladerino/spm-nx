@@ -85,19 +85,25 @@ game's `-`. The menu is a single window made for the pad: D-pad or left stick mo
 or cycles a value forward, Left and Right adjust the selected row, and B closes it. While the
 menu is open the game does not receive pad input, so nothing moves behind it.
 
-- **Graphics:** Resolution (1x, 1.5x or Auto), Aspect (original 4:3, 16:9, Fill Window or
+- **Graphics:** Resolution (0.75x, 1x, 1.5x or Auto), Aspect (original 4:3, 16:9, Fill Window or
   cinematic 2.39:1; switching between 4:3 and widescreen takes effect after a restart, and the
-  menu says so on the row), Vsync, Bloom, Disable copy filter, and Skip draws while shaders
-  compile.
+  menu says so on the row), Frame interpolation (Off, 120 or 180), Vsync, Bloom, Disable copy
+  filter, Skip draws while shaders compile, and Texture replacements (the master switch for
+  the replacement button icons and prompt pictures; takes effect after a restart, and the menu
+  says so on the row).
 - **Display:** Show FPS and Frame graph.
 - **Audio:** Master, Music, Sound effects, UI and Voices volume sliders, Mute, and the Audio
   mix worker toggle.
 - **Game:** Controller vibration (rumble) and Spinning coins.
 - **Developer:** hidden until you turn on its "Show developer options" row, which is saved like
-  any other setting. It holds the renderer's thirteen diagnostic switches (each one also writes
+  any other setting. It holds the renderer's fourteen diagnostic switches (each one also writes
   back to `UserData/dk_diag.txt`, the file the same switches are read from at boot), plus Flush
-  logs and Mark log rows for test runs. Diagnostics can hurt performance or distort the
-  picture; they are for bug reports, not for play.
+  logs and Mark log rows for test runs, a Texture dumps switch (writes every unmatched texture
+  to `Cache/texture_dumps` under the name a replacement would use, for making new replacement
+  pictures; takes effect after a restart), and a Clear shader cache row (deletes the compiled
+  shader cache on the next launch; the recovery step for a cache that has gone wrong).
+  Diagnostics can hurt performance or distort the picture; they are for bug reports, not for
+  play.
 
 Fresh installs start at Resolution 1.5x (a 1280x720 render, the screen's native size in
 handheld), Aspect 16:9 and frame interpolation off. If you upgraded from an older release and

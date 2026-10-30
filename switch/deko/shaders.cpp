@@ -34,6 +34,10 @@ namespace swdk {
 namespace {
 
 constexpr const char* kCachePath = "/switch/spm-nx/UserData/dksh_cache.bin";
+// The settings menu's "Clear shader cache" row leaves this sentinel (the
+// path is hardcoded there too); shaders_init consumes it. See there for why
+// the cache is deleted at startup and not when the row is pressed.
+constexpr const char* kClearPath = "/switch/spm-nx/UserData/dksh_cache.clear";
 constexpr const char* kFailDir = "/switch/spm-nx/UserData/Logs";
 constexpr char kMagic[8] = {'S', 'P', 'M', 'D', 'K', 'S', 'H', '1'};
 constexpr uint32_t kRecordMagic = 0x44434552;  // "RECD"
@@ -388,6 +392,19 @@ const CompiledStage* compile_stage(const std::string& wgsl, const std::string& e
 }
 
 void shaders_init() {
+    // A cache clear the settings menu asked for on a previous run. The
+    // delete has to happen here, before anything reads or appends to the
+    // cache: append_record reopens the file for every shader compiled, all
+    // session long, so a delete from inside the session would be undone by
+    // the next compile (and the recreated file would have no header, so
+    // read_cache_file would discard it at load anyway). Consume the
+    // sentinel, delete both files, and let the load below start again.
+    if (FILE* sentinel = fopen(kClearPath, "rb")) {
+        fclose(sentinel);
+        remove(kCachePath);
+        remove(kClearPath);
+        dklog("shaders: cache cleared on request (settings menu sentinel): starting again");
+    }
     read_cache_file();
     translate_init();
     pthread_attr_t attr;
