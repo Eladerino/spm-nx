@@ -92,25 +92,32 @@ else
         # The copy list is explicit on purpose: the generator's full mode also composites
         # glyphs into the HD texture pack's artwork, and those files must never ship, so
         # nothing is copied by wildcard. The names mirror the generator's SIDEWAYS_TEXTURE,
-        # REMOTE_TEXTURES and ui action map. The license travels with the icons. If the host
+        # REMOTE_TEXTURES, MARKERS and ui action map. The marker files are transparent on
+        # purpose: they only report that the game's Controls screen is up, and the
+        # replacement Controls panel draws the labels itself. The license travels with the icons. If the host
         # lacks python3, Pillow or ImageMagick the icons are skipped with a warning; the game
-        # runs without them (its own prompt art, text labels). The list also carries the four
-        # prompt textures from the generator's PROMPT_CLEAN_KINDS (the text-box glyphs and the
-        # shake icon), the prompt pictures it can draw without the pack's artwork.
+        # runs without them (its own prompt art, text labels).
         icons_gen=$work/button-icons
         icons_dest=$dest/UserData/button_icons
         if python3 -c 'import PIL' >/dev/null 2>&1 && command -v magick >/dev/null &&
            python3 "$root/tools/make-button-icons.py" --clean --out "$icons_gen"; then
-            mkdir -p "$icons_dest/nintendo/ui" "$icons_dest/nintendo/marker1"
+            mkdir -p "$icons_dest/nintendo/ui" "$icons_dest/nintendo/marker1" \
+                     "$icons_dest/nintendo/marker2" "$icons_dest/nintendo/marker3" \
+                     "$icons_dest/nintendo/marker4" "$icons_dest/nintendo/marker5" \
+                     "$icons_dest/nintendo/marker6"
             cp "$root/tools/button-art/Kenney-License.txt" "$icons_dest/"
             for f in controller.png panel.txt tex1_464x288_36a6f13147d63352_14.png \
-                     tex1_40x40_21ecf92a70736554_14.png tex1_40x40_db14bc3d6c7b16a5_14.png \
-                     tex1_40x40_e73bd2aadadde9d9_14.png tex1_96x40_61b1a30a17d36df5_5.png \
                      ui/move.png ui/flip.png ui/jump.png ui/pixl.png ui/tippi.png ui/stylish.png \
                      marker1/tex1_256x64_ddc0097f76e8016b_14.png \
                      marker1/tex1_256x64_a2fd9566973811d6_14.png \
                      marker1/tex1_64x32_3b9919c664469aa9_14.png \
-                     marker1/tex1_80x44_c113b191224defc0_14.png; do
+                     marker1/tex1_80x44_c113b191224defc0_14.png \
+                     marker2/tex1_248x184_fd844c6227d275cf_5.png \
+                     marker2/tex1_248x200_55ef64a9d7e806f7_5.png \
+                     marker3/tex1_152x144_eba7359cd27cf8b6_5.png \
+                     marker4/tex1_176x168_6208c1ec2d692b4f_5.png \
+                     marker5/tex1_200x152_8394740b60e9c228_5.png \
+                     marker6/tex1_168x136_42b4c0a037f4bbee_5.png; do
                 cp "$icons_gen/nintendo/$f" "$icons_dest/nintendo/$f"
             done
             echo "button icons staged to $icons_dest/nintendo"
