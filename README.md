@@ -150,7 +150,8 @@ the result for Horizon instead of Windows.
 - **Original project and PC port:** JosiahG, creator of New Super Paper Bros, the PC recomp this
   repository ports to the Switch. The PC project lives at
   [josiahg2502-glitch/NewSuperPaperBros](https://github.com/josiahg2502-glitch/NewSuperPaperBros);
-  this repository is the Switch port of it.
+  this repository is the Switch port of it. The in-game Options menu is his as well, design and
+  implementation: it came in with the upstream v1.0.6 merge and is the menu this port uses.
 - **Switch port (spm-nx):** Elad (Eladerino)
 - **[WiiCompiled](https://github.com/patchzyy/Wiicompiled)** (the recompiler and runtime) by patchzyy and
   contributors, GPLv3
@@ -158,9 +159,10 @@ the result for Horizon instead of Windows.
   [`wiicompiled/THIRD-PARTY-NOTICES.md`](wiicompiled/THIRD-PARTY-NOTICES.md)
 - **[SwitchWaker](https://github.com/centollOS/SwitchWaker) and
   [SwitchWakerHD](https://github.com/centollOS/SwitchWakerHD)** by centollOS, MIT: the Switch
-  layer's SDL shim and Dawn recipe come from SwitchWaker, the deko3d renderer descends from
-  SwitchWakerHD's backend through it, and the Switch settings menu is modelled on
-  SwitchWakerHD's overlay. Per-file origins are in
+  layer's SDL shim and Dawn recipe come from SwitchWaker, and the deko3d renderer descends
+  from SwitchWakerHD's backend through it. Of this port's own earlier settings menu, only the
+  Developer shell remains (behind the Options menu's Developer tools entry); its framework is
+  modelled on SwitchWakerHD's overlay. Per-file origins are in
   [`switch/THIRD_PARTY.md`](switch/THIRD_PARTY.md)
 - **[deko3d](https://github.com/devkitPro/deko3d) and [uam](https://github.com/devkitPro/uam)** by
   devkitPro and contributors, zlib: the GPU API and the GLSL to DKSH shader compiler the Switch
