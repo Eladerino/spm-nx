@@ -25,7 +25,9 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#else
+#elif !defined(__SWITCH__)
+// The only dlopen consumer is LoadCodeMods' POSIX branch, which is compiled
+// out on Switch (see there); Horizon has no dlfcn.h, so the include goes too.
 #include <dlfcn.h>
 #endif
 
