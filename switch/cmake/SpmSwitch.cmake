@@ -115,10 +115,10 @@ set(MBEDTLS_USER_CONFIG_FILE "${SPM_SWITCH_DIR}/include/spm_mbedtls_config.h" CA
 # CMAKE_<LANG>_COMPILER_LAUNCHER seeds the property of each target created after this point.
 set(CMAKE_C_COMPILER_LAUNCHER "${SPM_SWITCH_DIR}/cmake/clang-launcher.sh")
 set(CMAKE_CXX_COMPILER_LAUNCHER "${SPM_SWITCH_DIR}/cmake/clang-launcher.sh")
-# The launcher's thread-local model (native TLS through TPIDR_EL0, runtime/horizon_tls.c) is not on
-# the command line CMake sees, so a change to it would not rebuild anything. This definition names
-# it: changing the model means changing it here too, and every clang object rebuilds.
-add_compile_definitions(SPM_SWITCH_CLANG_TLS=tpidr_el0)
+# The launcher's code generation flags (native TLS through TPIDR_EL0, runtime/horizon_tls.c; direct
+# access to external data) are not on the command line CMake sees, so a change to them would not
+# rebuild anything. Bump this revision whenever they change, and every clang object rebuilds.
+add_compile_definitions(SPM_SWITCH_LAUNCHER_REV=2)
 
 # The Dawn backend toggles the runtime's aurora block reads: only the Null device exists here.
 macro(spm_switch_dawn_backends)
@@ -251,14 +251,14 @@ function(spm_switch_configure_products)
         return()
     endif()
     # The translated game and the runtime link into this one NRO and nothing else: no other
-    # binary consumes their symbols and nothing looks them up by name at runtime. devkitPro's
-    # toolchain compiles every translation unit -fPIE with default visibility, so a reference
-    # to a symbol defined in another unit (each of the ~9.9k extern "C" guest functions is
-    # declared in its callers' units and defined in exactly one shard) goes through the GOT.
-    # Hidden visibility on the first-party targets below lets the compiler bind those
-    # references inside the link unit instead, the same flag SwitchWakerHD uses for the same
-    # reason. Dawn, Aurora, deko3d and the third-party libraries keep their own settings:
-    # they are not guest code, and their symbols cross between their own targets.
+    # binary consumes their symbols and nothing looks them up by name at runtime, so the
+    # first-party targets below compile with hidden visibility, as SwitchWakerHD's do. The GOT
+    # loads it was meant to remove are the clang launcher's job now (switch/cmake/clang-launcher.sh:
+    # -fPIE and -fdirect-access-external-data): hidden visibility only covered globals defined in
+    # the same file, never ones declared from another, and calls to the ~9.9k extern "C" guest
+    # functions are direct branches in a static link either way.
+    # Dawn, Aurora, deko3d and the third-party libraries keep their own settings: they are not
+    # guest code, and their symbols cross between their own targets.
     foreach(_spm_visibility_target IN ITEMS
             mkw_base_shared mkw_base_sensitive mkw_retro_sensitive mkw_retro_rewind_functions
             mkw_runtime_common WiiCompiled RetroRewind)

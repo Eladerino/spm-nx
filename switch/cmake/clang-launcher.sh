@@ -17,6 +17,18 @@
 #   every guest call. clang reads TPIDR_EL0 instead (-mtp=el0), local-exec as
 #   GCC's code is (one static image), and runtime/horizon_tls.c makes
 #   TPIDR_EL0 equal libnx's thread pointer on every thread.
+# - Globals without the GOT. devkitPro's CMake platform turns on
+#   CMAKE_POSITION_INDEPENDENT_CODE, so library targets (the runtime, the
+#   translated shards) compile -fPIC, which treats every global as
+#   preemptible: each access, even to one defined in the same file, first
+#   loads its address from the GOT (an extra dependent load, which
+#   devkitA64's ld does not relax away). The NRO is one static PIE image with
+#   no shared libraries, so -fPIC becomes -fPIE, and
+#   -fdirect-access-external-data (which -fPIC would ignore) addresses
+#   globals in other files PC-relative too: the guest memory page tables on
+#   every guest load and store, and the translated code's other globals.
+#   Weak references keep the GOT, so an absent weak symbol still reads as
+#   null.
 set -euo pipefail
 
 compiler=$1
@@ -40,6 +52,8 @@ for arg in "$@"; do
         # -fno-lifetime-dse: CMake checks it with devkitA64's GCC (GameConfig.cmake); clang 19
         # rejects it, and does not drop a destructor's stores, so the flag is not needed here.
         -mtp=*|-ftls-model=*|-march=*|-mtune=*|-fmax-errors=*|-fno-lifetime-dse) ;;
+        # Every object goes into the one PIE image (see above), never a shared library.
+        -fPIC|-fpic) args+=(-fPIE) ;;
         *) args+=("$arg") ;;
     esac
 done
@@ -52,4 +66,4 @@ fi
 includes+=(-isystem "$resource/include" -isystem "$gcc_root/include")
 
 exec "$clang" --target=aarch64-none-elf -mcpu=cortex-a57 -mtp=el0 -ftls-model=local-exec \
-    "${includes[@]}" "${args[@]}"
+    -fdirect-access-external-data "${includes[@]}" "${args[@]}"
