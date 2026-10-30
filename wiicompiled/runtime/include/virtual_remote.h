@@ -23,6 +23,8 @@ struct SDL_Gamepad;
 // Gamepads (aurora's default GameCube mapping): left stick or D-pad moves, south button jumps,
 // east and west run, north is A, Start is +, Back or left trigger is -, right shoulder or right
 // trigger shakes, right stick tilts.
+namespace SaveState { class Writer; class Reader; }
+
 namespace VirtualRemote {
 
 // True when `chan` should report a connected Wii Remote driven by a keyboard or gamepad.
@@ -37,6 +39,9 @@ enum TouchButton : uint32_t {
     kTouchOne = 0x010, kTouchTwo = 0x020, kTouchA = 0x040, kTouchPlus = 0x080, kTouchMinus = 0x100,
 };
 void SetTouchState(uint32_t touchButtons, bool shake, float tilt);
+// In one of SPM's arcade minigames (maps mg*), where the left stick also tilts the remote and an
+// aimed pointer stays up.
+bool InArcade();
 // Player 1's Wii Remote buttons (WPAD bits) from keyboard, gamepads and touch, as last handed to the game.
 uint32_t LastButtons();
 
@@ -56,4 +61,7 @@ const char* PadActionKey(int action);
 // parser uses while the config key is absent.
 const char* PadDefaultBinding(int style, int action);
 
+// Save states (save_state.h).
+void SaveState(::SaveState::Writer& out);
+void LoadState(::SaveState::Reader& in);
 } // namespace VirtualRemote
