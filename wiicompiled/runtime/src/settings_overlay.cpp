@@ -348,7 +348,10 @@ bool OverlayMenuVisible() {
 bool g_exitPromptOpen = false;
 using Clock = std::chrono::steady_clock;
 // Options menu and fast-forward state (the menu itself is drawn further down, DrawOptionsMenu).
-enum : uint32_t { kOptLeft = 1, kOptRight = 2, kOptUp = 4, kOptDown = 8, kOptConfirm = 16, kOptBack = 32 };
+enum : uint32_t {
+    kOptLeft = 1, kOptRight = 2, kOptUp = 4, kOptDown = 8, kOptConfirm = 16, kOptBack = 32,
+    kOptPrevTab = 64, kOptNextTab = 128
+};
 std::atomic<uint32_t> g_optEvents{0};
 std::atomic<bool> g_optToggleRequest{false};
 bool g_optOpen = false;
@@ -3811,6 +3814,13 @@ void HandleOptionsInput() {
         SetOptionsOpen(false);
         return;
     }
+    // The pad's shoulders change page from anywhere, not just from the tab strip. The row
+    // follows into the new page, clamped to its length; on the strip (-1) it stays on the strip.
+    if (ev & (kOptPrevTab | kOptNextTab)) {
+        g_optTab = Cycle(g_optTab, (ev & kOptPrevTab) ? -1 : 1, kOptTabCount);
+        const int newCount = static_cast<int>(OptionsRows(g_optTab).size());
+        if (g_optRow >= newCount) g_optRow = newCount - 1;
+    }
     const std::vector<OptRow> rows = OptionsRows(g_optTab);
     const int count = static_cast<int>(rows.size());
     // Row -1 is the tab strip.
@@ -3952,6 +3962,31 @@ void FilterMenuInput(uint32_t chan, WiiRemoteInput::KpadSample& sample) noexcept
     const uint32_t hold = sample.hold;
     const uint32_t pressed = hold & ~g_optPrevHold;
     g_optPrevHold = hold;
+    // The shoulders (L and R) never reach this filter as buttons of their own: the gamepad
+    // layer spends them on its Minus and Shake actions, so no WPAD bit carries either one.
+    // Read them off the pad directly, the way GamepadIntent reads its buttons. A real Wii
+    // Remote is skipped: its shoulder-class inputs (the Nunchuk's C and Z, the Classic
+    // Controller's own buttons) are already in the sample. Tracked every call, like the hold
+    // bits above, so a press that starts before the menu opens does not leak in.
+    static uint32_t s_prevShoulders = 0;
+    uint32_t shoulders = 0;
+    int padCount = 0;
+    SDL_JoystickID* padIds = SDL_GetGamepads(&padCount);
+    for (int i = 0; padIds != nullptr && i < padCount; ++i) {
+        SDL_Gamepad* pad = SDL_GetGamepadFromID(padIds[i]);
+        if (pad == nullptr) pad = SDL_OpenGamepad(padIds[i]);
+        if (pad == nullptr) continue;
+        const WiiRemoteInput::Kind kind = WiiRemoteInput::KindForName(SDL_GetGamepadName(pad));
+        if (kind == WiiRemoteInput::Kind::Remote || kind == WiiRemoteInput::Kind::RemoteWithNunchuk ||
+            kind == WiiRemoteInput::Kind::RemoteWithClassic) {
+            continue;
+        }
+        if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) shoulders |= 1;
+        if (SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) shoulders |= 2;
+    }
+    SDL_free(padIds);
+    const uint32_t shoulderPressed = shoulders & ~s_prevShoulders;
+    s_prevShoulders = shoulders;
     // Buttons that closed the menu stay away from the game until they are let go.
     g_optSuppress &= hold;
     if (pressed & kHome) {  // the game's own HOME Menu never opens: Options takes its place
@@ -3976,6 +4011,8 @@ void FilterMenuInput(uint32_t chan, WiiRemoteInput::KpadSample& sample) noexcept
         }
         if (pressed & (kTwo | kA)) ev |= kOptConfirm;
         if (pressed & (kOne | kB)) ev |= kOptBack;
+        if (shoulderPressed & 1) ev |= kOptPrevTab;
+        if (shoulderPressed & 2) ev |= kOptNextTab;
         g_optEvents |= ev;
         g_optSuppress |= hold;
     }
