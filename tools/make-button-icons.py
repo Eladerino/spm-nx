@@ -9,10 +9,10 @@ The game picks the set for the controller in use (aurora texture_replacement.cpp
     python tools/make-button-icons.py [--src <8x PNG pack Interface folder>] [--out Play/UserData/button_icons]
     python tools/make-button-icons.py --clean [--out <dir>]
         Only the Switch package's set: the nintendo files that come from the vendored CC0 art alone
-        (controller.png, ui/, panel.txt, the sideways boot texture, marker1's transparent textures,
-        and the prompt textures whose pictures are drawn from scratch: the text-box glyphs and the
-        shake icon). No HD pack is needed and the composites into the pack's artwork are never made
-        in this mode.
+        (controller.png, ui/, panel.txt, the sideways boot texture), plus the Controls screen's
+        marker textures as transparent files (a marker only reports that the game drew it; the
+        Controls panel draws the labels itself). No HD pack is needed and the composites into the
+        pack's artwork are never made in this mode.
 Needs ImageMagick (magick) to render the SVGs.
 """
 import argparse
@@ -74,14 +74,6 @@ TEXTURES = [
 MARKERS = {"tex1_248x184_fd844c6227d275cf_5.png": 2, "tex1_248x200_55ef64a9d7e806f7_5.png": 2,
            "tex1_152x144_eba7359cd27cf8b6_5.png": 3, "tex1_176x168_6208c1ec2d692b4f_5.png": 4,
            "tex1_200x152_8394740b60e9c228_5.png": 5, "tex1_168x136_42b4c0a037f4bbee_5.png": 6}
-
-# Prompt textures whose render never reads the pack artwork it replaces: "glyph" paints the whole
-# texture white before drawing, "shake" builds a new transparent picture, so both come out the same
-# from a blank canvas at the pack's size, and the clean set can ship them. Every other kind draws
-# on the artwork itself (disc, face, tippi) or is the artwork (none), so those stay full-set only.
-# None of these four is a marker texture: the full set saves them at the style's root, and so does
-# the clean set.
-PROMPT_CLEAN_KINDS = ("glyph", "shake")
 
 # Where each action's button is on the controller picture (fractions of controller.png): Move = left stick, Flip = top
 # face button, Jump = bottom, Use a Pixl = the 1 button's, Use Tippi = right stick. The panel's callouts point there.
@@ -254,13 +246,15 @@ def render(src, kind, buttons, style):
     return img if changed else None
 
 
-def panel_and_ui(out, style):
+def panel_and_ui(out, style, icon_names=None, spots=None):
     """panel.txt (where each action's button sits on controller.png) and ui/ (the Controls panel's
     per-action icons). controller.png must already be saved in out. Pure Kenney, so the clean set
-    uses this too."""
+    uses this too. icon_names and spots override single actions' glyphs and picture positions
+    (the Switch clean set's panel follows the port's own pad mapping; see build_clean)."""
+    spots = {**BUTTON_SPOTS[style], **(spots or {})}
     with open(os.path.join(out, "panel.txt"), "w", encoding="ascii") as f:
         # <action> <x> <y>: where the action's button is, in fractions of controller.png
-        for name, (fx, fy) in BUTTON_SPOTS[style].items():
+        for name, (fx, fy) in spots.items():
             print(name, fx, fy, file=f)
         # Stylish move (shake) = the right shoulder: the top of the picture's outline above x = 0.78.
         pad = Image.open(os.path.join(out, "controller.png"))
@@ -271,41 +265,47 @@ def panel_and_ui(out, style):
     os.makedirs(os.path.join(out, "ui"), exist_ok=True)
     icons = {"move": "stick_l", "flip": "A", "jump": "2", "pixl": "1", "tippi": "stick", "stylish": "shake"}
     for action, button in icons.items():
-        render_svg(style, STYLES[style][button], 128).save(os.path.join(out, "ui", action + ".png"))
+        name = (icon_names or {}).get(action, STYLES[style][button])
+        render_svg(style, name, 128).save(os.path.join(out, "ui", action + ".png"))
 
 
 def build_clean(out_root):
     """The Switch package's set (the nintendo style only): everything that needs nothing but the
-    vendored CC0 art in tools/button-art. The composites into the HD pack's artwork (the TEXTURES
-    renders that draw on that artwork, the marker2 files included) are never made here, so no pack is required and no game
-    art ships. What it buys: the boot screen's sideways picture becomes the Switch controller,
-    marker1 hides the Controls screen's 3D remote, and the Controls panel's own files are in
-    place (the panel itself still waits on marker2, which only the full set has). It also buys
-    the in-game prompt textures whose renders never touch the pack artwork (PROMPT_CLEAN_KINDS:
-    the text-box glyphs and the shake icon), so those prompts show Switch buttons."""
+    vendored CC0 art in tools/button-art. The composites into the HD pack's artwork are never made
+    here, so no pack is required and no game art ships. What it buys: the boot screen's sideways
+    picture becomes the Switch controller, marker1 hides the Controls screen's 3D remote, the
+    markers 2-6 report that screen's action bubbles, and the Controls panel's own files are in
+    place, so the panel opens over the screen and lists the actions itself.
+
+    The marker textures ship transparent because a marker is only a trip signal: the game draws
+    the texture on the Controls screen, Aurora reports that it was drawn, and the panel then
+    covers the whole screen and draws the labels. The full mode instead copies the pack's
+    artwork into the marker2 files and redraws the 3-6 bubbles from it; that is game art, so it
+    stays out of the package, and those textures are simply not missed under the panel.
+
+    The panel data follows THIS port's controls, not the PC set's positions: the Switch pad
+    layer reports each button under its own name (switch/sdl3_shim/sdl3_shim_gamepad.c), so
+    the position-based defaults in virtual_remote.cpp land one step around the diamond: Wii A
+    (Flip) is the pad's Y button and Wii 1 (Use a Pixl) is its X. Jump's picture is unchanged
+    (Wii 2 is the pad's B and A alike; the panel points at B)."""
     style = "nintendo"
     out = os.path.join(out_root, style)
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(os.path.join(out, "marker1"), exist_ok=True)
     for w, h, hsh, fmt in REMOTE_TEXTURES:
         Image.new("RGBA", (w, h), (0, 0, 0, 0)).save(os.path.join(out, "marker1", f"tex1_{w}x{h}_{hsh}_{fmt}.png"))
-    controller_picture(style).save(os.path.join(out, "controller.png"))
-    sideways_picture(Image.open(os.path.join(out, "controller.png"))).save(os.path.join(out, SIDEWAYS_TEXTURE))
-    panel_and_ui(out, style)
-    # The pack-independent prompt textures (PROMPT_CLEAN_KINDS): rendered from a blank canvas at
-    # the pack's 8x size and saved at 4x under their own names, like the full set, so the in-game
-    # prompts they belong to (the button glyphs inside text boxes, the shake prompt's icon) show
-    # Switch buttons in the package too.
-    for name, kind, buttons in TEXTURES:
-        if kind not in PROMPT_CLEAN_KINDS:
+    for name, marker in MARKERS.items():
+        if marker < 2:
             continue
         w, h = (int(v) for v in name.split("_")[1].split("x"))
-        with tempfile.TemporaryDirectory() as tmp:
-            blank = os.path.join(tmp, name)
-            Image.new("RGBA", (w * 8, h * 8), (0, 0, 0, 0)).save(blank)
-            img = render(blank, kind, buttons, style)
-        img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
-        img.save(os.path.join(out, name))
+        os.makedirs(os.path.join(out, f"marker{marker}"), exist_ok=True)
+        Image.new("RGBA", (w, h), (0, 0, 0, 0)).save(os.path.join(out, f"marker{marker}", name))
+    controller_picture(style).save(os.path.join(out, "controller.png"))
+    sideways_picture(Image.open(os.path.join(out, "controller.png"))).save(os.path.join(out, SIDEWAYS_TEXTURE))
+    spots = BUTTON_SPOTS[style]
+    panel_and_ui(out, style,
+                 icon_names={"flip": "switch_button_y", "pixl": "switch_button_x"},
+                 spots={"flip": spots["pixl"], "pixl": spots["flip"]})
     print(f"{style} (clean): -> {out}")
 
 
