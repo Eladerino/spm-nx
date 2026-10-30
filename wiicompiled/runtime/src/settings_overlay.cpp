@@ -329,12 +329,18 @@ const char* GraphicsApiDisplayName() {
 
 bool g_topBarVisible = false;
 
+// Whether the Options menu is open (its state lives with the Options block
+// below); forward-declared so OverlayMenuVisible can report it.
+bool OptionsMenuVisible();
+
 // The one visibility source every reader below shares: on Switch the top bar
 // is replaced by the Switch settings menu, whose state lives in
-// spm_switch_menu; elsewhere it is the bar's own flag.
+// spm_switch_menu; the Options menu reports through here too, so the guest
+// pad block (spm_settings_menu_open) also holds while Options is open.
+// Elsewhere it is the bar's own flag.
 bool OverlayMenuVisible() {
 #if defined(__SWITCH__)
-    return spm_switch_menu::Visible();
+    return spm_switch_menu::Visible() || OptionsMenuVisible();
 #else
     return g_topBarVisible;
 #endif
@@ -352,6 +358,8 @@ int g_optQuitChoice = 1;          // 0 Quit, 1 Cancel
 uint32_t g_optPrevHold = 0, g_optSuppress = 0;
 Clock::time_point g_optLastToggle{}, g_optOpenedAt{};
 std::array<Clock::time_point, 4> g_optRepeatAt{};
+
+bool OptionsMenuVisible() { return g_optOpen; }
 
 // Fast-forward (held or toggled) and faster menus / loading.
 int g_ffSpeed = RuntimeConfigFile::FastForwardSpeed(3);
@@ -1796,10 +1804,10 @@ void DrawStartupScreen() {
 #endif
                 // How to reach the settings, along the card's bottom edge.
 #if defined(__SWITCH__)
-                // No function keys on Switch: the settings menu is the - hold the gamepad shim
+                // No function keys on Switch: Options is the - hold the gamepad shim
                 // turns into F10, and F11's fullscreen toggle has no Switch meaning, so it is
                 // omitted rather than shown wrong.
-                const auto hint = GameLayout::Utf16("Hold - = settings menu");
+                const auto hint = GameLayout::Utf16("Hold - = Options");
 #else
                 const auto hint = GameLayout::Utf16("HOME or F10 = Options   F11 = fullscreen / window");
 #endif
@@ -2788,7 +2796,14 @@ void HandleEvents(const AuroraEvent* events) noexcept {
         }
         if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
 #if defined(__SWITCH__)
-            SetTopBarVisible(!OverlayMenuVisible());
+            // The gamepad shim turns a hold of Minus into F10: that toggles the
+            // Options menu. If the Developer shell (the Switch menu) is the one
+            // open, F10 closes it instead, as it did before Options existed here.
+            if (spm_switch_menu::Visible()) {
+                SetTopBarVisible(false);
+            } else {
+                RequestOptionsToggle();
+            }
 #else
             if (g_topBarVisible) {
                 SetTopBarVisible(false);
