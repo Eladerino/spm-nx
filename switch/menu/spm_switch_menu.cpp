@@ -71,11 +71,13 @@ int g_selected = 0;
 
 enum class RowId : int32_t {
     kResolution,
+    kFrameInterp,
     kAspect,
     kVsync,
     kBloom,
     kCopyFilter,
     kSkipDraws,
+    kTexReplacements,
     kShowFps,
     kFrameGraph,
     kMasterVolume,
@@ -92,6 +94,8 @@ enum class RowId : int32_t {
     kDiagLast = kDiagFirst + 13,
     kFlushLogs,
     kMarkLog,
+    kTexDumps,
+    kClearShaderCache,
 };
 
 struct RowDef {
@@ -108,11 +112,13 @@ constexpr RowId DiagRow(int n) {
 // Game, Developer.
 const RowDef kRows[] = {
     {"Graphics", RowId::kResolution, "Resolution"},
+    {"Graphics", RowId::kFrameInterp, "Frame interpolation"},
     {"Graphics", RowId::kAspect, "Aspect"},
     {"Graphics", RowId::kVsync, "Vsync"},
     {"Graphics", RowId::kBloom, "Bloom"},
     {"Graphics", RowId::kCopyFilter, "Disable copy filter"},
     {"Graphics", RowId::kSkipDraws, "Skip draws while shaders compile"},
+    {"Graphics", RowId::kTexReplacements, "Texture replacements"},
     {"Display", RowId::kShowFps, "Show FPS"},
     {"Display", RowId::kFrameGraph, "Frame graph"},
     {"Audio", RowId::kMasterVolume, "Master volume"},
@@ -141,6 +147,8 @@ const RowDef kRows[] = {
     {"Developer", DiagRow(13), "Guest profiler (profile)"},
     {"Developer", RowId::kFlushLogs, "Flush logs"},
     {"Developer", RowId::kMarkLog, "Mark log"},
+    {"Developer", RowId::kTexDumps, "Texture dumps"},
+    {"Developer", RowId::kClearShaderCache, "Clear shader cache"},
 };
 
 // The dk_diag.txt keys, in the spec's table order; kDiagFirst + n indexes it.
@@ -156,13 +164,15 @@ bool IsSlider(RowId id) {
            id == RowId::kUiVolume || id == RowId::kVoicesVolume;
 }
 
-bool IsAction(RowId id) { return id == RowId::kFlushLogs || id == RowId::kMarkLog; }
+bool IsAction(RowId id) {
+    return id == RowId::kFlushLogs || id == RowId::kMarkLog || id == RowId::kClearShaderCache;
+}
 
 bool DevGateOn() { return RuntimeConfigFile::ShowDeveloperOptions(false); }
 
 bool RowVisible(const RowDef& row) {
     if (row.id == RowId::kDevGate) return true;
-    if (IsDiag(row.id) || IsAction(row.id)) return DevGateOn();
+    if (IsDiag(row.id) || IsAction(row.id) || row.id == RowId::kTexDumps) return DevGateOn();
     return true;
 }
 
@@ -244,6 +254,8 @@ bool ToggleState(RowId id) {
         case RowId::kMixWorker: return RuntimeConfigFile::AudioMixWorkerEnabled(true);
         case RowId::kRumble: return RuntimeConfigFile::RumbleEnabled(true);
         case RowId::kSpinningCoins: return settings_overlay::SpinningCoins();
+        case RowId::kTexReplacements: return RuntimeConfigFile::TextureReplacements(true);
+        case RowId::kTexDumps: return RuntimeConfigFile::TextureDumps(false);
         case RowId::kDevGate: return DevGateOn();
         default:
             if (IsDiag(id)) return swdk::diag_get(kDiagKeys[static_cast<int>(id) - static_cast<int>(RowId::kDiagFirst)]);
@@ -312,6 +324,21 @@ void FlipToggle(RowId id) {
             RuntimeConfigFile::SetRumbleEnabled(on);
             break;
         case RowId::kSpinningCoins: settings_overlay::SetSpinningCoins(on); break;
+        case RowId::kTexReplacements:
+            // No Set* wrapper exists for this key (the PC launcher owns it
+            // there), so the row does what a setter does: update the live
+            // config, then write the file through WriteSetting. The
+            // replacement index itself is built once at startup, so the
+            // flip only takes effect on the next launch (the row says so).
+            RuntimeConfigFile::Mutable().textureReplacements = on;
+            RuntimeConfigFile::WriteSetting("video", "texture_replacements", on ? "true" : "false");
+            break;
+        case RowId::kTexDumps:
+            // Same shape as Texture replacements above; main.cpp reads the
+            // pair once while Aurora initializes.
+            RuntimeConfigFile::Mutable().textureDumps = on;
+            RuntimeConfigFile::WriteSetting("video", "texture_dumps", on ? "true" : "false");
+            break;
         case RowId::kDevGate: RuntimeConfigFile::SetShowDeveloperOptions(on); break;
         default:
             if (IsDiag(id)) FlipDiag(id);
@@ -343,22 +370,57 @@ void FireAction(RowId id) {
                      static_cast<unsigned long long>(swdk::diag_present_count()));
         swdk::diag_flush_all("mark");
         SetStatus("Mark written to the log");
+    } else if (id == RowId::kClearShaderCache) {
+        // The cache cannot be deleted from inside a running session:
+        // shaders.cpp appends a record for every shader compiled, all
+        // session long, so the next compile would recreate the file (and
+        // recreate it headerless, to be discarded at load anyway). Leave
+        // the sentinel instead (path must match kClearPath in
+        // switch/deko/shaders.cpp); shaders_init deletes cache + sentinel
+        // before the cache is read on the next launch.
+        FILE* file = std::fopen("/switch/spm-nx/UserData/dksh_cache.clear", "w");
+        if (file != nullptr) {
+            std::fclose(file);
+            SetStatus("Shader cache will be cleared on next launch");
+        } else {
+            std::fprintf(stderr, "[diag] menu: could not write dksh_cache.clear\n");
+            SetStatus("Could not request the shader cache clear");
+        }
     }
 }
 
 // Resolution cycles the Switch subset only (the full PC table goes to 8x,
 // which the console's frame budget cannot feed). From a value outside the
 // subset (an older config's 2.25x, say), cycling starts at 1x.
-const float kResolutionSubset[] = {1.0f, 1.5f, 0.0f};
+const float kResolutionSubset[] = {0.75f, 1.0f, 1.5f, 0.0f};
 
 void CycleResolution(int dir) {
     const float current = settings_overlay::RenderScale();
     int index = -1;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         if (std::fabs(current - kResolutionSubset[i]) < 0.01f) index = i;
     }
-    const float next = index < 0 ? 1.0f : kResolutionSubset[(index + dir + 3) % 3];
+    const float next = index < 0 ? 1.0f : kResolutionSubset[(index + dir + 4) % 4];
     settings_overlay::SetRenderScale(next);
+}
+
+// Frame interpolation cycles the Switch subset of Aurora's targets: the
+// overlay's table is {0, 120, 180, 240}, and 240 needs a 240 Hz panel this
+// console does not have. From a value outside the subset (a 240 a PC config
+// wrote, say), cycling starts at Off.
+const uint32_t kFrameInterpSubset[] = {0, 120, 180};
+
+void CycleFrameInterp(int dir) {
+    const uint32_t current = RuntimeConfigFile::FrameInterpolationFps(0);
+    int index = -1;
+    for (int i = 0; i < 3; ++i) {
+        if (current == kFrameInterpSubset[i]) index = i;
+    }
+    const uint32_t next = index < 0 ? 0 : kFrameInterpSubset[(index + dir + 3) % 3];
+    // The PC combo's apply pair (settings_overlay.cpp): the Aurora call
+    // retargets the running frame pacing, the config write persists it.
+    aurora_set_frame_interpolation_fps(next);
+    RuntimeConfigFile::SetFrameInterpolationFps(next);
 }
 
 const char* const kAspectLabels[] = {"Original 4:3", "16:9", "Fill Window", "Cinematic 2.39:1"};
@@ -374,6 +436,8 @@ void ActivateRow(RowId id) {
         FireAction(id);
     } else if (id == RowId::kResolution) {
         CycleResolution(1);
+    } else if (id == RowId::kFrameInterp) {
+        CycleFrameInterp(1);
     } else if (id == RowId::kAspect) {
         CycleAspect(1);
     } else if (IsSlider(id)) {
@@ -386,6 +450,8 @@ void ActivateRow(RowId id) {
 void AdjustRow(RowId id, int dir) {
     if (id == RowId::kResolution) {
         CycleResolution(dir);
+    } else if (id == RowId::kFrameInterp) {
+        CycleFrameInterp(dir);
     } else if (id == RowId::kAspect) {
         CycleAspect(dir);
     } else if (IsSlider(id)) {
@@ -406,6 +472,13 @@ std::string ValueText(RowId id) {
     if (id == RowId::kAspect) {
         const int32_t aspect = settings_overlay::Aspect();
         return (aspect >= 0 && aspect < 4) ? kAspectLabels[aspect] : "?";
+    }
+    if (id == RowId::kFrameInterp) {
+        const uint32_t fps = RuntimeConfigFile::FrameInterpolationFps(0);
+        if (fps == 0) return "Off";
+        char buffer[16];
+        std::snprintf(buffer, sizeof(buffer), "%u", fps);
+        return buffer;
     }
     if (IsSlider(id)) {
         char buffer[8];
@@ -602,6 +675,12 @@ void Draw() {
             if (row.id == RowId::kAspect &&
                 (settings_overlay::Aspect() != DisplaySettings::kAspect4x3) != DisplaySettings::GameWidescreen()) {
                 ImGui::TextDisabled("Switching between 4:3 and widescreen takes effect after a restart");
+            }
+            if (row.id == RowId::kTexDumps) {
+                ImGui::TextDisabled("Writes unmatched textures to Cache/texture_dumps under the names a replacement would use");
+            }
+            if (row.id == RowId::kTexReplacements || row.id == RowId::kTexDumps) {
+                ImGui::TextDisabled("Takes effect after a restart");
             }
             ++index;
         }
