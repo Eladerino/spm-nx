@@ -1,5 +1,16 @@
-// The Switch settings menu (spm_switch_menu.h). One ImGui window drawn from
-// the runtime overlay's Draw pass in place of the PC top bar.
+// The Switch settings menu (spm_switch_menu.h). Drawn from the runtime
+// overlay's Draw pass in place of the PC top bar: a top bar of sections with
+// one dropdown open at a time (JSRF-style), and a description window pinned
+// to the bottom of the screen. The layout is deliberate: the previous single
+// list ran to 38 rows and roughly 1,100 px of content with the Developer
+// gate on, drawn in one centred window with no scroll region in a 720 px
+// canvas, so the selection walked into rows below the visible area and the
+// highlight seemed to vanish (on hardware the walk died at the matrix trace
+// row, the last Developer row that fit). Here the longest dropdown
+// (Developer, gate on: a warning line plus 19 rows at the 23 px row advance,
+// under the bar, with the status line shown) needs about 520 px from the
+// top of the canvas, inside it with the description window's roughly 65 px
+// reserved at the bottom, and every drawn row is always on screen.
 //
 // Input is the part that has to be boring: while the menu is visible it polls
 // the player-1 gamepad directly, once per frame, through the same SDL getters
@@ -64,7 +75,14 @@ void log_flush();
 namespace spm_switch_menu {
 
 bool g_visible = false;
-int g_selected = 0;
+// Menu focus state: which bar section is focused, whether its dropdown is
+// open, and which row inside the open dropdown is focused. The open section
+// is always the focused bar section; opening a dropdown starts at its first
+// row, and switching section from inside a dropdown lands on the
+// neighbour's first row too, so the focus is never ambiguous.
+int g_barSection = 0;
+bool g_dropdownOpen = false;
+int g_row = 0;
 
 // ---------------------------------------------------------------------------
 // Rows
@@ -169,6 +187,33 @@ constexpr bool DescriptionsWithinBudget() {
 }
 static_assert(DescriptionsWithinBudget(), "every menu row needs a description inside the two-line budget");
 
+// The bar's sections, in bar order; kRows groups its rows under these names.
+// While no dropdown is open, the description area shows the focused
+// section's own line instead of a row's, so each section carries one too.
+// A section line is a single line at the same measured width as a row
+// description line (77 characters), checked below.
+const char* const kSections[] = {"Graphics", "Display", "Audio", "Game", "Developer"};
+constexpr int kSectionCount = 5;
+constexpr int kDeveloperSection = 4;
+constexpr const char* const kSectionDescriptions[] = {
+    "Render size, picture shape, and frame presentation.",
+    "On-screen frame rate display and the frame-time graph.",
+    "Volume levels, mute, and how the game audio is mixed.",
+    "Controller vibration and animated tile patches.",
+    "Renderer diagnostics for test runs and bug reports.",
+};
+static_assert(sizeof(kSectionDescriptions) / sizeof(kSectionDescriptions[0]) == kSectionCount,
+              "one description per bar section");
+constexpr bool SectionDescriptionsFitOneLine() {
+    for (const char* description : kSectionDescriptions) {
+        size_t length = 0;
+        while (description[length] != '\0') ++length;
+        if (length == 0 || length > 77) return false;
+    }
+    return true;
+}
+static_assert(SectionDescriptionsFitOneLine(), "section descriptions are one line at the menu's width");
+
 // The dk_diag.txt keys, in the spec's table order; kDiagFirst + n indexes it.
 const char* const kDiagKeys[] = {
     "depth_off", "cull_off", "magenta", "picdump", "efbclear", "bufdump", "texdump",
@@ -194,22 +239,29 @@ bool RowVisible(const RowDef& row) {
     return true;
 }
 
-int VisibleRowCount() {
+int SectionRowCount(int section) {
     int count = 0;
     for (const RowDef& row : kRows) {
-        if (RowVisible(row)) ++count;
+        if (std::strcmp(row.section, kSections[section]) == 0 && RowVisible(row)) ++count;
     }
     return count;
 }
 
-const RowDef& VisibleRowAt(int index) {
+const RowDef& SectionRowAt(int section, int index) {
     for (const RowDef& row : kRows) {
-        if (!RowVisible(row)) continue;
+        if (std::strcmp(row.section, kSections[section]) != 0 || !RowVisible(row)) continue;
         if (index == 0) return row;
         --index;
     }
     return kRows[0];  // unreachable: callers clamp the index to the count
 }
+
+// Rows Left and Right adjust in place. On any other row inside a dropdown,
+// Left and Right move along the bar instead (see StepInput).
+bool IsCycle(RowId id) {
+    return id == RowId::kResolution || id == RowId::kFrameInterp || id == RowId::kAspect;
+}
+bool IsAdjustable(RowId id) { return IsCycle(id) || IsSlider(id); }
 
 // ---------------------------------------------------------------------------
 // Row state: read live from the backing getter, every time.
@@ -594,12 +646,15 @@ bool DirectionFired(int dir, bool down, double now) {
     return false;
 }
 
+// The pad model. On the bar: Left and Right move between sections, A or
+// Down opens the focused section's dropdown, B closes the menu. Inside a
+// dropdown: Up and Down move between its rows; Left and Right adjust the
+// focused row where the row adjusts (cycles and sliders, as before), and on
+// any other row they switch to the neighbouring section's dropdown; A
+// activates the row; B closes the dropdown, and B on the bar closes the
+// menu. Only the left stick feeds the direction state (ReadSample): the
+// right stick is the guest's pointer stick, and this file never reads it.
 void StepInput() {
-    const int count = VisibleRowCount();
-    if (count == 0) return;
-    if (g_selected >= count) g_selected = count - 1;
-    if (g_selected < 0) g_selected = 0;
-
     const Sample sample = ReadSample(AcquirePad());
     const double now = ImGui::GetTime();
     const bool up = DirectionFired(0, sample.up, now);
@@ -610,13 +665,48 @@ void StepInput() {
     const bool back = sample.back && !g_prev.back;
     g_prev = sample;
 
-    if (up) g_selected = (g_selected + count - 1) % count;
-    if (down) g_selected = (g_selected + 1) % count;
-    const RowId id = VisibleRowAt(g_selected).id;
-    if (left) AdjustRow(id, -1);
-    if (right) AdjustRow(id, 1);
-    if (confirm) ActivateRow(id);
-    if (back) SetVisible(false);
+    if (!g_dropdownOpen) {
+        if (left) g_barSection = (g_barSection + kSectionCount - 1) % kSectionCount;
+        if (right) g_barSection = (g_barSection + 1) % kSectionCount;
+        if (confirm || down) {
+            g_dropdownOpen = true;
+            g_row = 0;
+        }
+        if (back) SetVisible(false);
+        return;
+    }
+
+    const int count = SectionRowCount(g_barSection);
+    if (count == 0) {
+        g_dropdownOpen = false;
+        return;
+    }
+    if (g_row >= count) g_row = count - 1;
+    if (g_row < 0) g_row = 0;
+    if (up) g_row = (g_row + count - 1) % count;
+    if (down) g_row = (g_row + 1) % count;
+    if (left || right) {
+        const int dir = right ? 1 : -1;
+        const RowDef& row = SectionRowAt(g_barSection, g_row);
+        if (IsAdjustable(row.id)) {
+            AdjustRow(row.id, dir);
+        } else {
+            g_barSection = (g_barSection + dir + kSectionCount) % kSectionCount;
+            g_row = 0;
+        }
+    }
+    if (confirm) {
+        ActivateRow(SectionRowAt(g_barSection, g_row).id);
+        // A flip can change the section's own list (the Developer gate):
+        // re-clamp against the new count before anything draws.
+        const int nextCount = SectionRowCount(g_barSection);
+        if (nextCount == 0) {
+            g_dropdownOpen = false;
+        } else if (g_row >= nextCount) {
+            g_row = nextCount - 1;
+        }
+    }
+    if (back) g_dropdownOpen = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -626,6 +716,7 @@ bool Visible() { return g_visible; }
 
 void SetVisible(bool visible) {
     g_visible = visible;
+    if (visible) g_dropdownOpen = false;  // the menu always opens on the bar
     // Re-baseline input on the pad's current state: whatever is held as the
     // menu opens or closes counts as already down, so nothing acts on it
     // until a fresh press (a held direction starts its repeat delay over).
@@ -652,72 +743,93 @@ void Draw() {
     StepInput();
     if (!g_visible) return;  // B closed it this frame
 
-    const int count = VisibleRowCount();
-    if (g_selected >= count) g_selected = count - 1;
-    if (g_selected < 0) g_selected = 0;
+    if (g_dropdownOpen) {
+        const int count = SectionRowCount(g_barSection);
+        if (count == 0) {
+            g_dropdownOpen = false;
+        } else {
+            if (g_row >= count) g_row = count - 1;
+            if (g_row < 0) g_row = 0;
+        }
+    }
 
     // The same full-screen dim the top bar drew.
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::GetBackgroundDrawList()->AddRectFilled(
         viewport->Pos, ImVec2(viewport->Pos.x + viewport->Size.x, viewport->Pos.y + viewport->Size.y),
         IM_COL32(0, 0, 0, 110));
-    ImGui::SetNextWindowPos(
-        ImVec2(viewport->Pos.x + viewport->Size.x * 0.5f, viewport->Pos.y + viewport->Size.y * 0.5f),
-        ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Always);
     // NoNav: this menu is driven by its own pad polling above; ImGui's
     // navigation must never move anything here.
     constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
                                         ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav;
+    const float centerX = viewport->Pos.x + viewport->Size.x * 0.5f;
+
+    // The bar, pinned to the top of the screen, with the open section's
+    // dropdown under it. Only one dropdown is open at a time, and its
+    // height is bounded by the longest section (see the note at the top of
+    // this file), so every row it draws is on screen.
+    ImGui::SetNextWindowPos(ImVec2(centerX, viewport->Pos.y), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Always);
     if (ImGui::Begin("Switch Settings", nullptr, kFlags)) {
-        ImGui::Text("New Super Paper Bros.");
-        ImGui::TextDisabled("Switch settings");
-        const char* section = nullptr;
-        int index = 0;
-        for (const RowDef& row : kRows) {
-            if (!RowVisible(row)) continue;
-            if (section == nullptr || std::strcmp(section, row.section) != 0) {
-                section = row.section;
-                ImGui::SeparatorText(section);
-                if (std::strcmp(section, "Developer") == 0 && DevGateOn()) {
-                    ImGui::TextDisabled("Diagnostics can hurt performance or distort the picture.");
+        for (int section = 0; section < kSectionCount; ++section) {
+            if (section > 0) ImGui::SameLine();
+            ImGui::PushID(section);
+            ImGui::Selectable(kSections[section], section == g_barSection, ImGuiSelectableFlags_None);
+            ImGui::PopID();
+        }
+        if (g_dropdownOpen) {
+            ImGui::Separator();
+            if (g_barSection == kDeveloperSection && DevGateOn()) {
+                ImGui::TextDisabled("Diagnostics can hurt performance or distort the picture.");
+            }
+            const int count = SectionRowCount(g_barSection);
+            for (int index = 0; index < count; ++index) {
+                const RowDef& row = SectionRowAt(g_barSection, index);
+                ImGui::PushID(static_cast<int>(row.id));
+                const std::string value = ValueText(row.id);
+                const std::string text =
+                    value.empty() ? std::string(row.label) : (std::string(row.label) + "   " + value);
+                ImGui::Selectable(text.c_str(), index == g_row, ImGuiSelectableFlags_None);
+                ImGui::PopID();
+                if (row.id == RowId::kAspect &&
+                    (settings_overlay::Aspect() != DisplaySettings::kAspect4x3) !=
+                        DisplaySettings::GameWidescreen()) {
+                    ImGui::TextDisabled("Switching between 4:3 and widescreen takes effect after a restart");
                 }
             }
-            ImGui::PushID(static_cast<int>(row.id));
-            const std::string value = ValueText(row.id);
-            const std::string text = value.empty() ? std::string(row.label) : (std::string(row.label) + "   " + value);
-            ImGui::Selectable(text.c_str(), index == g_selected, ImGuiSelectableFlags_None);
-            ImGui::PopID();
-            if (row.id == RowId::kAspect &&
-                (settings_overlay::Aspect() != DisplaySettings::kAspect4x3) != DisplaySettings::GameWidescreen()) {
-                ImGui::TextDisabled("Switching between 4:3 and widescreen takes effect after a restart");
+            if (!g_status.empty() && ImGui::GetTime() < g_statusUntil) {
+                ImGui::Separator();
+                ImGui::Text("%s", g_status.c_str());
             }
-            ++index;
         }
-        // The focused row's description, in a fixed-height area at the
-        // bottom of the content: two text lines are reserved whether the
-        // text fills them or not, so the row list above never moves while
-        // the selection changes. The child's own padding is zeroed so the
-        // full content width (and the budget measured for kRows) applies.
-        const RowDef& focusedRow = VisibleRowAt(g_selected);
-        ImGui::Separator();
+    }
+    ImGui::End();
+
+    // The description window, pinned to the bottom of the screen: the
+    // focused row's description while a dropdown is open, the focused
+    // section's own line while none is. Its height is the same whether the
+    // text fills it or not (two text lines are reserved), so nothing above
+    // it ever moves while navigating.
+    ImGui::SetNextWindowPos(ImVec2(centerX, viewport->Pos.y + viewport->Size.y), ImGuiCond_Always,
+                            ImVec2(0.5f, 1.0f));
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Always);
+    if (ImGui::Begin("Switch Settings Description", nullptr, kFlags)) {
+        const char* description = g_dropdownOpen ? SectionRowAt(g_barSection, g_row).description
+                                                 : kSectionDescriptions[g_barSection];
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         if (ImGui::BeginChild("Selected row description",
                               ImVec2(0.0f, ImGui::GetTextLineHeight() * 2.0f), false,
                               ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
                                   ImGuiWindowFlags_NoNav)) {
-            ImGui::TextWrapped("%s", focusedRow.description);
+            ImGui::TextWrapped("%s", description);
         }
         ImGui::EndChild();
         ImGui::PopStyleVar();
-        if (!g_status.empty() && ImGui::GetTime() < g_statusUntil) {
-            ImGui::Separator();
-            ImGui::Text("%s", g_status.c_str());
-        }
         ImGui::Separator();
-        ImGui::TextDisabled("[A] Select   [Left/Right] Adjust   [B] Close");
+        ImGui::TextDisabled(g_dropdownOpen ? "[Up/Down] Move   [Left/Right] Adjust   [A] Select   [B] Back"
+                                           : "[Left/Right] Section   [A] Open   [B] Close menu");
     }
     ImGui::End();
 }

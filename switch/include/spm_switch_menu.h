@@ -2,9 +2,10 @@
 
 // The Switch settings menu: the port's replacement for the runtime overlay's
 // PC top bar, which is not drawn on Switch (settings_overlay.cpp routes its
-// DrawTopBar call here under __SWITCH__). One plain ImGui window, driven by
-// polling the gamepad directly each frame it is visible; it uses no ImGui
-// navigation, focus, or synthetic key input. Implementation:
+// DrawTopBar call here under __SWITCH__). A top menu bar of sections with
+// dropdowns, plus a description window at the bottom of the screen, driven
+// by polling the gamepad directly each frame it is visible; it uses no
+// ImGui navigation, focus, or synthetic key input. Implementation:
 // switch/menu/spm_switch_menu.cpp.
 //
 // The overlay owns the seams that reach this header: F10 / Escape toggle
