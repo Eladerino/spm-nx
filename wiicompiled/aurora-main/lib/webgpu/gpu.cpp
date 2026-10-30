@@ -235,8 +235,13 @@ wgpu::PresentMode best_present_mode() {
     }
     return false;
   };
-  if (g_vsyncEnabled.load(std::memory_order_acquire) && supports(wgpu::PresentMode::Fifo)) {
-    return wgpu::PresentMode::Fifo;
+  if (g_vsyncEnabled.load(std::memory_order_acquire)) {
+    // A frame that misses its refresh must not wait a whole extra one: plain Fifo held heavy scenes at exactly
+    // 30 FPS (issues #45, #60, #61). Adaptive V-Sync shows it at once (Vulkan); Mailbox shows it at the next
+    // refresh without tearing or blocking (D3D12), the runtime's V-Sync lock pacing the game to the display.
+    if (supports(wgpu::PresentMode::FifoRelaxed)) return wgpu::PresentMode::FifoRelaxed;
+    if (supports(wgpu::PresentMode::Mailbox)) return wgpu::PresentMode::Mailbox;
+    if (supports(wgpu::PresentMode::Fifo)) return wgpu::PresentMode::Fifo;
   }
   // Vulkan prefers Mailbox, every other backend Immediate. Under window capture the Vulkan driver
   // cannot flip and Immediate leaks about a megabyte per present until the device is lost.
@@ -670,12 +675,17 @@ bool initialize(AuroraBackend auroraBackend) {
   g_backendType = wgpu::BackendType::Undefined;
   {
     window::SurfaceLock surfaceLock;
-    if (!create_surface()) {
+    if (!g_config.externalPresentation && !create_surface()) {
       return false;
     }
   }
   {
+    const char* sharingToggles[] = {"allow_unsafe_apis"};
+    wgpu::DawnTogglesDescriptor sharingDescriptor{};
+    sharingDescriptor.enabledToggleCount = 1;
+    sharingDescriptor.enabledToggles = sharingToggles;
     const wgpu::RequestAdapterOptions options{
+        .nextInChain = g_config.externalPresentation ? &sharingDescriptor : nullptr,
         .powerPreference = wgpu::PowerPreference::HighPerformance,
         .backendType = backend,
         .compatibleSurface = g_surface,
@@ -770,6 +780,18 @@ bool initialize(AuroraBackend auroraBackend) {
       requiredFeatures.push_back(wgpu::FeatureName::SharedTextureMemoryIOSurface);
       requiredFeatures.push_back(wgpu::FeatureName::SharedFenceMTLSharedEvent);
     }
+#if defined(__ANDROID__)
+    if (g_config.externalPresentation) {
+      for (const auto feature : {wgpu::FeatureName::SharedTextureMemoryAHardwareBuffer,
+                                  wgpu::FeatureName::SharedFenceSyncFD}) {
+        if (!g_adapter.HasFeature(feature)) {
+          Log.error("External presentation requires Dawn AHB/SyncFD sharing features");
+          return false;
+        }
+        requiredFeatures.push_back(feature);
+      }
+    }
+#endif
     bool implicitDeviceSynchronizationSupported = false;
     wgpu::SupportedFeatures supportedFeatures;
     g_adapter.GetFeatures(&supportedFeatures);
@@ -825,6 +847,7 @@ bool initialize(AuroraBackend auroraBackend) {
     if (g_backendType == wgpu::BackendType::Vulkan && !gfx_flag("nomono")) {
       enableToggles.push_back("vulkan_monolithic_pipeline_cache");
     }
+    if (g_config.externalPresentation) enableToggles.push_back("allow_unsafe_apis");
     std::vector<const char*> disableToggles;
     for (const auto& flag : g_gfxFlags) {
       if (flag.size() > 1 && flag.front() == '+') {
@@ -954,21 +977,23 @@ bool initialize(AuroraBackend auroraBackend) {
   auto surfaceFormat = wgpu::TextureFormat::RGBA8Unorm;
   auto presentMode = wgpu::PresentMode::Fifo;
   if constexpr (!kSurfaceless) {
-    const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
-    if (status != wgpu::Status::Success) {
-      Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
-      return false;
+    if (!g_config.externalPresentation) {
+      const wgpu::Status status = g_surface.GetCapabilities(g_adapter, &g_surfaceCapabilities);
+      if (status != wgpu::Status::Success) {
+        Log.error("Failed to get surface capabilities: {}", magic_enum::enum_name(status));
+        return false;
+      }
+      if (g_surfaceCapabilities.formatCount == 0) {
+        Log.error("Surface has no formats");
+        return false;
+      }
+      if (g_surfaceCapabilities.presentModeCount == 0) {
+        Log.error("Surface has no present modes");
+        return false;
+      }
+      surfaceFormat = best_surface_format();
+      presentMode = best_present_mode();
     }
-    if (g_surfaceCapabilities.formatCount == 0) {
-      Log.error("Surface has no formats");
-      return false;
-    }
-    if (g_surfaceCapabilities.presentModeCount == 0) {
-      Log.error("Surface has no present modes");
-      return false;
-    }
-    surfaceFormat = best_surface_format();
-    presentMode = best_present_mode();
   }
   Log.info("Using surface format {}, present mode {}", magic_enum::enum_name(surfaceFormat),
            magic_enum::enum_name(presentMode));
@@ -996,7 +1021,10 @@ bool initialize(AuroraBackend auroraBackend) {
   return true;
 }
 
+bool device_lost() noexcept { return g_deviceLost.load(std::memory_order_acquire); }
 void fail_if_device_lost() noexcept {
+  // The frontend stops the session at its next owned frame boundary.
+  if (g_config.externalPresentation) return;
   if (!g_deviceLost.load(std::memory_order_acquire)) {
     return;
   }
@@ -1052,6 +1080,7 @@ void shutdown() {
   aurora_switch_dk_shutdown();
 #endif
   serialize_pipeline_caches();
+  clear_present_source_override();
   g_initialized.store(false, std::memory_order_release);
   g_CopyBindGroupLayout = {};
   g_CopyPipeline = {};
@@ -1140,7 +1169,7 @@ bool take_vsync_change() noexcept {
 }
 
 void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, uint32_t native_height, bool force) {
-  if (!surface_ready() || !g_device || width == 0 || height == 0 || native_height == 0 || native_width == 0) {
+  if ((!surface_ready() && !g_config.externalPresentation) || !g_device || width == 0 || height == 0 || native_height == 0 || native_width == 0) {
     return;
   }
 
@@ -1184,10 +1213,8 @@ void resize_swapchain(uint32_t width, uint32_t height, uint32_t native_width, ui
   g_graphicsConfig.surfaceConfiguration.height = native_height;
   auto surfaceConfiguration = g_graphicsConfig.surfaceConfiguration;
   surfaceConfiguration.device = g_device;
-  if (g_surface) {
-    g_surface.Configure(&surfaceConfiguration);
-  }
-  if (!sizeChanged) {
+  if (g_surface) g_surface.Configure(&surfaceConfiguration);
+  if (!sizeChanged && g_frameBuffer.texture) {
     // Forced reconfigure at an unchanged size (present-mode change or recreated surface). The
     // offscreen targets are not swapchain images, so reallocating them would only stall the frame.
     return;

@@ -4,6 +4,9 @@
 
 A native PC port of **Super Paper Mario** (Wii, 2007), made by statically recompiling the game's PowerPC code to C++
 with [WiiCompiled](https://github.com/patchzyy/Wiicompiled). No emulator: the game runs as a Windows or Linux program.
+A native port of **Super Paper Mario** (Wii, 2007), made by statically recompiling the game's PowerPC code to C++
+with [WiiCompiled](https://github.com/patchzyy/Wiicompiled). No emulator: the game runs as a Windows, Linux, macOS or
+Android program, or as a RetroArch core on Android.
 
 ![Flipside in cinematic 2.39:1 widescreen](screenshots/mac_02_cinematic.png)
 
@@ -39,6 +42,7 @@ the PC ones above. Installing, building and the state of the port are documented
 - On-screen buttons match your controller (Xbox, PlayStation or Nintendo), with a controls screen for it
 - Mods: drop-in folders that replace game files or textures
 - A launcher that installs the game from your own disc image
+- Android (a RetroArch libretro core with save states, or a standalone app) and macOS builds from source
 
 **No game data is included**: the game's files are read from your own copy of the game.
 
@@ -109,6 +113,9 @@ HD texture pack in `Play\UserData\texture_replacements\SPM_HD_4x_BC3`.
 For Linux, after those steps run `bash tools/build-linux.sh` and `bash tools/build-linux.sh --pal` in WSL (Ubuntu
 22.04) or on Linux, then `bash tools/package-linux.sh` for `dist/NewSuperPaperBros-linux.tar.gz`.
 
+For Android and macOS (USA disc only), see
+[`wiicompiled/docs/android-and-macos.md`](wiicompiled/docs/android-and-macos.md).
+
 `build-spm.ps1` translates the game and compiles it into `Play\SuperPaperMario.exe`; `package-spm.ps1` assembles the
 release folder in `dist\` (`-Zip` also writes the zip). `tools\sweep-spm-maps.py` loads every map and screenshots it
 for regression checks.
@@ -121,7 +128,7 @@ for regression checks.
 | `wiicompiled/projects/spm` | This game's project: symbols and function map |
 | `launcher` | The launcher (C# WinForms): disc setup, display options, controls, mods |
 | `launcher/linux` | The same launcher for Linux (C# Avalonia) |
-| `tools` | Build, package and test scripts |
+| `tools` | Build, package and test scripts (`tools/android`: Android and macOS) |
 
 For the Switch build, the translation above is the input: the Building section of
 [`switch/README.md`](switch/README.md) runs the same preparation and translation, then compiles
@@ -150,6 +157,7 @@ the result for Horizon instead of Windows.
 - **Higher-quality music:** the "SPM High Definition Audio" mod by Toadette Hack Fan and PaperToadette, with game
   patches by JohnP55
 - **HD textures:** converted from the "SPM Textures v1.0" HD texture pack
+- **Launcher background:** ["Super Paper Mario Wallpaper"](https://www.deviantart.com/fawfulthegreat64/art/Super-Paper-Mario-Wallpaper-891704524) by FawfulTheGreat64
 - **Controller button icons and pictures:** "Input Prompts" by [Kenney](https://kenney.nl), CC0
 - **Dolphin Emulator** data files (DSP coefficients, Wii system files), GPL-2.0-or-later
 - Symbol names from the Super Paper Mario decompilation community ([spm-decomp](https://github.com/SeekyCt/spm-decomp))

@@ -20,6 +20,7 @@ cp "$build/usa/build/_deps/png-build/libpng16.so.16" "$engine/"   # the one libr
 cp -L "$build/sdl-shared/libSDL3.so.0" "$engine/"                 # the launcher's controller list
 cp "$build/usa/build/dsp_coef.bin" "$build/usa/build/cacert.pem" "$root/Play/portable.txt" "$engine/"
 cp -r "$root/Play/startup" "$root/Play/wii_bootstrap" "$engine/"
+echo "$version" > "$engine/version.txt"   # the built-in updater compares this with the latest release
 # Built-in HQ music: the mod's brstm files that replaced the disc's own (Disc/sound_original keeps the originals).
 for original in "$root"/Disc/sound_original/*.brstm; do
     hq=$root/Disc/DATA/files/sound/$(basename "$original")
@@ -31,6 +32,7 @@ cp -r "$root/Play/UserData/texture_replacements/SPM_HD_4x_BC3" "$engine/UserData
 cp -r "$root/Play/UserData/button_icons" "$engine/UserData/"
 cp "$root/tools/CREDITS.txt" "$stage/CREDITS.txt"
 cp "$root/wiicompiled/LICENSE" "$stage/LICENSE.txt"
+mkdir -p "$stage/mod-sdk" && cp "$root/wiicompiled/runtime/include/spm_mod_api.h" "$root/tools/mod-sdk/example_mod.c" "$stage/mod-sdk/"   # code mods (README "Mods")
 cp "$root/wiicompiled/THIRD-PARTY-NOTICES.md" "$engine/licenses/"
 for dir in "$root"/wiicompiled/Dependencies/*/; do
     for f in "$dir"LICEN[CS]E* "$dir"COPYING* "$dir"NOTICE*; do

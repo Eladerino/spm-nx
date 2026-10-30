@@ -1,10 +1,12 @@
 #include <aurora/aurora.h>
+#include <aurora/external.h>
 
 #ifdef AURORA_ENABLE_GX
 #include "gfx/common.hpp"
 #include "gfx/efb_ram_copy.hpp"
 #include "gfx/texture_replacement.hpp"
 #include "gx/gx.hpp"
+#include "dolphin/vi/vi_internal.hpp"
 #include "gx/fifo.hpp"
 #include "gx/shader_info.hpp"
 #include "imgui.hpp"
@@ -58,6 +60,7 @@ namespace aurora::gx {
 // Producer pacing feedback for the adaptive slot count, defined in lib/gx/shader_info.cpp;
 // declared here so the C entry point at the bottom of this file can forward to it.
 void report_producer_paced(bool paced) noexcept;
+void set_display_periods_per_frame(uint32_t periods) noexcept;
 } // namespace aurora::gx
 #endif
 
@@ -266,6 +269,7 @@ struct FrameWorkerState {
 FrameWorkerState g_frameWorker;
 
 bool frame_worker_requested() noexcept {
+  if (g_config.externalPresentation) return false;
 #ifdef AURORA_ENABLE_GX
   static const bool enabled = [] {
 #if defined(__APPLE__)
@@ -662,6 +666,10 @@ constexpr std::array<AuroraBackend, 0> PreferredBackendOrder{};
 bool g_initialFrame = false;
 
 
+std::array<char*, 5> g_ownedConfigStrings{};
+void release_owned_config_strings() {
+  for (auto& value : g_ownedConfigStrings) { std::free(value); value = nullptr; }
+}
 AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexcept {
   g_config = config;
   Log.info("Aurora initializing");
@@ -669,27 +677,27 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   if (g_config.appName == nullptr) {
     g_config.appName = "Aurora";
   } else {
-    g_config.appName = strdup(g_config.appName);
+    g_config.appName = g_ownedConfigStrings[0] = strdup(g_config.appName);
   }
   if (g_config.userPath == nullptr) {
     g_config.userPath = SDL_GetPrefPath(nullptr, g_config.appName);
   } else {
-    g_config.userPath = strdup(g_config.userPath);
+    g_config.userPath = g_ownedConfigStrings[1] = strdup(g_config.userPath);
   }
   if (g_config.cachePath == nullptr) {
     g_config.cachePath = SDL_GetPrefPath(nullptr, g_config.appName);
   } else {
-    g_config.cachePath = strdup(g_config.cachePath);
+    g_config.cachePath = g_ownedConfigStrings[2] = strdup(g_config.cachePath);
   }
   if (g_config.resourcesPath == nullptr) {
     g_config.resourcesPath = SDL_GetBasePath();
   } else {
-    g_config.resourcesPath = strdup(g_config.resourcesPath);
+    g_config.resourcesPath = g_ownedConfigStrings[3] = strdup(g_config.resourcesPath);
   }
   if (g_config.pipelineCachePath == nullptr) {
     g_config.pipelineCachePath = g_config.cachePath;
   } else {
-    g_config.pipelineCachePath = strdup(g_config.pipelineCachePath);
+    g_config.pipelineCachePath = g_ownedConfigStrings[4] = strdup(g_config.pipelineCachePath);
   }
   if (g_config.msaa == 0) {
     g_config.msaa = 1;
@@ -714,7 +722,11 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
       firstGraphicsError = SDL_GetError();
     }
   };
-  if (selectedBackend != BACKEND_AUTO) {
+  if (g_config.externalPresentation) {
+    windowCreated = webgpu::initialize(selectedBackend);
+    if (!windowCreated) rememberGraphicsError();
+  }
+  if (!g_config.externalPresentation && selectedBackend != BACKEND_AUTO) {
     Log.info("Requested graphics backend: {}", backend_name(selectedBackend));
     if (window::create_window(selectedBackend)) {
       if (webgpu::initialize(selectedBackend)) {
@@ -737,7 +749,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
     }
   }
 
-  if (!windowCreated) {
+  if (!g_config.externalPresentation && !windowCreated) {
     for (const auto backendType : PreferredBackendOrder) {
       selectedBackend = backendType;
       if (!window::create_window(selectedBackend)) {
@@ -780,7 +792,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   ASSERT(window::create_renderer(), "Failed to initialize SDL renderer: {}", SDL_GetError());
 #endif
 
-  window::show_window();
+  if (!g_config.externalPresentation) window::show_window();
 
 #ifdef AURORA_ENABLE_GX
   gfx::initialize();
@@ -788,7 +800,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   g_metalfxSupported.store(webgpu::metalfx::supported(g_device, webgpu::g_backendType));
   g_metalfxStatus.store(AURORA_METALFX_DISABLED);
 
-  imgui::create_context();
+  if (!g_config.externalPresentation) imgui::create_context();
 #endif
   const auto size = window::get_window_size();
   Log.info("Using framebuffer size {}x{} scale {}", size.fb_width, size.fb_height, size.scale);
@@ -796,7 +808,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
   if (g_config.imGuiInitCallback != nullptr) {
     g_config.imGuiInitCallback(&size);
   }
-  imgui::initialize();
+  if (!g_config.externalPresentation) imgui::initialize();
 #endif
 
   g_initialFrame = true;
@@ -870,6 +882,8 @@ struct PresentationImage {
   webgpu::TextureWithSampler texture;
   wgpu::BindGroup bindGroup;
 };
+
+std::shared_ptr<PresentationImage> g_externalOutput;
 
 struct PresentationJob {
   std::shared_ptr<PresentationImage> image;
@@ -1062,6 +1076,27 @@ bool present_presentation_job(const PresentationJob& job) {
               PresentClock::now() - presentStarted);
           if (presentStatus == wgpu::Status::Success) {
             presented = true;
+            // AURORA_PRESENT_LOG=1: the spacing of Present() calls, every 240 presents (pacing checks).
+            static const bool logCadence = std::getenv("AURORA_PRESENT_LOG") != nullptr;
+            if (logCadence) {
+              static PresentClock::time_point s_last{};
+              static std::vector<double> s_gaps;
+              if (s_last != PresentClock::time_point{})
+                s_gaps.push_back(std::chrono::duration<double, std::milli>(presentStarted - s_last).count());
+              s_last = presentStarted;
+              if (s_gaps.size() >= 240) {
+                double sum = 0, sq = 0, lo = 1e9, hi = 0;
+                for (const double g : s_gaps) { sum += g; sq += g * g; lo = (std::min)(lo, g); hi = (std::max)(hi, g); }
+                const double mean = sum / s_gaps.size();
+                int off = 0;
+                for (const double g : s_gaps) off += std::fabs(g - mean) > mean * 0.25;
+                std::string first;  // the first gaps in order: shows a pattern (pairs, a skip every n) at a glance
+                for (size_t i = 0; i < 16 && i < s_gaps.size(); ++i) first += fmt::format(" {:.1f}", s_gaps[i]);
+                Log.info("Present cadence: mean {:.3f} ms, sd {:.3f}, min {:.3f}, max {:.3f}, {} of {} off by >25%;{}", mean,
+                         std::sqrt((std::max)(0.0, sq / s_gaps.size() - mean * mean)), lo, hi, off, s_gaps.size(), first);
+                s_gaps.clear();
+              }
+            }
             record_successful_present(
                 job.interpolated, job.logicalFrame, acquireDuration, encodeDuration,
                 finishDuration, submitDuration, presentDuration,
@@ -1174,6 +1209,14 @@ void presenter_main() noexcept {
       // V-Sync only, never for an inserted (interpolated) slot: drop this frame when the swapchain
       // is backed up, or when it is already late and a newer one waits. A slow scene with no
       // backlog presents every frame, late or not.
+      // An inserted frame is dropped when a newer one is already due: shown anyway, the two go out back to back.
+      static const bool oldPacing = std::getenv("AURORA_OLD_SLOT_PACING") != nullptr;
+      if (!oldPacing && job.interpolated && !g_presenter.jobs.empty() && g_presenter.jobs.front().presentAt != PresentClock::time_point{} &&
+          g_presenter.jobs.front().presentAt <= PresentClock::now()) {
+        lock.unlock();
+        g_presenter.cv.notify_all();
+        continue;
+      }
       if (webgpu::vsync_enabled() && !job.interpolated && job.presentAt != PresentClock::time_point{}) {
         constexpr auto kBacklog = std::chrono::milliseconds(8);
         const bool backedUp = g_lastAcquireNanos.exchange(0, std::memory_order_relaxed) >
@@ -1424,7 +1467,7 @@ wgpu::BindGroup encode_presentation_snapshot(wgpu::CommandEncoder& encoder,
     pass.Draw(3);
     pass.End();
   }
-  if (includeImGui) {
+  if (includeImGui && !g_config.externalPresentation) {
     const std::array attachments{
         wgpu::RenderPassColorAttachment{
             .view = image.texture.view,
@@ -1459,15 +1502,22 @@ void shutdown() noexcept {
   g_metalfxRequested.store(false);
   g_metalfxSupported.store(false);
   g_metalfxStatus.store(AURORA_METALFX_DISABLED);
-  imgui::shutdown();
+  if (!g_config.externalPresentation) imgui::shutdown();
+  g_externalOutput.reset();
   gfx::shutdown();
   webgpu::shutdown();
 #endif
-  input::shutdown();
+  if (!g_config.externalPresentation) input::shutdown();
   window::shutdown();
+#ifdef AURORA_ENABLE_GX
+  vi::configure(nullptr);
+#endif
+  release_owned_config_strings();
+  g_config = {};
 }
 
 const AuroraEvent* update() noexcept {
+  if (g_config.externalPresentation) return nullptr;
   ZoneScoped;
   if (g_initialFrame) {
     g_initialFrame = false;
@@ -1477,6 +1527,9 @@ const AuroraEvent* update() noexcept {
 }
 
 bool begin_frame_impl(bool pumpEvents, ImGuiFramePolicy imguiPolicy, bool* imguiNewFrameOwed) noexcept {
+  if (g_config.externalPresentation) {
+    return begin_frame_render_state_impl(imguiPolicy, imguiNewFrameOwed);
+  }
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   webgpu::fail_if_device_lost();
@@ -1548,7 +1601,9 @@ bool begin_frame_render_state_impl(ImGuiFramePolicy imguiPolicy, bool* imguiNewF
   std::lock_guard gpuLock(g_rendererGpuMutex);
   // Note the debt before gfx::begin_frame() can fail: the synchronous path always started the
   // ImGui frame here, and the runtime's retry loop depends on that pairing.
-  if (imguiPolicy == ImGuiFramePolicy::Immediate) {
+  if (g_config.externalPresentation) {
+    // No ImGui context belongs to a windowless renderer.
+  } else if (imguiPolicy == ImGuiFramePolicy::Immediate) {
     imgui::new_frame(window::get_window_size());
   } else if (imguiNewFrameOwed != nullptr) {
     *imguiNewFrameOwed = true;
@@ -1611,7 +1666,7 @@ void seal_frame_locked(gfx::SealedFrame& sealedFrame, SealedFrameContext& ctx) {
   ctx.presentSource = webgpu::current_present_source();
   // ImGui draw lists are built once per frame and replayed by each slot's ImGui pass, which is why
   // the next ImGui frame cannot start until the encode phase is done.
-  imgui::render_frame_data();
+  if (!g_config.externalPresentation) imgui::render_frame_data();
   // Drop the sealed frame's lazy RAM-readback requests while the producer is still excluded; it
   // starts registering the next frame's as soon as SEALED is published.
   gfx::efb_ram::cancel();
@@ -1663,9 +1718,19 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
     }
   };
 
+  // An inserted frame whose moment has already passed (a game frame that ran late) is skipped: shown late it
+  // would burst out next to its neighbours, and holding the whole group back a frame for it was a visible hitch.
+  static const bool oldPacing = std::getenv("AURORA_OLD_SLOT_PACING") != nullptr;  // A/B tests of the change
+  const auto slotExpired = [&](uint32_t slot) {
+    const auto deadline = slotPresentDeadline(slot);
+    if (oldPacing || !ctx.interpolationActive || deadline == PresentClock::time_point{}) return false;
+    const std::chrono::nanoseconds halfSlot{static_cast<int64_t>(ctx.scheduleIntervalNanos / presentationJobCount / 2)};
+    return PresentClock::now() > deadline + halfSlot;
+  };
   if (ctx.replayInterpolatedFrames) {
     for (uint32_t interpolatedFrame = 0; interpolatedFrame < ctx.interpolatedFrameCount;
          ++interpolatedFrame) {
+      if (slotExpired(interpolatedFrame)) continue;
       gfx::render(sealedFrame, encoder, static_cast<int32_t>(interpolatedFrame), false);
       auto image =
           acquire_presentation_image(interpolatedFrame, ctx.snapshotWidth, ctx.snapshotHeight);
@@ -1691,6 +1756,7 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
   if (!ctx.replayInterpolatedFrames) {
     for (uint32_t interpolatedFrame = 0; interpolatedFrame < ctx.interpolatedFrameCount;
          ++interpolatedFrame) {
+      if (slotExpired(interpolatedFrame)) continue;
       auto image =
           acquire_presentation_image(interpolatedFrame, ctx.snapshotWidth, ctx.snapshotHeight);
       const auto newMetalFXOutput = encode_presentation_snapshot(
@@ -1723,25 +1789,25 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
   });
   submitEncodedSlot(encoder);
 
-  // A group that finished encoding past its anchor slides forward by whole display periods, never
-  // per slot. The cursor keeps two groups off one anchor, which bursts then holds for a period.
+  // Late slots were skipped above and the frame itself presents as soon as it can, on the VI grid (no slide
+  // by a whole frame, which held the picture and added a frame of latency that never went away). The cursor
+  // keeps two groups off one anchor, which bursts then holds for a period.
   static PresentClock::time_point s_lastGroupAnchor{};
   if (ctx.interpolationActive && ctx.scheduleIntervalNanos != 0 && !presentationJobs.empty() &&
       presentationJobs.front().presentAt != PresentClock::time_point{}) {
     const std::chrono::nanoseconds interval{static_cast<int64_t>(ctx.scheduleIntervalNanos)};
-    auto anchor = presentationJobs.front().presentAt;
-    const auto now = PresentClock::now();
-    if (now > anchor) {
-      const auto behind = std::chrono::duration_cast<std::chrono::nanoseconds>(now - anchor);
+    auto anchor = slotPresentDeadline(0);
+    if (const auto now = PresentClock::now(); oldPacing && now > anchor) {
       const uint64_t periods =
-          static_cast<uint64_t>(behind.count()) / ctx.scheduleIntervalNanos + 1u;
+          static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - anchor).count()) /
+              ctx.scheduleIntervalNanos + 1u;
       anchor += std::chrono::nanoseconds{static_cast<int64_t>(periods * ctx.scheduleIntervalNanos)};
     }
     if (s_lastGroupAnchor != PresentClock::time_point{} && anchor <= s_lastGroupAnchor) {
       anchor = s_lastGroupAnchor + interval;
     }
     const auto shift =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(anchor - presentationJobs.front().presentAt);
+        std::chrono::duration_cast<std::chrono::nanoseconds>(anchor - slotPresentDeadline(0));
     if (shift.count() > 0) {
       const uint32_t slidPeriods = static_cast<uint32_t>(
           (static_cast<uint64_t>(shift.count()) + ctx.scheduleIntervalNanos - 1u) /
@@ -1769,6 +1835,10 @@ std::vector<PresentationJob> encode_sealed_frame(gfx::SealedFrame& sealedFrame, 
 
 // Phase 3: hand the encoded group to whoever owns presentation.
 void publish_presentations(std::vector<PresentationJob>&& presentationJobs, bool interpolationActive) {
+  if (g_config.externalPresentation) {
+    if (!presentationJobs.empty()) g_externalOutput = std::move(presentationJobs.back().image);
+    return;
+  }
 #if defined(__APPLE__)
   (void)interpolationActive;
   // Presenting reaches SDL/AppKit, whose window operations must stay on the
@@ -2121,6 +2191,13 @@ void aurora_set_present_schedule(uint64_t baseNanos, uint64_t intervalNanos) {
   aurora::g_presentScheduleBaseNanos.store(baseNanos, std::memory_order_release);
   aurora::g_presentScheduleIntervalNanos.store(intervalNanos, std::memory_order_release);
 }
+void aurora_set_display_periods_per_frame(uint32_t periods) {
+#ifdef AURORA_ENABLE_GX
+  aurora::gx::set_display_periods_per_frame(periods);
+#else
+  (void)periods;
+#endif
+}
 void aurora_report_producer_paced(bool paced) {
 #ifdef AURORA_ENABLE_GX
   aurora::gx::report_producer_paced(paced);
@@ -2291,3 +2368,41 @@ void aurora_set_metalfx_spatial(bool enabled) { aurora::g_metalfxRequested.store
 bool aurora_get_metalfx_spatial() { return aurora::g_metalfxRequested.load(); }
 bool aurora_is_metalfx_spatial_supported() { return aurora::g_metalfxSupported.load(); }
 AuroraMetalFXStatus aurora_get_metalfx_status() { return aurora::g_metalfxStatus.load(); }
+
+#ifdef AURORA_ENABLE_GX
+extern "C" WGPUInstance aurora_external_instance() {
+  return aurora::g_config.externalPresentation ? aurora::webgpu::g_instance.Get() : nullptr;
+}
+extern "C" WGPUDevice aurora_external_device() {
+  return aurora::g_config.externalPresentation ? aurora::webgpu::g_device.Get() : nullptr;
+}
+extern "C" bool aurora_external_healthy() {
+  return aurora::g_config.externalPresentation && !aurora::webgpu::device_lost();
+}
+extern "C" WGPUTexture aurora_external_output() {
+  return aurora::g_externalOutput ? aurora::g_externalOutput->texture.texture.Get() : nullptr;
+}
+extern "C" bool aurora_external_copy_output(WGPUTexture rawTarget) {
+  using namespace aurora;
+  if (!g_config.externalPresentation || !g_externalOutput || !rawTarget) return false;
+  const wgpu::Texture target(rawTarget);
+  if (target.GetFormat() != wgpu::TextureFormat::RGBA8Unorm) return false;
+  const auto encoder = webgpu::g_device.CreateCommandEncoder();
+  wgpu::RenderPassColorAttachment attachment{};
+  attachment.view = target.CreateView();
+  attachment.loadOp = wgpu::LoadOp::Clear;
+  attachment.storeOp = wgpu::StoreOp::Store;
+  wgpu::RenderPassDescriptor descriptor{};
+  descriptor.colorAttachmentCount = 1;
+  descriptor.colorAttachments = &attachment;
+  const auto pass = encoder.BeginRenderPass(&descriptor);
+  pass.SetPipeline(webgpu::g_CopyPipeline);
+  pass.SetBindGroup(0, g_externalOutput->bindGroup);
+  pass.SetViewport(0.f, 0.f, float(target.GetWidth()), float(target.GetHeight()), 0.f, 1.f);
+  pass.Draw(3);
+  pass.End();
+  const auto commands = encoder.Finish();
+  webgpu::g_queue.Submit(1, &commands);
+  return true;
+}
+#endif

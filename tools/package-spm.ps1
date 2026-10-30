@@ -4,7 +4,7 @@
 # Layout: New Super Paper Bros.exe (launcher), README.txt, engine\ (nspb-engine.exe = Play\SuperPaperMario.exe renamed,
 # engine_usa.dll / engine_pal.dll = the recompiled game per disc region,
 # DLLs, startup\ sprites, wii_bootstrap\, game_files\ = built-in HQ music, UserData\ = saves/settings/mods + HD textures).
-# The disc is never copied in: the launcher extracts the player's image into Disc\ inside the folder.
+# The disc is never copied in: the launcher (or the game itself) extracts the player's image into Disc\ inside the folder.
 # A clean copy is staged in dist\_stage (deleted afterwards) and copied over the game folder, so the saves, Config.toml,
 # mods and Disc\ already there are kept. The version is <Version> in launcher\NewSuperPaperBros.Launcher.csproj.
 [CmdletBinding()] param([switch]$Build, [switch]$Zip, [string]$Install = "$env:USERPROFILE\Desktop\My recomps\NewSuperPaperBros")
@@ -41,6 +41,8 @@ foreach ($f in '*.dll', 'dsp_coef.bin', 'portable.txt') { Copy-Item "$root\Play\
 # redistributable files) so a PC without the VC++ Redistributable still starts the game.
 foreach ($f in 'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') { Copy-Item "$env:SystemRoot\System32\$f" $engine }
 foreach ($d in 'startup', 'wii_bootstrap') { Mirror "$root\Play\$d" "$engine\$d" }
+# The built-in updater compares this with the latest GitHub release (runtime updater.cpp).
+Set-Content -LiteralPath "$engine\version.txt" -Value $version -Encoding ascii
 # Built-in HQ music: the mod's brstm files, which in the dev tree replaced the originals inside Disc\DATA\files\sound
 # (Disc\sound_original holds the disc's own copies). Only files with a saved original are the mod's, never disc files.
 $audio = "$engine\game_files\sound"
@@ -57,6 +59,9 @@ Mirror "$root\Play\UserData\button_icons" "$engine\UserData\button_icons"
 # Credits and licenses: GPLv3 for the engine, the bundled libraries' own license files.
 Copy-Item -LiteralPath "$PSScriptRoot\CREDITS.txt" -Destination "$stage\CREDITS.txt"
 Copy-Item -LiteralPath "$root\wiicompiled\LICENSE" -Destination "$stage\LICENSE.txt"
+# Code mods: the C interface and an example (README.txt "Mods").
+New-Item -ItemType Directory -Force "$stage\mod-sdk" | Out-Null
+Copy-Item -LiteralPath "$root\wiicompiled\runtime\include\spm_mod_api.h", "$PSScriptRoot\mod-sdk\example_mod.c" -Destination "$stage\mod-sdk"
 New-Item -ItemType Directory -Force "$engine\licenses" | Out-Null
 Copy-Item -LiteralPath "$root\wiicompiled\THIRD-PARTY-NOTICES.md" -Destination "$engine\licenses"
 foreach ($dir in Get-ChildItem -LiteralPath "$root\wiicompiled\Dependencies" -Directory) {
