@@ -117,11 +117,14 @@ promised above: set Resolution and Aspect here once and it stays.
   and off centre. It is visual only; the door still works. The cause is under investigation.
 - **Performance.** The port is CPU-bound on the guest side: the translated game code, not the
   renderer, sets the frame rate. Set expectations by area, not by a single number. At a high
-  CPU overclock (around 1963 MHz) 2D areas run at or near full speed, and heavy 3D areas
-  (Flipside, anywhere after flipping) run in the 40 fps band. The game steps its physics once
+  overclock (CPU 1963 MHz, GPU 1152 MHz, memory 2366 MHz, the clocks the port is
+  developed and measured at) 2D areas run at or near full speed, and heavy 3D areas
+  (Flipside, anywhere after flipping) run in the mid-to-high 30s, touching 40 in the
+  lighter spots. The game steps its physics once
   per frame, so a lower frame rate is a slower game, not just a less smooth one, and at stock
-  clocks everything runs slower still. A CPU overclock (for example with sys-clk) is the
-  single biggest lever if you want more speed.
+  clocks everything runs slower still. Overclocking is the single biggest lever if you want
+  more speed; the numbers above come from a machine overclocked with Horizon-OC
+  (https://github.com/Horizon-OC/Horizon-OC/releases).
 - **First launch after installing** builds the shader and pipeline caches and can hitch (see
   step 5 of the install). Warm launches are fast. The caches live in `UserData/`; deleting
   that folder brings the slow first launch back, along with deleting your saves.
