@@ -26,8 +26,10 @@ documented in full as well.
 Two things differ from the PC build. The Switch build currently needs the **USA disc (R8PE01,
 revision 0)**; the European disc (R8PP01) is PC-only for now, because only the USA game has been
 translated for the Switch. And there is no launcher on the Switch: the NRO boots by title
-takeover to a startup screen, and settings live in an in-game menu made for the Switch pad
-(hold `-` for about half a second to open it). Fresh Switch installs start from Switch defaults
+takeover to a startup screen, and settings live in the game's Options menu (hold `-` for about
+half a second to open it); its Controls page remaps player 1's gamepad, and a small Developer
+shell with this port's diagnostics sits behind the Options menu's Developer tools row. Fresh
+Switch installs start from Switch defaults
 (1.5x rendering, which is the 720p screen's native size, 16:9, frame interpolation off), not
 the PC ones above. Installing, building and the state of the port are documented in
 [`switch/README.md`](switch/README.md).
