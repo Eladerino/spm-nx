@@ -107,6 +107,31 @@ bool diag_set(const char* key, bool on) {
     return true;
 }
 
+// diag_get (dk.h): the read side of diag_set, for the Switch settings menu's
+// Developer rows. g_diag is authoritative for every key: diag_set stores the
+// field for all thirteen keys and additionally forwards the five Aurora ones.
+bool diag_get(const char* key) {
+    if (!key) return false;
+    if (!std::strcmp(key, "depth_off")) return g_diag.depthOff;
+    else if (!std::strcmp(key, "cull_off")) return g_diag.cullOff;
+    else if (!std::strcmp(key, "magenta")) return g_diag.magenta;
+    else if (!std::strcmp(key, "picdump")) return g_diag.picDump;
+    else if (!std::strcmp(key, "efbclear")) return g_diag.efbClear;
+    else if (!std::strcmp(key, "bufdump")) return g_diag.bufDump;
+    else if (!std::strcmp(key, "texdump")) return g_diag.texDump;
+    else if (!std::strcmp(key, "shaderdump")) return g_diag.shaderDump;
+    else if (!std::strcmp(key, "nomerge")) return g_diag.noMerge;
+    else if (!std::strcmp(key, "uvlog")) return g_diag.uvLog;
+    else if (!std::strcmp(key, "mtxlog")) return g_diag.mtxLog;
+    else if (!std::strcmp(key, "perftimer")) return g_diag.perfTimer;
+    else if (!std::strcmp(key, "arrayup")) return g_diag.arrayUp;
+    return false;
+}
+
+// diag_present_count (dk.h): R.presents for "[diag]" log markers written
+// outside this file (the menu's set/mark lines use diag_cmd_poll's format).
+uint64_t diag_present_count() { return R.presents; }
+
 // diag_flush_all (dk.h): everything that can be holding diagnostic output lets go of it, in
 // dependency order. Aurora's mtxlog buffer first (its lines are the only ones buffered above
 // stderr), then a partial perftimer window while perftimer is on, so the segment just played

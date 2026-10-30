@@ -8,6 +8,10 @@ extern "C" uint8_t* aurora_load_png_rgba(const char* path, uint32_t* width, uint
 #include "netplay_lobby.h"
 #include "netplay_ui.h"
 #include "settings_overlay.h"
+
+#if defined(__SWITCH__)
+#include "spm_switch_menu.h"
+#endif
 #include "audio_backend.h"
 #include "aurora_events.h"
 #include "controller_button_names.h"
@@ -87,6 +91,17 @@ const char* GraphicsApiDisplayName() {
 }
 
 bool g_topBarVisible = false;
+
+// The one visibility source every reader below shares: on Switch the top bar
+// is replaced by the Switch settings menu, whose state lives in
+// spm_switch_menu; elsewhere it is the bar's own flag.
+bool OverlayMenuVisible() {
+#if defined(__SWITCH__)
+    return spm_switch_menu::Visible();
+#else
+    return g_topBarVisible;
+#endif
+}
 bool g_exitPromptOpen = false;
 bool g_rumbleEnabled = RuntimeConfigFile::RumbleEnabled(true);
 int g_controllerPort = 0;
@@ -278,10 +293,16 @@ std::string NativeBindingConfig(uint32_t binding) {
 
 
 void SetTopBarVisible(bool visible) {
+#if defined(__SWITCH__)
+    // Switch has no top bar: visibility is the Switch menu's, and the flag
+    // stays false for the bar's own (unreached) drawing code below.
+    spm_switch_menu::SetVisible(visible);
+#else
     if (g_topBarVisible == visible) {
         return;
     }
     g_topBarVisible = visible;
+#endif
 }
 
 void ApplyConfiguredMappings() {
@@ -1297,7 +1318,7 @@ void DrawFpsOverlay() {
 
     const ImGuiIO& io = ImGui::GetIO();
     constexpr float kMargin = 10.0f;
-    const float top = g_topBarVisible ? ImGui::GetFrameHeight() + kMargin : kMargin;
+    const float top = OverlayMenuVisible() ? ImGui::GetFrameHeight() + kMargin : kMargin;
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - kMargin, top), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.55f);
     constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_AlwaysAutoResize |
@@ -1338,7 +1359,7 @@ void DrawShaderCompilationStatus() {
     }
 
     constexpr float kMargin = 10.0f;
-    const float top = g_topBarVisible ? ImGui::GetFrameHeight() + kMargin : kMargin;
+    const float top = OverlayMenuVisible() ? ImGui::GetFrameHeight() + kMargin : kMargin;
     ImGui::SetNextWindowPos(ImVec2(kMargin, top), ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.55f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(7.0f, 4.0f));
@@ -1661,6 +1682,13 @@ void DrawExitPrompt() {
 }
 
 void DrawTopBar() {
+#if defined(__SWITCH__)
+    // The Switch settings menu replaces this bar: the bar's dropdowns are
+    // driven by ImGui navigation, which has no working pad path on the
+    // console. The menu polls the pad itself and tracks its own selection.
+    spm_switch_menu::Draw();
+    return;
+#endif
     static bool s_wasVisible = false;
     const bool justOpened = g_topBarVisible && !s_wasVisible;
     s_wasVisible = g_topBarVisible;
@@ -1808,7 +1836,7 @@ bool IsMouseActivity(const SDL_Event& event) {
 // the SDL cursor calls are safe here.
 void UpdateCursorAutoHide() {
     const bool shouldHide =
-        !g_topBarVisible && Clock::now() - g_lastMouseActivity >= kCursorAutoHideDelay;
+        !OverlayMenuVisible() && Clock::now() - g_lastMouseActivity >= kCursorAutoHideDelay;
     if (shouldHide == g_cursorHidden) {
         return;
     }
@@ -1837,7 +1865,7 @@ void PersistDisplayModeIfChanged() {
 
 void ApplyInputBlockState() {
     const bool blocked = controller_mapping_wizard::IsActive() || g_rebind.active ||
-                         g_exitPromptOpen || g_topBarVisible || StartupScreenVisible();
+                         g_exitPromptOpen || OverlayMenuVisible() || StartupScreenVisible();
     PADBlockInput(blocked);
     InputBindings::SetInputBlocked(blocked);
 }
@@ -1905,7 +1933,7 @@ void HandleEvents(const AuroraEvent* events) noexcept {
             RuntimeConfigFile::SetDisplayMode(std::string(kDisplayModeConfigNames[static_cast<size_t>(g_displayMode)]));
         }
         if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
-            SetTopBarVisible(!g_topBarVisible);
+            SetTopBarVisible(!OverlayMenuVisible());
             ApplyInputBlockState();
         }
         if (!g_rebind.active && g_muteHotkey != PAD_KEY_INVALID &&
@@ -1919,7 +1947,7 @@ void HandleEvents(const AuroraEvent* events) noexcept {
         if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_ESCAPE)) {
             if (g_exitPromptOpen) {
                 g_exitPromptOpen = false;
-            } else if (g_topBarVisible) {
+            } else if (OverlayMenuVisible()) {
                 SetTopBarVisible(false);
             }
             ApplyInputBlockState();
@@ -1930,12 +1958,12 @@ void HandleEvents(const AuroraEvent* events) noexcept {
     }
 }
 
-// The Switch gamepad shim (switch/sdl3_shim) polls this through a weak
-// reference, once per pump: while the settings menu is open it feeds the pad
-// to the menu as keyboard navigation instead of publishing it as game input.
-// It lives here because this file owns g_topBarVisible; the shim falls back
-// to tracking its own F10 taps when the symbol is absent.
-extern "C" int spm_settings_menu_open(void) { return g_topBarVisible ? 1 : 0; }
+// "Is the settings menu open", for weak consumers outside this file. On
+// Switch it reports the Switch settings menu's visibility; elsewhere the top
+// bar's. (The Switch gamepad shim once polled this once per pump for its
+// menu navigation filter; that filter is gone with the bar it fed. The
+// question stays here because this file owns the seams that drive the menu.)
+extern "C" int spm_settings_menu_open(void) { return OverlayMenuVisible() ? 1 : 0; }
 
 bool g_spinningCoins = RuntimeConfigFile::SpinningCoins(true);
 

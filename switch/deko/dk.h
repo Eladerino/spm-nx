@@ -196,6 +196,11 @@ void diag_init();
 // interposer switches flip here, the five Aurora switches are forwarded to Aurora's own flags
 // (dk_aurora.h). False for an unknown name. Any thread.
 bool diag_set(const char* key, bool on);
+// The read side of diag_set: the current state of one switch by name, for the Switch
+// settings menu's Developer rows. Unknown names read as off.
+bool diag_get(const char* key);
+// R.presents, for "[diag]" log markers written outside device.cpp.
+uint64_t diag_present_count();
 // Pushes every buffered diagnostic line to UserData/Logs/stderr.log now: Aurora's mtxlog
 // buffer, a partial perftimer window while perftimer is on, the stderr stream itself, and a
 // "[diag] logs flushed (<reason>)" marker last, so the pulled file's tail proves where the
