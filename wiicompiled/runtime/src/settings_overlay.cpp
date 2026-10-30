@@ -1561,9 +1561,9 @@ void DrawStartupScreen() {
                 // The start button of what the player is holding: the controller's own jump button (its icon), else
                 // the keyboard's jump key. Both are 2 on the Wii Remote, which the cover waits for (frame_input.cpp).
 #if defined(__SWITCH__)
-                // No button_icons pack ships on Switch, so the icon path below would lay out a
-                // blank gap where the button should be. The cover waits for the pad's A button;
-                // name it in text instead.
+                // The cover waits for the pad's A button; name it in text instead of using the
+                // icon path below (the shipped set's jump icon is the B button, and that path
+                // would lay out a blank gap if the button_icons set were missing).
                 const std::string icon;
                 const auto press = GameLayout::Utf16("Press A to start!");
 #else
