@@ -89,7 +89,7 @@ enum class RowId : int32_t {
     kSpinningCoins,
     kDevGate,
     kDiagFirst,  // kDiagFirst + n indexes kDiagKeys / kDiagLabels
-    kDiagLast = kDiagFirst + 12,
+    kDiagLast = kDiagFirst + 13,
     kFlushLogs,
     kMarkLog,
 };
@@ -138,6 +138,7 @@ const RowDef kRows[] = {
     {"Developer", DiagRow(10), "Matrix trace (mtxlog)"},
     {"Developer", DiagRow(11), "Performance timers (perftimer)"},
     {"Developer", DiagRow(12), "Re-upload vertex arrays (arrayup)"},
+    {"Developer", DiagRow(13), "Guest profiler (profile)"},
     {"Developer", RowId::kFlushLogs, "Flush logs"},
     {"Developer", RowId::kMarkLog, "Mark log"},
 };
@@ -145,7 +146,7 @@ const RowDef kRows[] = {
 // The dk_diag.txt keys, in the spec's table order; kDiagFirst + n indexes it.
 const char* const kDiagKeys[] = {
     "depth_off", "cull_off", "magenta", "picdump", "efbclear", "bufdump", "texdump",
-    "shaderdump", "nomerge", "uvlog", "mtxlog", "perftimer", "arrayup",
+    "shaderdump", "nomerge", "uvlog", "mtxlog", "perftimer", "arrayup", "profile",
 };
 
 bool IsDiag(RowId id) { return id >= RowId::kDiagFirst && id <= RowId::kDiagLast; }
