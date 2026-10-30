@@ -13,14 +13,20 @@ using Avalonia.Threading;
 
 namespace NewSuperPaperBros;
 
-// The Linux launcher window: the Windows launcher (launcher\MainForm.cs) page for page - a paper-craft header, a nav
-// column (Play, Display, Controls, Mods) and one card per page. Everything it changes goes to engine/UserData/Config.toml,
+// The Linux launcher window: the Windows launcher (launcher\MainForm.cs) page for page, laid out like a game's title
+// screen (after Dusklight's launcher): artwork filling the window, darkened from the left, the logo, a column of big
+// menu words (Play, Game, Display, Controls, Mods, Quit), disc status bottom-left and version top-right. Game, Display,
+// Controls and Mods open as a card over the dimmed art, with Back (or Escape) to return. Everything it changes goes to engine/UserData/Config.toml,
 // read by the game at start. Keep the two in step when either changes.
 sealed class MainWindow : Window
 {
-    public static readonly Color Cream = Color.Parse("#FFF6DC"), Paper = Color.Parse("#FFFCF2"), Ink = Color.Parse("#3A2A18"),
-        Yellow = Color.Parse("#FFD83A"), Red = Color.Parse("#E04040"), Sky = Color.Parse("#7EC8F5"), Green = Color.Parse("#56B24A"),
-        Hover = Color.Parse("#FFEFA8");
+    public static readonly Color Cream = Color.Parse("#EEF0F6"), Paper = Colors.White, Ink = Color.Parse("#3B3B52"),
+        Yellow = Color.Parse("#FFC83D"), Red = Color.Parse("#EC3A55"), Sky = Color.Parse("#6FC3FF"), Green = Color.Parse("#6FD36A"),
+        Pink = Color.Parse("#FFD6EA"), Mint = Color.Parse("#D3F5EA");
+    // Each page's colour: its card's border and heading.
+    static readonly Color[] TileColors = { Color.Parse("#EC3A55"), Color.Parse("#3B8CFF"), Color.Parse("#2EC27E"), Color.Parse("#FF9A1F") };
+    public static Color Mix(Color a, Color b, double f) =>
+        Color.FromRgb((byte)(a.R + (b.R - a.R) * f), (byte)(a.G + (b.G - a.G) * f), (byte)(a.B + (b.B - a.B) * f));
     public static readonly IBrush InkBrush = new SolidColorBrush(Ink);
     static readonly FontFamily Font = new("fonts:Inter#Inter");
     // WinForms sizes are in points; these are the same sizes in pixels (10.5pt, 13pt, 18pt, 24pt).
@@ -34,12 +40,14 @@ sealed class MainWindow : Window
     readonly GameConfig config;
     readonly Dictionary<string, Bitmap> sprites = new();
     readonly Panel content = new() { Margin = new Thickness(16, 12, 20, 16) };
-    readonly List<(PaperButton button, Control page)> pages = new();
-    readonly StackPanel navButtons = new() { Margin = new Thickness(16, 18, 0, 0), VerticalAlignment = VerticalAlignment.Top, HorizontalAlignment = HorizontalAlignment.Left };
+    readonly List<(string name, Control page)> pages = new();
+    readonly (string label, Action act)[] menu;
+    TitleView view = null!;
+    Grid pageLayer = null!;
+    int openPage = -1;  // the page shown over the title screen, -1 = none
     TextBlock playStatus = null!, dumpHelp = null!, gameNote = null!;
-    Control tipRow = null!;  // shown with gameNote once a disc is set up, so first-time setup stays short
     StackPanel modList = null!;
-    PaperButton chooseDisc = null!, playButton = null!;
+    PaperButton chooseDisc = null!;
     PaperButton? capturing;
     Func<bool>? cancelPadCapture;  // the Controls page's gamepad capture: Escape ends it
     string? captureKey;
@@ -75,68 +83,71 @@ sealed class MainWindow : Window
         TippiHand = MakeTippiCursor(clickable: true);
         Cursor = TippiCursor;  // inherited by every control without its own
         using (var icon = typeof(MainWindow).Assembly.GetManifestResourceStream("pixl.ico")) if (icon != null) Icon = new WindowIcon(icon);
-        Width = 1100;
-        Height = 760;
+        // 16:9, the shape of the title artwork, so all of it shows.
+        Width = 1200;
         if (Screens.Primary is { } screen)
         {
             var area = screen.WorkingArea.Size.ToSize(screen.Scaling);
-            Width = Math.Min(1100, area.Width - 40);
-            Height = Math.Min(760, area.Height - 60);
+            Width = Math.Min(1200, Math.Min(area.Width - 40, (area.Height - 60) * 16 / 9));
         }
-        MinWidth = Math.Min(940, Width);
-        MinHeight = Math.Min(640, Height);
+        Height = Width * 9 / 16;
+        MinWidth = Math.Min(960, Width);
+        MinHeight = Math.Min(580, Height);
         Background = new SolidColorBrush(Cream);
         FontFamily = Font;
         FontSize = Body;
         Foreground = InkBrush;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
 
-        var header = new HeaderView(this) { Height = 150 };
-        var nav = new NavView(this) { Width = 220 };
-        var grid = new Grid { RowDefinitions = new RowDefinitions("150,*"), ColumnDefinitions = new ColumnDefinitions("220,*") };
-        Grid.SetColumnSpan(header, 2);
-        Grid.SetRow(nav, 1);
-        Grid.SetRow(navButtons, 1);  // the page buttons sit on top of the nav column's drawing
+        // One full-window title screen; the pages open as cards on top of it, with Back (or Escape) to return.
+        view = new TitleView(this);
+        var back = Btn("◀  Back", ClosePage, Paper);
+        back.Margin = new Thickness(24, 16, 0, 0);
+        pageLayer = new Grid { RowDefinitions = new RowDefinitions("Auto,*"), IsVisible = false };
+        pageLayer.Children.Add(back);
+        content.Margin = new Thickness(20, 4, 20, 16);
         Grid.SetRow(content, 1);
-        Grid.SetColumn(content, 1);
-        grid.Children.Add(header);
-        grid.Children.Add(nav);
-        grid.Children.Add(navButtons);
-        grid.Children.Add(content);
+        pageLayer.Children.Add(content);
+        var grid = new Grid();
+        grid.Children.Add(view);
+        grid.Children.Add(pageLayer);
         Content = grid;
 
         var frame = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(33) };
-        frame.Tick += (_, _) =>
-        {
-            if (WindowState == WindowState.Minimized) return;
-            header.InvalidateVisual();
-            nav.InvalidateVisual();
-            float glow = (float)(Math.Sin(T * 3) + 1) / 2;  // PLAY breathes between two reds
-            playButton.Back = Color.FromRgb((byte)Lerp(Red.R, 255, glow), (byte)Lerp(Red.G, 106, glow), (byte)Lerp(Red.B, 74, glow));
-        };
+        frame.Tick += (_, _) => { if (WindowState != WindowState.Minimized && openPage < 0) view.InvalidateVisual(); };
         frame.Start();
 
-        AddPage("Play", BuildPlayPage());
+        menu = new (string, Action)[]
+        {
+            ("Play", Launch), ("Game", () => OpenPage(0)), ("Display", () => OpenPage(1)), ("Controls", () => OpenPage(2)),
+            ("Mods", () => OpenPage(3)), ("Quit", Close),
+        };
+        AddPage("Game", BuildPlayPage());
         AddPage("Display", BuildDisplayPage());
         AddPage("Controls", BuildControlsPage());
         AddPage("Mods", BuildModsPage());
-        ShowPage(pages[0].button);
+        RefreshStatus();
         AddHandler(KeyDownEvent, OnKey, RoutingStrategies.Tunnel);
         Opened += async (_, _) =>
         {
+            view.IntroAt = T;
             if (screenshotDir != null)
             {
-                // Headless visual check: every page drawn to <dir>/<page>.png.
+                // Headless visual check: the title screen and every page drawn to <dir>/<name>.png.
                 Directory.CreateDirectory(screenshotDir);
-                foreach (var p in pages)
+                view.IntroAt = -10;  // intro animation already done
+                async Task Shot(string name)
                 {
-                    ShowPage(p.button);
                     await Task.Delay(400);
-                    var size = new PixelSize((int)Bounds.Width, (int)Bounds.Height);
-                    using var bmp = new RenderTargetBitmap(size);
+                    using var bmp = new RenderTargetBitmap(new PixelSize((int)Bounds.Width, (int)Bounds.Height));
                     bmp.Render(this);
-                    bmp.Save(Path.Combine(screenshotDir, p.button.Text.Replace(' ', '_') + ".png"));
+                    bmp.Save(Path.Combine(screenshotDir, name + ".png"));
                 }
+                view.Hover = 0;
+                await Shot("Title");
+                view.Hover = -1;
+                for (int i = 0; i < pages.Count; i++) { OpenPage(i); await Shot(pages[i].name); }
+                ClosePage();
                 using (var cur = new RenderTargetBitmap(new PixelSize(64, 32)))
                 {
                     using (var g = cur.CreateDrawingContext())
@@ -150,8 +161,9 @@ sealed class MainWindow : Window
             }
             else if (selfTest)
             {
-                foreach (var p in pages) ShowPage(p.button);
-                int code = !File.Exists(gameExe) ? 6 : !Gamepads.Ready ? 4 : Gamepads.Connected().All(p => Gamepads.Opens(p.id)) ? 0 : 5;
+                for (int i = 0; i < pages.Count; i++) OpenPage(i);
+                ClosePage();
+                int code = !File.Exists(gameExe) ? 6 : !ModInstall.SelfCheck() ? 7 : !Gamepads.Ready ? 4 : Gamepads.Connected().All(p => Gamepads.Opens(p.id)) ? 0 : 5;
                 // posted: the lifetime cannot shut down while it is still starting
                 Dispatcher.UIThread.Post(() => (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown(code));
             }
@@ -198,36 +210,43 @@ sealed class MainWindow : Window
         if (changed) config.Save();
     }
 
-    void AddPage(string title, Control page)
+    void AddPage(string name, Control page)
     {
-        var button = new PaperButton(title, Paper, NavSize)
+        var accent = TileColors[pages.Count % TileColors.Length];
+        if (page is Border card)
         {
-            Width = 188, Height = 50, Padding = new Thickness(12, 0, 0, 0), Margin = new Thickness(0, 0, 0, 10), HoverColor = Hover,
-        };
-        button.Click += () => ShowPage(button);
+            card.BorderBrush = new SolidColorBrush(Mix(accent, Colors.White, 0.35));  // the card's border and heading take the page's colour
+            if (card.Child is ScrollViewer { Content: StackPanel body } && body.Children.Count > 0 && body.Children[0] is TextBlock heading)
+                heading.Foreground = new SolidColorBrush(Mix(accent, Ink, 0.25));
+        }
         page.IsVisible = false;
         content.Children.Add(page);
-        navButtons.Children.Add(button);
-        pages.Add((button, page));
+        pages.Add((name, page));
     }
 
-    void ShowPage(PaperButton button)
+    // A page opens as a card over the dimmed art, with Back (or Escape) to return to the title screen.
+    void OpenPage(int index)
     {
-        foreach (var (b, page) in pages)
-        {
-            bool on = b == button;
-            b.Back = on ? Yellow : Paper;
-            page.IsVisible = on;
-        }
+        openPage = index;
+        for (int i = 0; i < pages.Count; i++) pages[i].page.IsVisible = i == index;
+        pageLayer.IsVisible = true;
         RefreshStatus();
+        view.InvalidateVisual();
     }
 
-    // ----- The fun bits: animated header and side column -----
+    void ClosePage()
+    {
+        if (openPage < 0) return;
+        cancelPadCapture?.Invoke();
+        pageLayer.IsVisible = false;
+        openPage = -1;
+        RefreshStatus();
+        view.InvalidateVisual();
+    }
+
     // Everything moves on one clock.
     readonly Stopwatch clock = Stopwatch.StartNew();
     double T => clock.Elapsed.TotalSeconds;
-    readonly Dictionary<string, double> jumpAt = new();
-    Rect marioRect, luigiRect, tippiRect, merlonRect;
 
     static double Lerp(double a, double b, float f) => a + (b - a) * f;
 
@@ -297,165 +316,179 @@ sealed class MainWindow : Window
         return r < 0 ? new Rect(0, 0, w, h) : new Rect(l, t, r + 1 - l, bo + 1 - t);
     }
 
-    // A sprite drawn into a box, mirrored when it faces the other way.
-    void DrawSprite(DrawingContext g, string name, Rect box, bool flip = false)
-    {
-        if (!sprites.TryGetValue(name, out var img) || box.Width < 1 || box.Height < 1) return;
-        var source = new Rect(img.Size);
-        if (!flip) { g.DrawImage(img, source, box); return; }
-        double cx = box.Center.X;
-        using (g.PushTransform(Matrix.CreateTranslation(-cx, 0) * Matrix.CreateScale(-1, 1) * Matrix.CreateTranslation(cx, 0)))
-            g.DrawImage(img, source, box);
-    }
+    // ----- The title screen -----
+    static readonly Color Accent = Color.Parse("#FEE685"), ReadyGreen = Color.Parse("#D8F999"), ErrorPink = Color.Parse("#FFC9C9"),
+        Muted = Color.Parse("#C9C3BE"), Night = Color.Parse("#16122B");
 
-    // How far into a click-triggered move (0..1), or -1 when none is playing.
-    double Hop(string name, double seconds) => jumpAt.TryGetValue(name, out var at) && T - at < seconds ? (T - at) / seconds : -1;
-
-    sealed class HeaderView : Control
+    // Like Dusklight's launcher: artwork fills the window (startup/title-*.jpg: the Super Paper Mario wallpaper by
+    // FawfulTheGreat64, see CREDITS.txt) and darkens toward the left, where the logo and a column of big menu words sit;
+    // disc status in the bottom-left corner, version in the top-right (the art has its own logo bottom-right).
+    sealed class TitleView : Control
     {
         readonly MainWindow w;
-        public HeaderView(MainWindow window)
+        readonly Bitmap? art;
+        readonly List<Rect> rows = new();
+        Rect discRect;
+        public int Hover = -1;          // the menu item under the mouse or chosen with the arrow keys
+        public double IntroAt = 1e9;    // when the window first showed: items fade and rise in one after another
+
+        public TitleView(MainWindow window)
         {
             w = window;
             ClipToBounds = true;
             RenderOptions.SetBitmapInterpolationMode(this, BitmapInterpolationMode.HighQuality);
-            // Click Mario or Luigi to make them hop, Tippi for another tip.
-            PointerPressed += (_, e) =>
-            {
-                var p = e.GetPosition(this);
-                if (w.marioRect.Contains(p)) w.jumpAt["mario"] = w.T;
-                else if (w.luigiRect.Contains(p)) w.jumpAt["luigi"] = w.T;
-                else if (w.tippiRect.Contains(p)) w.NextTip();
-            };
+            var dir = Path.Combine(w.play, "startup");
+            var files = Directory.Exists(dir) ? Directory.GetFiles(dir, "title-*.jpg") : Array.Empty<string>();
+            try { if (files.Length > 0) art = new Bitmap(files[Random.Shared.Next(files.Length)]); } catch (Exception) { }
             PointerMoved += (_, e) =>
             {
+                if (w.openPage >= 0) return;
                 var p = e.GetPosition(this);
-                Cursor = w.marioRect.Contains(p) || w.luigiRect.Contains(p) || w.tippiRect.Contains(p) ? TippiHand : TippiCursor;
+                Hover = rows.FindIndex(r => r.Contains(p));
+                Cursor = Hover >= 0 || discRect.Contains(p) ? TippiHand : TippiCursor;
+            };
+            PointerExited += (_, _) => Hover = -1;
+            // A click on a menu word picks it; on the disc status, opens Game.
+            PointerPressed += (_, e) =>
+            {
+                if (w.openPage >= 0 || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+                var p = e.GetPosition(this);
+                int i = rows.FindIndex(r => r.Contains(p));
+                if (i >= 0) w.menu[i].act();
+                else if (discRect.Contains(p)) w.OpenPage(0);
             };
         }
 
-        public override void Render(DrawingContext g)
+        public void Move(int step)
         {
-            var r = new Rect(Bounds.Size);
-            if (r.Width <= 0 || r.Height <= 0) return;
-            double t = w.T;
-            g.FillRectangle(new LinearGradientBrush
-            {
-                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
-                GradientStops = { new GradientStop(Sky, 0), new GradientStop(Color.Parse("#C8EAFF"), 1) },
-            }, r);
-
-            // Paper clouds drift right and wrap around.
-            var cloud = new SolidColorBrush(Color.FromArgb(240, 255, 255, 255));
-            for (int i = 0; i < 4; i++)
-            {
-                double span = r.Width + 240;
-                double x = (i * span / 4 + t * (10 + 5 * i)) % span - 120;
-                double y = 14 + (i % 2) * 30;
-                for (int j = 0; j < 3; j++) g.DrawEllipse(cloud, null, new Rect(x + j * 30, y - (j == 1 ? 12 : 0), 50, 34));
-            }
-
-            // Hills and title; Tippi flies in front of them.
-            var hill = new SolidColorBrush(Green);
-            var hillInk = new Pen(new SolidColorBrush(Color.Parse("#1E3C1E")), 4);
-            for (int i = 0; i < 9; i++)
-            {
-                double rad = 70 + 30 * (i % 3);
-                g.DrawEllipse(hill, hillInk, new Rect(r.Width * i / 8 - rad, r.Height - rad / 3 - 6, rad * 2, rad * 2));
-            }
-            g.DrawLine(new Pen(InkBrush, 4), new Point(0, r.Height - 2), new Point(r.Width, r.Height - 2));
-            // Shrink the title if the window is narrow, so it never runs under the sprites.
-            double em = Math.Min(46, (r.Width - 2 * 210) / 12.5);
-            var title = new FormattedText("NEW SUPER PAPER BROS.", CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
-                new Typeface(Font, FontStyle.Normal, FontWeight.Bold), em, InkBrush);
-            var at = new Point(r.Width / 2 - title.Width / 2, 26);
-            // The ink outline: the title stamped around a 3.5 px circle, then the yellow-to-orange face on top.
-            for (int a = 0; a < 16; a++)
-                g.DrawText(title, at + new Point(Math.Cos(a * Math.PI / 8) * 3.5, Math.Sin(a * Math.PI / 8) * 3.5));
-            title.SetForegroundBrush(new LinearGradientBrush
-            {
-                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
-                GradientStops = { new GradientStop(Yellow, 0), new GradientStop(Color.Parse("#FF9A1E"), 1) },
-            });
-            g.DrawText(title, at);
-            var sub = new FormattedText("Super Paper Mario (Wii) on PC  -  made by JosiahG  -  v" + AppVersion, CultureInfo.InvariantCulture,
-                FlowDirection.LeftToRight, new Typeface(Font, FontStyle.Normal, FontWeight.Bold), Body, InkBrush);
-            var tag = new Rect(r.Width / 2 - sub.Width / 2 - 10, 26 + em * 1.25, sub.Width + 20, sub.Height + 4);
-            g.DrawRectangle(new SolidColorBrush(Paper), new Pen(InkBrush, 2), tag, 8, 8);
-            g.DrawText(sub, new Point(r.Width / 2 - sub.Width / 2, tag.Y + 2));
-
-            // Tippi loops across the sky, trailing sparkles.
-            double half = r.Width / 2.0 - 220;
-            Point At(double when) => new(r.Width / 2.0 + Math.Sin(when * 0.45) * half, 40 + Math.Sin(when * 1.3) * 16);
-            for (int k = 6; k >= 1; k--)
-            {
-                var p = At(t - k * 0.09);
-                double size = 26 - k * 2;
-                using (g.PushOpacity(1 - k / 7.0)) w.DrawSprite(g, "sparkle", new Rect(p.X - size / 2, p.Y - size / 2, size, size));
-            }
-            var tp = At(t);
-            bool headingLeft = Math.Cos(t * 0.45) < 0;
-            double flap = 56 * (0.82 + 0.18 * Math.Abs(Math.Sin(t * 9)));
-            w.tippiRect = new Rect(tp.X - 28, tp.Y - flap / 2, 56, flap);
-            w.DrawSprite(g, "tippi", w.tippiRect, headingLeft);
-
-            // Mario and Luigi bounce on the hills; a click makes one hop.
-            double Lift(string name, double phase)
-            {
-                double hop = w.Hop(name, 0.7);
-                return Math.Abs(Math.Sin(t * 2.2 + phase)) * 5 + (hop < 0 ? 0 : Math.Sin(hop * Math.PI) * 28);
-            }
-            w.marioRect = new Rect(24, 30 - Math.Round(Lift("mario", 0)), 96, 116);
-            w.luigiRect = new Rect(r.Width - 120, 30 - Math.Round(Lift("luigi", 1.3)), 92, 116);
-            w.DrawSprite(g, "mario", w.marioRect);
-            w.DrawSprite(g, "luigi", w.luigiRect);
+            Hover = Hover < 0 ? 0 : (Hover + step + w.menu.Length) % w.menu.Length;
+            InvalidateVisual();
         }
-    }
 
-    // Merlon hovers under the menu buttons, when the window is tall enough for him; a click makes him twirl.
-    sealed class NavView : Control
-    {
-        readonly MainWindow w;
-        public NavView(MainWindow window)
+        // How far item `i` is into its fade-in (0..1).
+        double Intro(int i) => Math.Clamp((w.T - IntroAt - 0.1 * i) / 0.35, 0, 1);
+
+        static IBrush Solid(Color c, double alpha) => new SolidColorBrush(Color.FromArgb((byte)(255 * Math.Clamp(alpha, 0, 1)), c.R, c.G, c.B));
+
+        static FormattedText Text(string text, double size, FontWeight weight, IBrush brush, FontStyle style = FontStyle.Normal) =>
+            new(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface(Font, style, weight), size, brush);
+
+        // Text with Dusklight's soft dark shadow behind it, so it reads over the art.
+        static void GlowText(DrawingContext g, string text, double size, FontWeight weight, Point at, Color color, double alpha)
         {
-            w = window;
-            RenderOptions.SetBitmapInterpolationMode(this, BitmapInterpolationMode.HighQuality);
-            PointerPressed += (_, e) => { if (w.merlonRect.Contains(e.GetPosition(this))) w.jumpAt["merlon"] = w.T; };
-            PointerMoved += (_, e) => Cursor = w.merlonRect.Contains(e.GetPosition(this)) ? TippiHand : TippiCursor;
+            var ft = Text(text, size, weight, Solid(Colors.Black, alpha * 0.8));
+            g.DrawText(ft, at + new Point(1, 2));
+            ft.SetForegroundBrush(Solid(color, alpha));
+            g.DrawText(ft, at);
         }
+
+        static LinearGradientBrush Fade(Point from, Point to, double a0, double a1) => new()
+        {
+            StartPoint = new RelativePoint(from, RelativeUnit.Relative), EndPoint = new RelativePoint(to, RelativeUnit.Relative),
+            GradientStops =
+            {
+                new GradientStop(Color.FromArgb((byte)(255 * a0), Night.R, Night.G, Night.B), 0),
+                new GradientStop(Color.FromArgb((byte)(255 * a1), Night.R, Night.G, Night.B), 1),
+            },
+        };
 
         public override void Render(DrawingContext g)
         {
-            g.FillRectangle(new SolidColorBrush(Cream), new Rect(Bounds.Size));  // also what makes the column clickable
-            double t = w.T;
-            double top = w.navButtons.Bounds.Bottom + 10;
-            double bottom = Bounds.Height - 10;
-            double room = bottom - top - 12;
-            if (room < 90) { w.merlonRect = default; return; }
-            double size = Math.Min(170, room);
-            double twirl = w.Hop("merlon", 0.9);
-            // The twirl squeezes him to a sliver and back (a paper turn), flipping him halfway.
-            double turn = twirl < 0 ? 1 : Math.Cos(twirl * Math.PI * 2);
-            double width = Math.Max(1, size * Math.Abs(turn));
-            double y = bottom - size - 12 - Math.Round((Math.Sin(t * 1.6) + 1) * 6);
-            double cx = (Bounds.Width + 16) / 2;
-            w.merlonRect = new Rect(cx - size / 2, y, size, size);
-            // A soft shadow on the ground under him, smaller while he floats higher.
-            double shadowW = size * 2 / 3 - (Math.Sin(t * 1.6) + 1) * 8;
-            g.DrawEllipse(new SolidColorBrush(Color.FromArgb(45, 58, 42, 24)), null, new Rect(cx - shadowW / 2, bottom - 10, shadowW, 12));
-            w.DrawSprite(g, "merlon", new Rect(cx - width / 2, y, width, size), turn < 0);
+            var size = Bounds.Size;
+            if (size.Width <= 0 || size.Height <= 0) return;
+            var r = new Rect(size);
+            // The art, scaled to cover the window and centred, fading in from black.
+            g.FillRectangle(new SolidColorBrush(Night), r);
+            if (art != null)
+            {
+                double scale = Math.Max(size.Width / art.Size.Width, size.Height / art.Size.Height);
+                double aw = art.Size.Width * scale, ah = art.Size.Height * scale;
+                g.DrawImage(art, new Rect(art.Size), new Rect((size.Width - aw) / 2, (size.Height - ah) / 2, aw, ah));
+            }
+            double fade = Math.Clamp(w.T - IntroAt, 0, 1);
+            if (fade < 1) g.FillRectangle(Solid(Colors.Black, 1 - fade), r);
+            if (w.openPage >= 0) { g.FillRectangle(Solid(Night, 150 / 255.0), r); return; }
+
+            // Dusklight's darkening: deep night from the left edge to clear past the middle, a little along the bottom and top.
+            double ac = Intro(w.menu.Length + 1);
+            g.FillRectangle(Fade(new Point(0, 0), new Point(1, 0), 215 / 255.0, 0), new Rect(0, 0, size.Width * 0.55, size.Height));
+            g.FillRectangle(Fade(new Point(0, 0), new Point(0, 1), 0, 170 / 255.0), new Rect(0, size.Height - 150, size.Width, 150));
+            g.FillRectangle(Fade(new Point(0, 0), new Point(0, 1), 150 / 255.0 * ac, 0), new Rect(0, 0, size.Width, 70));
+
+            double x = 64, y = Math.Max(28, size.Height / 2 - 300);
+            // The eyebrow and the logo: bubble letters with a soft shadow, a white rim and a red-to-yellow face.
+            double a0 = Intro(0), rise = 10 * (1 - a0);
+            GlowText(g, "JosiahG presents", 18.7, FontWeight.Normal, new Point(x + 4, y + rise), Colors.White, a0);
+            y += 34;
+            double em = Math.Min(77, size.Width * 0.45 / 6.2 * 1.33);
+            foreach (var line in new[] { "NEW SUPER", "PAPER BROS." })
+            {
+                var ft = Text(line, em, FontWeight.Black, Solid(Colors.Black, 0.55 * a0), FontStyle.Italic);
+                var at = new Point(x, y + rise);
+                for (int k = 0; k < 16; k++) g.DrawText(ft, at + new Point(4 + Math.Cos(k * Math.PI / 8) * 6, 6 + Math.Sin(k * Math.PI / 8) * 6));
+                ft.SetForegroundBrush(Solid(Colors.White, a0));
+                for (int k = 0; k < 16; k++) g.DrawText(ft, at + new Point(Math.Cos(k * Math.PI / 8) * 5, Math.Sin(k * Math.PI / 8) * 5));
+                ft.SetForegroundBrush(new LinearGradientBrush
+                {
+                    StartPoint = new RelativePoint(0, 0.2, RelativeUnit.Relative), EndPoint = new RelativePoint(0, 0.9, RelativeUnit.Relative), Opacity = a0,
+                    GradientStops = { new GradientStop(Red, 0), new GradientStop(Yellow, 1) },
+                });
+                g.DrawText(ft, at);
+                y += em * 0.98;
+            }
+            y += 28;
+
+            // The menu: big words that light up with a yellow fade on hover, like Dusklight's.
+            rows.Clear();
+            const double rowH = 46, rowW = 380;
+            for (int i = 0; i < w.menu.Length; i++)
+            {
+                double a = Intro(i + 1);
+                var row = new Rect(x - 16, y + 10 * (1 - a), rowW, rowH);
+                rows.Add(row);
+                bool on = i == Hover;
+                string word = w.menu[i].label.ToUpperInvariant();
+                var label = Text(word, 29.3, FontWeight.Bold, Solid(Night, 1));
+                var at = new Point(row.X + 16, row.Y + (rowH - label.Height) / 2);
+                if (on)
+                {
+                    g.DrawRectangle(new LinearGradientBrush
+                    {
+                        StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
+                        GradientStops = { new GradientStop(Accent, 0), new GradientStop(Color.FromArgb(0, Accent.R, Accent.G, Accent.B), 1) },
+                    }, null, row, 10, 10);
+                    g.DrawText(label, at);
+                }
+                else GlowText(g, word, 29.3, FontWeight.Bold, at, Colors.White, a);
+                y += rowH + 4;
+            }
+
+            // Bottom-left: is a disc set up (click it to open Game).
+            var (ok, _, _) = w.DiscStatus();
+            double cy = size.Height - 84;
+            string id = ok ? w.DiscGameId() : "";
+            string status = ok ? $"✔  Super Paper Mario ({(id == "R8PP01" ? "Europe" : "USA")}) is ready" : "✖  No game disc yet: choose Game to set it up";
+            GlowText(g, status, 16, FontWeight.Bold, new Point(x, cy), ok ? ReadyGreen : ErrorPink, ac);
+            var statusText = Text(status, 16, FontWeight.Bold, Brushes.White);
+            discRect = new Rect(x, cy, statusText.Width, statusText.Height);
+            GlowText(g, "Mods: " + w.ModNames(), Body, FontWeight.Normal, new Point(x, cy + 30), Muted, ac);
+
+            // Top-right: the version.
+            var ver = "v" + AppVersion + "   made by JosiahG";
+            GlowText(g, ver, Body, FontWeight.Normal, new Point(size.Width - 28 - Text(ver, Body, FontWeight.Normal, Brushes.White).Width, 16), Muted, ac);
         }
     }
 
-    // A white paper card holding one page's controls, top to bottom; it scrolls when they are taller than the window.
+    // A white card holding one page's controls, top to bottom, rimmed in its tile's colour (set by AddPage); it
+    // scrolls when they are taller than the window.
     static (Control card, StackPanel body) NewCard(string heading)
     {
         var body = new StackPanel();
         body.Children.Add(new TextBlock { Text = heading, FontSize = Heading, FontWeight = FontWeight.Bold, Margin = new Thickness(0, 0, 0, 10) });
         var card = new Border
         {
-            Background = new SolidColorBrush(Paper), BorderBrush = InkBrush, BorderThickness = new Thickness(3), CornerRadius = new CornerRadius(14),
-            BoxShadow = BoxShadows.Parse("5 5 0 0 #32000000"), Margin = new Thickness(2, 2, 8, 8),
+            Background = new SolidColorBrush(Paper), BorderBrush = new SolidColorBrush(Sky), BorderThickness = new Thickness(5), CornerRadius = new CornerRadius(22),
+            BoxShadow = BoxShadows.Parse("4 6 0 0 #281E1E46"), Margin = new Thickness(2, 2, 8, 8),
             Child = new ScrollViewer { Content = body, Padding = new Thickness(22, 16, 22, 16) },
         };
         return (card, body);
@@ -483,10 +516,7 @@ sealed class MainWindow : Window
     // ----- Play -----
     Control BuildPlayPage()
     {
-        var (card, body) = NewCard("Ready to play?");
-        playButton = new PaperButton("PLAY", Red, PlaySize) { TextBrush = Brushes.White, Padding = new Thickness(60, 8, 60, 8), Margin = new Thickness(0, 6, 10, 6) };
-        playButton.Click += Launch;
-        body.Children.Add(playButton);
+        var (card, body) = NewCard("Game");
         playStatus = Note("");
         playStatus.FontWeight = FontWeight.Bold;
         body.Children.Add(playStatus);
@@ -494,22 +524,10 @@ sealed class MainWindow : Window
         // The Wii system language the game sees (runtime SCGetLanguage, Config.toml [game] language). The European
         // disc ships English, French, German, Spanish and Italian text; the USA disc is English only.
         body.Children.Add(Choice("Language (European disc)", "language", new[] { ("English", "\"en\""), ("Français", "\"fr\""), ("Deutsch", "\"de\""), ("Español", "\"es\""), ("Italiano", "\"it\"") }, "game"));
+        // Issue #65: players forgot the launcher was still open after quitting the game.
+        body.Children.Add(Choice("When the game closes", "close_with_game", new[] { ("Keep the launcher open", "false"), ("Close the launcher too", "true") }, "launcher"));
         body.Children.Add(gameNote = Note("The game starts borderless at 1080p. " +
-                               "In the game, F10 opens the settings menu (resolution, aspect, controllers, audio) and F11 switches between fullscreen and a window."));
-        // Tippi's tips: click the bubble (or Tippi in the sky) for another one.
-        var tipIcon = new Image { Source = sprites.GetValueOrDefault("tippi"), Width = 48, Height = 48, Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Top };
-        tipLabel = new TextBlock { TextWrapping = TextWrapping.Wrap, MaxWidth = 600 };
-        var bubble = new Border
-        {
-            Child = tipLabel, Background = new SolidColorBrush(Color.Parse("#FFF3C4")), BorderBrush = InkBrush, BorderThickness = new Thickness(1),
-            Padding = new Thickness(10, 8, 10, 8), Cursor = TippiHand, Margin = new Thickness(0, 4, 0, 0), VerticalAlignment = VerticalAlignment.Top,
-        };
-        bubble.PointerPressed += (_, _) => NextTip();
-        tipIndex = Random.Shared.Next(Tips.Length) - 1;
-        NextTip();
-        tipRow = Row(tipIcon, bubble);
-        tipRow.Margin = new Thickness(0, 10, 0, 6);
-        body.Children.Add(tipRow);
+                               "In the game, HOME or F10 opens Options (display, sound, controls, cheats, mods) and F11 switches between fullscreen and a window."));
         body.Children.Add(Row(
             Btn("Open game folder", () => Open(play), Paper),
             Btn("Open saves folder", () => Open(Directory.CreateDirectory(SaveDataDir()).FullName), Paper),
@@ -605,35 +623,13 @@ sealed class MainWindow : Window
         };
     }
 
-    static readonly string[] Tips =
-    {
-        "Press F10 during the game to change the resolution, aspect ratio or controls without quitting.",
-        "F11 flips the game between fullscreen and a window.",
-        "Shake right after a jump to pull off a stylish move for extra points.",
-        "Plug in any controller and it works right away. Remap it on the Controls page.",
-        "Cinematic 2.39:1 shows more of every level than the Wii ever could.",
-        "Something look odd at 120 FPS? Turn frame interpolation off on the Display page.",
-        "Open saves folder takes you straight to your saves. A backup now and then never hurts.",
-        "When two mods change the same file, the one whose name comes later wins.",
-        "Click Mario or Luigi up there. Go on.",
-        "Merlon is down there by the menu. Give him a click.",
-    };
-    TextBlock? tipLabel;
-    int tipIndex;
-
-    void NextTip()
-    {
-        tipIndex = (tipIndex + 1) % Tips.Length;
-        if (tipLabel != null) tipLabel.Text = "Tippi says: " + Tips[tipIndex];
-    }
-
     async void Launch()
     {
         var (ok, text, _) = DiscStatus();
         if (!ok)
         {
-            await Message("New Super Paper Bros.", text + "\n\nChoose your disc image with the button under PLAY first.");
-            ShowPage(pages[0].button);
+            await Message("New Super Paper Bros.", text + "\n\nChoose your disc image on the Game page first.");
+            OpenPage(0);
             return;
         }
         // A disc put in Disc/DATA by hand (a Dolphin-extracted folder) has no [paths] dvd_root yet, and the game has no
@@ -655,7 +651,11 @@ sealed class MainWindow : Window
         if (game != null)
         {
             game.EnableRaisingEvents = true;
-            game.Exited += (_, _) => Dispatcher.UIThread.Post(Gamepads.Resume);
+            game.Exited += (_, _) => Dispatcher.UIThread.Post(() =>
+            {
+                Gamepads.Resume();
+                if (config.Get("launcher", "close_with_game") == "true") Close();
+            });
             WindowState = WindowState.Minimized;
         }
         else Gamepads.Resume();
@@ -668,7 +668,7 @@ sealed class MainWindow : Window
         body.Children.Add(Choice("Display mode", "display_mode", new[] { ("Borderless fullscreen", "\"borderless\""), ("Windowed", "\"windowed\""), ("Exclusive fullscreen", "\"exclusive\"") }));
         body.Children.Add(Choice("Resolution", "resolution_multiplier", new[] { ("1080p", "2.25"), ("4K (2160p)", "4.5"), ("Match the screen", "0"), ("1440p", "3"), ("720p", "1.5"), ("480p (original)", "1") }));
         body.Children.Add(Choice("Aspect ratio", "aspect_mode", new[] { ("Cinematic 2.39:1", "3"), ("Fill the screen", "2"), ("16:9", "1"), ("Original 4:3", "0") }));
-        body.Children.Add(Choice("Frame interpolation", "frame_interpolation_fps", new[] { ("120 FPS", "120"), ("180 FPS", "180"), ("240 FPS (fast PCs)", "240"), ("Off (60 FPS)", "0") }));
+        body.Children.Add(Choice("Frame interpolation", "frame_interpolation_fps", new[] { ("120 FPS", "120"), ("Off (60 FPS)", "0") }));
         body.Children.Add(Choice("Vsync", "vsync", new[] { ("On (no screen tearing)", "true"), ("Off", "false") }));
         body.Children.Add(Note("Changes are saved at once and used the next time the game starts. The same settings are in the game's F10 menu. " +
                                "Cinematic and Fill widen the game's camera (more of the level is visible); 16:9 keeps the Wii picture with bars on wider screens. " +
@@ -896,7 +896,11 @@ sealed class MainWindow : Window
     {
         if (capturing == null)
         {
-            if (e.Key == Key.Escape && cancelPadCapture?.Invoke() == true) e.Handled = true;
+            if (e.Key == Key.Escape && cancelPadCapture?.Invoke() == true) { e.Handled = true; return; }
+            if (openPage >= 0 && e.Key == Key.Escape) { ClosePage(); e.Handled = true; return; }
+            // The title screen's menu: arrow keys move, Enter or Space picks.
+            if (openPage < 0 && e.Key is Key.Up or Key.Down) { view.Move(e.Key == Key.Down ? 1 : -1); e.Handled = true; return; }
+            if (openPage < 0 && view.Hover >= 0 && e.Key is Key.Enter or Key.Space) { menu[view.Hover].act(); e.Handled = true; }
             return;
         }
         e.Handled = true;
@@ -1019,9 +1023,10 @@ sealed class MainWindow : Window
         playStatus.Text = ok ? "Disc: ready.  Mods: " + ModNames() : text;
         playStatus.Foreground = new SolidColorBrush(ok ? Ink : Red);
         chooseDisc.Text = ok ? "Change disc..." : "Choose disc image (.iso, .ciso, .wbfs)...";
-        chooseDisc.Back = ok ? Paper : Yellow;
+        chooseDisc.Back = ok ? Mint : Yellow;
         dumpHelp.IsVisible = !ok;
-        gameNote.IsVisible = tipRow.IsVisible = ok;
+        gameNote.IsVisible = ok;
+        view.InvalidateVisual();
     }
 
     string ModNames()
@@ -1034,11 +1039,12 @@ sealed class MainWindow : Window
     Control BuildModsPage()
     {
         var (card, body) = NewCard("Mods");
-        body.Children.Add(Note("How to install a mod:\n" +
-                               "1. Click Open mods folder.\n" +
-                               "2. Put the mod's folder in it (one folder per mod).\n" +
-                               "3. Click Refresh. Ticked mods load when the game starts; untick one to turn it off."));
-        body.Children.Add(Row(Btn("Open mods folder", () => Open(Directory.CreateDirectory(modsDir).FullName)), Btn("Refresh", LoadMods, Paper)));
+        body.Children.Add(Note("Install a mod from its .zip or its folder. Ticked mods load when the game starts; untick one to turn it off. " +
+                               "A mod holds a files folder (it replaces game files) and/or a textures folder."));
+        body.Children.Add(Row(
+            Btn("Install mod (.zip)...", async () => { if (await PickFile("Choose a mod (.zip)", "Mod archive (*.zip)", new[] { "*.zip" }, null) is { } zip) await InstallMod(zip); }),
+            Btn("Install mod folder...", async () => { if (await PickFolder("Choose the mod's folder (the one holding files or textures)") is { } dir) await InstallMod(dir); }, Paper),
+            Btn("Open mods folder", () => Open(Directory.CreateDirectory(modsDir).FullName), Paper)));
         modList = new StackPanel { Margin = new Thickness(8, 4, 8, 4) };
         var list = new StackPanel();
         list.Children.Add(new Border
@@ -1056,41 +1062,104 @@ sealed class MainWindow : Window
         return card;
     }
 
+    async Task<string?> PickFolder(string title)
+    {
+        try
+        {
+            if (StorageProvider.CanPickFolder)
+            {
+                var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = title, AllowMultiple = false });
+                return folders.Count > 0 ? folders[0].TryGetLocalPath() : null;
+            }
+        }
+        catch (Exception) { }  // no portal or GTK after all: ask for the path instead
+        var path = await AskPath(title);
+        return string.IsNullOrWhiteSpace(path) ? null : path.Trim().Trim('"', '\'');
+    }
+
+    // Installs a mod from a .zip or a folder into mods/<name> (ModInstall.cs, shared with the Windows launcher).
+    async Task InstallMod(string source)
+    {
+        string? temp = null;
+        try
+        {
+            string from = source;
+            if (File.Exists(source))
+            {
+                temp = Path.Combine(Path.GetTempPath(), "nspb-mod-" + Guid.NewGuid().ToString("N"));
+                ModInstall.ExtractZip(source, temp);
+                from = temp;
+            }
+            var modRoot = ModInstall.FindRoot(from);
+            if (modRoot == null) { await Message("Install mod", "This doesn't look like a New Super Paper Bros. mod: it has no files or textures folder."); return; }
+            string name = ModInstall.SafeName(modRoot == temp ? Path.GetFileNameWithoutExtension(source) : Path.GetFileName(modRoot.TrimEnd('/')));
+            var dest = Path.Combine(modsDir, name);
+            if (Directory.Exists(dest))
+            {
+                if (!await Message("Install mod", $"A mod called \"{name}\" is already installed. Replace it?", cancel: true)) return;
+                Directory.Delete(dest, true);
+            }
+            ModInstall.CopyDir(modRoot, dest);
+            LoadMods();
+            RefreshStatus();
+            await Message("Install mod", $"Installed \"{name}\". It loads the next time the game starts.");
+        }
+        catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            await Message("Install mod", "The mod could not be installed:\n" + e.Message);
+        }
+        finally
+        {
+            if (temp != null) try { Directory.Delete(temp, true); } catch (Exception) { }
+        }
+    }
+
     void LoadMods()
     {
         modList.Children.Clear();
         if (!Directory.Exists(modsDir)) return;
         foreach (var dir in Directory.GetDirectories(modsDir).OrderBy(d => d, StringComparer.Ordinal))
         {
-            var box = new CheckBox { Content = Path.GetFileName(dir), IsChecked = !File.Exists(Path.Combine(dir, "disabled")), Cursor = TippiHand };
+            var box = new CheckBox { Content = Path.GetFileName(dir), IsChecked = !File.Exists(Path.Combine(dir, "disabled")), Cursor = TippiHand, MinWidth = 480 };
             box.IsCheckedChanged += (_, _) =>
             {
                 var marker = Path.Combine(dir, "disabled");
                 if (box.IsChecked == true) File.Delete(marker); else File.WriteAllText(marker, "");
                 RefreshStatus();
             };
-            modList.Children.Add(box);
+            var remove = Btn("Remove", async () =>
+            {
+                if (!await Message("Remove mod", $"Remove \"{Path.GetFileName(dir)}\"? Its folder is deleted.", cancel: true)) return;
+                try { Directory.Delete(dir, true); }
+                catch (Exception e) when (e is IOException or UnauthorizedAccessException) { await Message("Remove mod", "The mod could not be removed:\n" + e.Message); }
+                LoadMods();
+                RefreshStatus();
+            }, Paper);
+            remove.Margin = new Thickness(0, 2, 0, 2);
+            modList.Children.Add(Row(box, remove));
         }
     }
 }
 
-// The launcher's flat paper button (the Windows launcher's FlatStyle buttons): ink border, bold label, own colour.
+// The launcher's buttons (the Windows launcher's PillButton and TileButton): a bubbly pill with a light top and a darker
+// lip underneath (Tomodachi Life), or, as a page tile, a coloured rounded block with white italic text (Smash 4).
 sealed class PaperButton : Border
 {
     readonly TextBlock label;
     Color back;
-    bool hover;
-    public Color? HoverColor;
+    bool hover, tile, selected;
+    IBrush? textBrush;
     public event Action? Click;
 
     public PaperButton(string text, Color back, double fontSize)
     {
-        label = new TextBlock { Text = text, FontWeight = FontWeight.Bold, FontSize = fontSize, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center };
+        label = new TextBlock { Text = text, FontWeight = FontWeight.Bold, FontSize = fontSize, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+                                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center };
         Child = label;
-        BorderBrush = MainWindow.InkBrush;
         BorderThickness = new Thickness(2);
-        Padding = new Thickness(10, 4, 10, 4);
+        Padding = new Thickness(18, 6, 18, 6);
         Margin = new Thickness(0, 6, 10, 6);
+        CornerRadius = new CornerRadius(999);
         Cursor = MainWindow.TippiHand;
         HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left;  // sized to the label, like the Windows AutoSize buttons
         Back = back;
@@ -1106,9 +1175,45 @@ sealed class PaperButton : Border
     }
 
     public string Text { get => label.Text ?? ""; set => label.Text = value; }
-    public Color Back { get => back; set { back = value; Paint(); } }
-    public IBrush? TextBrush { set => label.Foreground = value; }
+    // White would vanish on the white cards: those buttons are mint.
+    public Color Back { get => back; set { back = value == MainWindow.Paper ? MainWindow.Mint : value; Paint(); } }
+    public IBrush? TextBrush { set { textBrush = value; Paint(); } }
+    public bool Selected { set { selected = value; Paint(); } }
 
-    // The nav buttons light up under the pointer (only while not the selected page).
-    void Paint() => Background = new SolidColorBrush(hover && HoverColor is { } h && back == MainWindow.Paper ? h : back);
+    // A page tile in the nav column: bold italic white text on the left; the selected one sticks out with a white ring.
+    public void MakeTile()
+    {
+        tile = true;
+        label.FontStyle = FontStyle.Italic;
+        label.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left;
+        CornerRadius = new CornerRadius(14);
+        Paint();
+    }
+
+    void Paint()
+    {
+        Color face;
+        if (tile)
+        {
+            face = selected ? MainWindow.Mix(back, Colors.White, 0.12) : hover ? MainWindow.Mix(back, Colors.White, 0.25) : MainWindow.Mix(back, MainWindow.Cream, 0.35);
+            BorderBrush = selected ? Brushes.White : Brushes.Transparent;
+            BorderThickness = new Thickness(selected ? 4 : 0);
+            Margin = new Thickness(selected ? 0 : 10, 0, 0, 12);
+            BoxShadow = BoxShadows.Parse("3 5 0 0 #371E1E3C");
+            label.Foreground = Brushes.White;
+        }
+        else
+        {
+            face = hover ? MainWindow.Mix(back, Colors.White, 0.18) : back;
+            BorderBrush = new SolidColorBrush(MainWindow.Mix(back, MainWindow.Ink, 0.25));
+            BoxShadow = new BoxShadows(new BoxShadow { OffsetY = 4, Color = MainWindow.Mix(back, MainWindow.Ink, 0.35) });
+            bool light = back.R * 0.299 + back.G * 0.587 + back.B * 0.114 > 170;  // perceived brightness
+            label.Foreground = textBrush ?? (light ? MainWindow.InkBrush : Brushes.White);
+        }
+        Background = new LinearGradientBrush
+        {
+            StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
+            GradientStops = { new GradientStop(MainWindow.Mix(face, Colors.White, tile ? 0.18 : 0.35), 0), new GradientStop(face, 1) },
+        };
+    }
 }

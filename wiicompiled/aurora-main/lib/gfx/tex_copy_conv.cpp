@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "tex_copy_conv.hpp"
 #include "tex_copy_format_contract.hpp"
 
@@ -427,6 +428,8 @@ static wgpu::RenderPipeline create_pipeline(const ConvPipeline& conv, const std:
 bool needs_conversion(const GXTexFmt fmt) { return g_pipelines.contains(fmt); }
 
 void initialize() {
+  // The UV transform is bound with a dynamic offset, as GX draws bind theirs. Adreno 5xx read a
+  // statically offset uniform binding here as zeros once frames grew (all UVs 0, single-colour XFB).
   static constexpr std::array bindGroupLayoutEntries{
       wgpu::BindGroupLayoutEntry{
           .binding = 0,
@@ -451,6 +454,7 @@ void initialize() {
           .buffer =
               wgpu::BufferBindingLayout{
                   .type = wgpu::BufferBindingType::Uniform,
+                  .hasDynamicOffset = true,
               },
       },
   };
@@ -477,6 +481,7 @@ void initialize() {
           .buffer =
               wgpu::BufferBindingLayout{
                   .type = wgpu::BufferBindingType::Uniform,
+                  .hasDynamicOffset = true,
               },
       },
   };
@@ -541,7 +546,7 @@ static void execute(const wgpu::CommandEncoder& cmd, const ConvRequest& req, con
         wgpu::BindGroupEntry{
             .binding = 1,
             .buffer = g_uniformBuffer,
-            .offset = req.uniformRange.offset,
+            .offset = 0,
             .size = req.uniformRange.size,
         },
     };
@@ -565,7 +570,7 @@ static void execute(const wgpu::CommandEncoder& cmd, const ConvRequest& req, con
         wgpu::BindGroupEntry{
             .binding = 2,
             .buffer = g_uniformBuffer,
-            .offset = req.uniformRange.offset,
+            .offset = 0,
             .size = req.uniformRange.size,
         },
     };
@@ -592,7 +597,14 @@ static void execute(const wgpu::CommandEncoder& cmd, const ConvRequest& req, con
   };
   const auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
   pass.SetPipeline(pipeline);
-  pass.SetBindGroup(0, bindGroup);
+  const uint32_t dynamicOffset = static_cast<uint32_t>(req.uniformRange.offset);
+  pass.SetBindGroup(0, bindGroup, 1, &dynamicOffset);
+  if (req.viewportWidth != 0 && req.viewportHeight != 0) {
+    const auto w = std::min<uint32_t>(req.viewportWidth, req.dst->size.width);
+    const auto h = std::min<uint32_t>(req.viewportHeight, req.dst->size.height);
+    pass.SetViewport(0.f, 0.f, static_cast<float>(w), static_cast<float>(h), 0.f, 1.f);
+    pass.SetScissorRect(0, 0, w, h);
+  }
   pass.Draw(3);
   pass.End();
 }

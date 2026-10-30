@@ -31,7 +31,10 @@ def capture(pid, path):
         import ctypes.wintypes as w
         user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
         try:
-            user32.SetProcessDPIAware()  # else GetClientRect is DPI-scaled and the shot is a top-left crop of the window
+            # else GetClientRect is DPI-scaled and the shot is a top-left crop of the window. Per-monitor v2 like the
+            # game: system-aware alone still cropped to a third on a 4K screen at 300%.
+            if not user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+                user32.SetProcessDPIAware()
         except Exception:
             pass
         user32.GetDC.restype = w.HDC
@@ -190,7 +193,7 @@ def prepare(root, out, exe, disc):
         shutil.copytree(original / 'game_files', play / 'game_files')
     data = play / 'UserData'
     data.mkdir()
-    for name in ('Saves', 'NAND', 'mods', 'button_icons') + (('texture_replacements',) if os.environ.get('SPM_SWEEP_HDPACK') else ()):
+    for name in ('Saves', 'NAND', 'mods', 'cheats', 'button_icons') + (('texture_replacements',) if os.environ.get('SPM_SWEEP_HDPACK') else ()):
         if (original / 'UserData' / name).exists():
             shutil.copytree(original / 'UserData' / name, data / name)
     config = (original / 'UserData/Config.toml').read_text(encoding='utf-8')
@@ -201,8 +204,11 @@ def prepare(root, out, exe, disc):
                            display_mode='"windowed"', resolution_multiplier=os.environ.get('SPM_SWEEP_RES', '1.0'),
                            aspect_mode=os.environ.get('SPM_SWEEP_ASPECT', '2'),
                            frame_interpolation_fps=os.environ.get('SPM_SWEEP_INTERP', '0'),
+                           vsync=os.environ.get('SPM_SWEEP_VSYNC', 'false'),  # true to test V-Sync pacing
                            # off-screen (PrintWindow still captures it) so sweeps don't cover the user's desktop; SPM_SWEEP_ONSCREEN=1 shows it
-                           window_x='100' if os.environ.get('SPM_SWEEP_ONSCREEN') else '-4000', window_y='100',
+                           # SPM_SWEEP_WINDOW_POS=x,y: another hidden spot, e.g. 0,3000 below a 240 Hz primary screen (its vblank timing)
+                           window_x=(os.environ.get('SPM_SWEEP_WINDOW_POS') or ('100,' if os.environ.get('SPM_SWEEP_ONSCREEN') else '-4000,')).split(',')[0],
+                           window_y=(os.environ.get('SPM_SWEEP_WINDOW_POS') or '0,100').split(',')[1],
                            graphics_api=f'"{os.environ.get("SPM_SWEEP_GRAPHICS", "auto")}"').items():  # auto | d3d12 | vulkan
         config, n = re.subn(rf'(?m)^{key}\s*=.*$', f'{key} = {value}', config)
         if not n:  # key absent from the user's file: add it under [video]
