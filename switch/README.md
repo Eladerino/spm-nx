@@ -12,9 +12,11 @@ own PC against your own disc image, and only its generated C++ is compiled here.
 ## Status
 
 The game boots and plays on Switch hardware, handheld and docked, and saves work. Output is
-1280x720 in both modes for now. It is a work in progress: performance is the standing problem
-(see "Known issues and performance"), and guest memory runs on its first phase, a checked-access
-path that is slower than the flat window planned for phase 2 (`docs/GUEST-MEMORY-PLAN.md`).
+1280x720 in both modes for now. Settings live in an in-game menu built for the Switch pad (see
+"Settings menu" below); the PC version's settings top bar is not part of the Switch build. It is
+a work in progress: performance is the standing problem (see "Known issues and performance"),
+and guest memory runs on its first phase, a checked-access path that is slower than the flat
+window planned for phase 2 (`docs/GUEST-MEMORY-PLAN.md`).
 
 ## Installing from a release
 
@@ -22,18 +24,31 @@ You need a Switch running custom firmware (a current Atmosphère; running homebr
 is recommended) and your own copy of **Super Paper Mario, USA disc (R8PE01, revision 0)**. The
 European disc (R8PP01) does not work with the Switch build yet.
 
-1. Download the Switch release and unzip it.
-2. Copy the `switch` folder to the root of the SD card. You should end up with
-   `sdmc:/switch/spm-nx/` holding `spm-nx.nro`, its companion files (`dsp_coef.bin`,
-   `cacert.pem` and `wii_bootstrap/`) and a `licenses/` folder.
-3. Extract your disc image and put the extracted disc (the folder containing `files` and `sys`)
-   in `sdmc:/switch/spm-nx/game/`. One way to extract it is the upstream launcher's `--extract`
-   command, shown in the root README's "Building from source".
-4. Launch by title takeover: hold R while starting any game, then run `spm-nx.nro` from the
-   homebrew menu. Do not launch it from the album (applet mode): the applet does not get enough
-   memory.
+1. Download the Switch release zip and unzip it on your computer.
+2. Copy the `switch` folder from the zip to the root of the SD card, merging with the `switch`
+   folder already there. You should end up with `sdmc:/switch/spm-nx/` holding `spm-nx.nro`,
+   its companion files (`dsp_coef.bin`, `cacert.pem` and `wii_bootstrap/`) and a `licenses/`
+   folder with the license texts for everything in the package.
+3. Extract your disc image and put the extracted disc (the folder that itself contains `files`
+   and `sys`) in `sdmc:/switch/spm-nx/game/`. One way to extract it is the upstream launcher's
+   `--extract` command, shown in the root README's "Building from source".
+4. Put the SD card back in the Switch and launch by title takeover: hold R while starting any
+   game, then run `spm-nx.nro` from the homebrew menu. Do not launch it from the album (applet
+   mode): the applet does not get enough memory.
+5. First launch: a startup screen appears (it says "Hold - = settings menu"); press A to start.
+   The first session builds the shader and pipeline caches as new effects appear, so it can
+   hitch in places the second session does not. Nothing is wrong when that happens.
 
-Settings and saves live in `sdmc:/switch/spm-nx/UserData/`, beside the NRO.
+Settings, saves and caches live in `sdmc:/switch/spm-nx/UserData/`, which the game creates
+beside the NRO on the first run. Do not delete that folder to "clean up": your saves and the
+caches that make later launches fast are in it.
+
+**Updating:** unzip the new release over the old `switch/spm-nx/` folder, replacing the NRO and
+its companion files. `UserData/` and `game/` are yours and are not part of the release, so
+saves, settings and caches carry over. One catch: the game never rewrites an existing
+`UserData/Config.toml`, so an install that started on an older release keeps the settings it
+already has (including the old PC-style defaults, if it has them) until you change them in the
+settings menu. Fresh installs get the current Switch defaults.
 
 ## Playing
 
@@ -48,24 +63,58 @@ mapping keeps the same jobs on the Switch buttons:
 | X | 1 |
 | Y | A |
 | Right stick | Pointer (Tippi) |
-| R or ZR | Shake |
+| R or ZR | Shake (hold) |
 | + | + |
 | -, L or ZL | - |
 
-Holding `-` for half a second opens the settings menu (the PC version's F10 menu). A short
-press is still the game's `-`.
+Two of those deserve a line each:
+
+- **Shake:** hold R or ZR. The game receives repeated shake flicks for as long as you hold the
+  button, which is what charging (for example a Thunder Rage) and breaking free use.
+- **Tippi's pointer:** push the right stick to raise the pointer and aim with it; press Y while
+  it is up to use it (WPAD A). Centre the stick and the pointer goes away again after a couple
+  of seconds.
+
+## Settings menu
+
+Holding `-` for about half a second opens the Switch settings menu; a short press is still the
+game's `-`. The menu is a single window made for the pad: D-pad or left stick moves, A selects
+or cycles a value forward, Left and Right adjust the selected row, and B closes it. While the
+menu is open the game does not receive pad input, so nothing moves behind it.
+
+- **Graphics:** Resolution (1x, 1.5x or Auto), Aspect (original 4:3, 16:9, Fill Window or
+  cinematic 2.39:1; switching between 4:3 and widescreen takes effect after a restart, and the
+  menu says so on the row), Vsync, Bloom, Disable copy filter, and Skip draws while shaders
+  compile.
+- **Display:** Show FPS and Frame graph.
+- **Audio:** Master, Music, Sound effects, UI and Voices volume sliders, Mute, and the Audio
+  mix worker toggle.
+- **Game:** Controller vibration (rumble) and Spinning coins.
+- **Developer:** hidden until you turn on its "Show developer options" row, which is saved like
+  any other setting. It holds the renderer's thirteen diagnostic switches (each one also writes
+  back to `UserData/dk_diag.txt`, the file the same switches are read from at boot), plus Flush
+  logs and Mark log rows for test runs. Diagnostics can hurt performance or distort the
+  picture; they are for bug reports, not for play.
+
+Fresh installs start at Resolution 1.5x (a 1280x720 render, the screen's native size in
+handheld), Aspect 16:9 and frame interpolation off. If you upgraded from an older release and
+the menu shows 2.25x and cinematic aspect, that is your old config file being kept, as
+promised above: set Resolution and Aspect here once and it stays.
 
 ## Known issues and performance
 
 - **Doors.** The open animation of the game's large doors renders bigger than the door itself
   and off centre. It is visual only; the door still works. The cause is under investigation.
-- **Title card.** The startup title card does not show a button icon at its continue prompt;
-  press A to continue. The card also lists F10 and F11 shortcuts from the PC version: F11
-  does not apply on Switch, and F10's settings menu opens by holding `-` instead.
-- **Performance.** The port is CPU-bound: the translated game code, not the renderer, sets the
-  frame rate. At a high CPU overclock (around 1963 MHz) lighter 2D areas run at or near 60 fps
-  and busy 3D areas around 40 fps. At stock clocks everything runs slower, so a CPU overclock
-  (for example with sys-clk) is the single biggest lever if you want more frames.
+- **Performance.** The port is CPU-bound on the guest side: the translated game code, not the
+  renderer, sets the frame rate. Set expectations by area, not by a single number. At a high
+  CPU overclock (around 1963 MHz) 2D areas run at or near full speed, and heavy 3D areas
+  (Flipside, anywhere after flipping) run in the 40 fps band. The game steps its physics once
+  per frame, so a lower frame rate is a slower game, not just a less smooth one, and at stock
+  clocks everything runs slower still. A CPU overclock (for example with sys-clk) is the
+  single biggest lever if you want more speed.
+- **First launch after installing** builds the shader and pipeline caches and can hitch (see
+  step 5 of the install). Warm launches are fast. The caches live in `UserData/`; deleting
+  that folder brings the slow first launch back, along with deleting your saves.
 - **Docked output** is 1280x720, the same as handheld, for now.
 
 ## Building from source
@@ -121,9 +170,9 @@ hand.) Put your extracted disc (`Disc\DATA`, the folder with `files` and `sys`) 
 from the album: the applet doesn't get enough memory. Logs land in
 `sdmc:/switch/spm-nx/UserData/Logs/`.
 
-The package ships no prebuilt pipeline cache. On the first run the port builds its pipeline
-cache as new effects appear, so the first session can stutter in places; the cache it builds
-is kept on the SD card and reused, so later runs do not repeat it.
+The package ships no prebuilt shader or pipeline cache. On the first run the port builds both
+as new effects appear, so the first session can stutter in places; the caches it builds are
+kept in `UserData/` on the SD card and reused, so later runs do not repeat it.
 
 ## Troubleshooting
 
@@ -137,7 +186,8 @@ is kept on the SD card and reused, so later runs do not repeat it.
   to recompile on the next run. Shaders that fail to compile are dumped to
   `UserData/Logs/shaderfail_*`; attach those to a graphics bug report.
 - **Starting over.** Saves, settings and caches all live in `UserData/` beside the NRO. Deleting
-  that folder resets all of them, saves included.
+  that folder resets all of them, saves included, and the next launch is a slow first launch
+  again while the caches rebuild. Treat it as a last resort, not a cleanup step.
 
 ## Layout
 
@@ -149,6 +199,9 @@ include/                     Horizon stand-ins for POSIX headers newlib lacks (s
 runtime/                     guest memory for Horizon, mmap/mprotect over svcSetMemoryPermission,
                              mbed TLS entropy/clock/recv, getifaddrs stub
 source/spm_switch_init.cpp   libnx startup: SD folders, stderr log, sockets, crash dump
+menu/spm_switch_menu.cpp     the Switch settings menu (plus include/spm_switch_menu.h): one ImGui
+                             window that polls the pad itself; drawn from the overlay's Draw pass
+                             in place of the PC top bar
 sdl3_shim/                   SDL 3 implemented on libnx (sdl3_shim/PATCHES.md)
 dawn/                        SwitchWaker's Dawn recipe and Horizon patches
 aurora/                      Horizon shims for Aurora: the ImGui SDL backends and the sqlite journal
@@ -214,6 +267,9 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
 - `runtime/include/memory_access.h`: `FlatWriteRam*` honor checked access (phase 1 needs it).
 - `runtime/include/runtime_config.h`: graphics API `auto`; executable and data directories as on Apple/Android;
   `sdmc:/` paths count as absolute.
+- `runtime/src/settings_overlay.cpp`: on Switch the PC top bar is never drawn; its Draw routes to
+  the Switch settings menu (`switch/menu/`), F10 and Escape toggle that menu, and the guest
+  input block and status window offsets follow the menu's visibility.
 - `runtime/src/game_folder.cpp`: the game is the `game` folder beside the NRO (no folder picker).
 - `runtime/src/main.cpp`: graphics backend list; no POSIX fault handler.
 - `aurora-main/lib/webgpu/gpu.{hpp,cpp}`, `aurora-main/lib/aurora.cpp`: surfaceless on the Null device (`kSurfaceless`):
@@ -230,7 +286,10 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
 The fork is GPLv3 like upstream. Code taken from SwitchWaker stays MIT and Dawn's patches stay
 BSD-3-Clause. The `deko/` interposer is MPL-2.0 (text in `licenses/MPL-2.0.txt`), as is the
 Mozilla CA bundle (`cacert.pem`) the runtime's HTTPS uses. `THIRD_PARTY.md` lists each file and
-its origin.
+its origin. The settings menu in `menu/` is this fork's own code under GPLv3; its design follows
+SwitchWakerHD's overlay patterns (pad polling with edge detection, the developer options gate,
+confirm on the face-down button and back on face-right), which is a design reference, not copied
+code.
 
 For the project's position on Nintendo's trademarks and copyrighted material, see the Legal notice
 in the root [`README.md`](../README.md).
