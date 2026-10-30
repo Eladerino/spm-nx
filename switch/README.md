@@ -82,7 +82,8 @@ Two of those deserve a line each:
 
 Holding `-` for about half a second opens the Switch settings menu; a short press is still the
 game's `-`. The menu is a single window made for the pad: D-pad or left stick moves, A selects
-or cycles a value forward, Left and Right adjust the selected row, and B closes it. While the
+or cycles a value forward, Left and Right adjust the selected row, and B closes it. A short
+description of the selected row is shown at the bottom of the window. While the
 menu is open the game does not receive pad input, so nothing moves behind it.
 
 - **Graphics:** Resolution (0.75x, 1x, 1.5x or Auto), Aspect (original 4:3, 16:9, Fill Window or
