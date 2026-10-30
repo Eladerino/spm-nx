@@ -81,8 +81,8 @@ Two of those deserve a line each:
 ## Settings
 
 Holding `-` for about half a second opens the game's Options menu (upstream's, since
-v1.0.6); a short press is still the game's `-`. It has six pages: Display, Graphics, Sound,
-Game, Cheats and Controls. Use the D-pad or left stick to move, A to select or adjust, and B
+v1.0.6); a short press is still the game's `-`. It has eight pages: Game, Display, Sound,
+Controls, Cheats, Mods, and this port's own Developer and Diagnostics pages. Use the D-pad or left stick to move, A to select or adjust, and B
 to close. While the menu is open the game pauses and does not receive pad input, so nothing
 moves behind it. Rows that do not apply on the Switch are not shown: there are no keyboard
 bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
@@ -92,20 +92,19 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   button or push the stick direction to bind; changes apply immediately, no restart. The
   page's own Controller rows above it drive players 2 to 4 (unused by this single-player
   game) and its vibration setting.
-- **Game** carries a "Developer tools" row. It opens this port's Developer shell: the rows
-  that have no place in the Options menu. The shell's framework is adapted from
-  SwitchWakerHD's settings overlay by centollOS (see "Licenses" below): one scrolling page
-  holding Bloom, Disable copy filter, Skip draws while shaders compile, Texture
-  replacements (the master switch for the replacement button icons and prompt pictures;
-  takes effect after a restart), Frame graph, UI volume, the Audio mix worker toggle and
-  Spinning coins, then the renderer's fourteen diagnostic switches (each one also writes
-  back to `UserData/dk_diag.txt`, the file the same switches are read from at boot), Flush
-  logs and Mark log rows for test runs, a Texture dumps switch (writes every unmatched
-  texture to `Cache/texture_dumps` under the name a replacement would use, for making new
-  replacement pictures; takes effect after a restart), and a Clear shader cache row
-  (deletes the compiled shader cache on the next launch; the recovery step for a cache that
-  has gone wrong). Diagnostics can hurt performance or distort the picture; they are for
-  bug reports, not for play.
+- **Developer** and **Diagnostics** are this port's own two pages, added after upstream's
+  six (they replaced a separate Developer shell, which has been retired). Developer holds
+  Bloom, Disable copy filter, Skip draws while shaders compile, Texture replacements (the
+  master switch for the replacement button icons and prompt pictures; takes effect after a
+  restart), Frame graph, UI volume, the Audio mix worker toggle, Spinning coins, a Texture
+  dumps switch (writes every unmatched texture to `Cache/texture_dumps` under the name a
+  replacement would use, for making new replacement pictures; takes effect after a restart),
+  and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
+  recovery step for a cache that has gone wrong). Diagnostics holds the renderer's fourteen
+  diagnostic switches (each one also writes back to `UserData/dk_diag.txt`, the file the
+  same switches are read from at boot) and Flush logs and Mark log rows for test runs.
+  Diagnostics can hurt performance or distort the picture; they are for bug reports, not
+  for play.
 
 Fresh installs start at Resolution 1.5x (a 1280x720 render, the screen's native size in
 handheld), Aspect 16:9 and frame rate 60. If you upgraded from an older release and the
@@ -210,10 +209,6 @@ include/                     Horizon stand-ins for POSIX headers newlib lacks (s
 runtime/                     guest memory for Horizon, mmap/mprotect over svcSetMemoryPermission,
                              mbed TLS entropy/clock/recv, getifaddrs stub
 source/spm_switch_init.cpp   libnx startup: SD folders, stderr log, sockets, crash dump
-menu/spm_switch_menu.cpp     the Developer shell (plus include/spm_switch_menu.h): what is
-                             left of the old Switch settings menu since the Options menu took
-                             over; its framework is adapted from SwitchWakerHD's settings
-                             overlay; drawn from the overlay's DrawTopBar seam
 sdl3_shim/                   SDL 3 implemented on libnx (sdl3_shim/PATCHES.md)
 dawn/                        SwitchWaker's Dawn recipe and Horizon patches
 aurora/                      Horizon shims for Aurora: the ImGui SDL backends and the sqlite journal
@@ -279,10 +274,10 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
 - `runtime/include/memory_access.h`: `FlatWriteRam*` honor checked access (phase 1 needs it).
 - `runtime/include/runtime_config.h`: graphics API `auto`; executable and data directories as on Apple/Android;
   `sdmc:/` paths count as absolute.
-- `runtime/src/settings_overlay.cpp`: on Switch the PC top bar is never drawn; its DrawTopBar
-  seam draws the Developer shell (`switch/menu/`) when that is open, F10 and Escape toggle the
-  Options menu, hold-Minus opens it too, and the guest input block and status window offsets
-  follow either menu's visibility. A handful of rows do not apply on the Switch and are not
+- `runtime/src/settings_overlay.cpp`: on Switch the PC top bar is never drawn (its DrawTopBar
+  seam is inert there), F10 and Escape toggle the Options menu, hold-Minus opens it too, and
+  the guest input block and status window offsets follow the Options menu's visibility. The
+  Options menu also gains this port's Developer and Diagnostics pages on Switch. A handful of rows do not apply on the Switch and are not
   shown (keyboard bindings, the window row, open-folder rows, quit-to-desktop); the updater
   is an inert stub (`switch/runtime/updater_horizon.cpp`), so its rows hide themselves.
 - `runtime/src/kpad.cpp`: one call routes guest pad input through the overlay's menu gate
@@ -305,11 +300,11 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
 The fork is GPLv3 like upstream. Code taken from SwitchWaker stays MIT and Dawn's patches stay
 BSD-3-Clause. The `deko/` interposer is MPL-2.0 (text in `licenses/MPL-2.0.txt`), as is the
 Mozilla CA bundle (`cacert.pem`) the runtime's HTTPS uses. `THIRD_PARTY.md` lists each file and
-its origin. The Developer shell's framework in `menu/` (its window, scrolling page, gamepad navigation,
-widget helpers and style) is adapted from SwitchWakerHD's settings overlay by
-[centollOS](https://github.com/centollOS/SwitchWakerHD), which builds on the ZeldaWWHDRecomp
-overlay, and stays MPL-2.0 like its source (`licenses/MPL-2.0.txt`); the menu's rows, settings
-and diagnostic plumbing are this fork's own code under GPLv3.
+its origin. An earlier Developer shell in `menu/`, its framework (window, scrolling page,
+gamepad navigation, widget helpers and style) adapted from SwitchWakerHD's settings overlay
+by [centollOS](https://github.com/centollOS/SwitchWakerHD), which builds on the
+ZeldaWWHDRecomp overlay, has been retired: its rows moved into the Options menu's Developer
+and Diagnostics pages, and the framework code no longer ships in this tree.
 
 The button prompt icons staged into `UserData/button_icons/` are "Input Prompts" by
 [Kenney](https://kenney.nl), CC0, generated at build time from the SVGs vendored in
