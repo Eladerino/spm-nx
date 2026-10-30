@@ -9,8 +9,10 @@ The game picks the set for the controller in use (aurora texture_replacement.cpp
     python tools/make-button-icons.py [--src <8x PNG pack Interface folder>] [--out Play/UserData/button_icons]
     python tools/make-button-icons.py --clean [--out <dir>]
         Only the Switch package's set: the nintendo files that come from the vendored CC0 art alone
-        (controller.png, ui/, panel.txt, the sideways boot texture, marker1's transparent textures).
-        No HD pack is needed and the composites into the pack's artwork are never made in this mode.
+        (controller.png, ui/, panel.txt, the sideways boot texture, marker1's transparent textures,
+        and the prompt textures whose pictures are drawn from scratch: the text-box glyphs and the
+        shake icon). No HD pack is needed and the composites into the pack's artwork are never made
+        in this mode.
 Needs ImageMagick (magick) to render the SVGs.
 """
 import argparse
@@ -72,6 +74,14 @@ TEXTURES = [
 MARKERS = {"tex1_248x184_fd844c6227d275cf_5.png": 2, "tex1_248x200_55ef64a9d7e806f7_5.png": 2,
            "tex1_152x144_eba7359cd27cf8b6_5.png": 3, "tex1_176x168_6208c1ec2d692b4f_5.png": 4,
            "tex1_200x152_8394740b60e9c228_5.png": 5, "tex1_168x136_42b4c0a037f4bbee_5.png": 6}
+
+# Prompt textures whose render never reads the pack artwork it replaces: "glyph" paints the whole
+# texture white before drawing, "shake" builds a new transparent picture, so both come out the same
+# from a blank canvas at the pack's size, and the clean set can ship them. Every other kind draws
+# on the artwork itself (disc, face, tippi) or is the artwork (none), so those stay full-set only.
+# None of these four is a marker texture: the full set saves them at the style's root, and so does
+# the clean set.
+PROMPT_CLEAN_KINDS = ("glyph", "shake")
 
 # Where each action's button is on the controller picture (fractions of controller.png): Move = left stick, Flip = top
 # face button, Jump = bottom, Use a Pixl = the 1 button's, Use Tippi = right stick. The panel's callouts point there.
@@ -267,10 +277,12 @@ def panel_and_ui(out, style):
 def build_clean(out_root):
     """The Switch package's set (the nintendo style only): everything that needs nothing but the
     vendored CC0 art in tools/button-art. The composites into the HD pack's artwork (the TEXTURES
-    renders, the marker2 files included) are never made here, so no pack is required and no game
+    renders that draw on that artwork, the marker2 files included) are never made here, so no pack is required and no game
     art ships. What it buys: the boot screen's sideways picture becomes the Switch controller,
     marker1 hides the Controls screen's 3D remote, and the Controls panel's own files are in
-    place (the panel itself still waits on marker2, which only the full set has)."""
+    place (the panel itself still waits on marker2, which only the full set has). It also buys
+    the in-game prompt textures whose renders never touch the pack artwork (PROMPT_CLEAN_KINDS:
+    the text-box glyphs and the shake icon), so those prompts show Switch buttons."""
     style = "nintendo"
     out = os.path.join(out_root, style)
     shutil.rmtree(out, ignore_errors=True)
@@ -280,6 +292,20 @@ def build_clean(out_root):
     controller_picture(style).save(os.path.join(out, "controller.png"))
     sideways_picture(Image.open(os.path.join(out, "controller.png"))).save(os.path.join(out, SIDEWAYS_TEXTURE))
     panel_and_ui(out, style)
+    # The pack-independent prompt textures (PROMPT_CLEAN_KINDS): rendered from a blank canvas at
+    # the pack's 8x size and saved at 4x under their own names, like the full set, so the in-game
+    # prompts they belong to (the button glyphs inside text boxes, the shake prompt's icon) show
+    # Switch buttons in the package too.
+    for name, kind, buttons in TEXTURES:
+        if kind not in PROMPT_CLEAN_KINDS:
+            continue
+        w, h = (int(v) for v in name.split("_")[1].split("x"))
+        with tempfile.TemporaryDirectory() as tmp:
+            blank = os.path.join(tmp, name)
+            Image.new("RGBA", (w * 8, h * 8), (0, 0, 0, 0)).save(blank)
+            img = render(blank, kind, buttons, style)
+        img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
+        img.save(os.path.join(out, name))
     print(f"{style} (clean): -> {out}")
 
 
