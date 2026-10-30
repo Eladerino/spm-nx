@@ -4,17 +4,27 @@
 // end, samples are mapped back to the translated guest function whose code they fall in (by each
 // translated function's host entry point) and the top entries are logged with their guest address,
 // so a slow scene can be traced to the game code (or the runtime and aurora code) it spends time in.
+//
+// Switch: the capture backend is Horizon's (SetSwitchProfileEnabled, below). The "profile" dk_diag
+// switch (dk_diag.txt, the dk_cmd channel, the settings menu's Developer row) starts a sampler
+// thread that pauses the main thread - the guest runs there; Aurora's frame worker only encodes
+// and presents sealed frames - about 200 times a second and records its PC, LR and frame-pointer
+// chain. Turning the switch off prints the hot list to stderr.log in the same style as the
+// Windows report: top guest functions by leaf samples, then the top call chains.
 #include "guest_profiler.h"
 
 #include "abi_bridge.h"
+#include "guest_profile_format.h"
 #include "runtime_log.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -23,6 +33,10 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#endif
+
+#if defined(__SWITCH__)
+#include <switch.h>
 #endif
 
 extern "C" {
@@ -34,18 +48,22 @@ extern const char* const kGuestMapSymbolNames[];
 namespace GuestProfiler {
 namespace {
 
-#ifdef _WIN32
-struct Entry {
-    uintptr_t host;
-    uint32_t guest;
-};
-
+#if defined(_WIN32) || defined(__SWITCH__)
+// The decomp name for a guest address from the generated symbol tables (SPM's MAP.txt names;
+// coverage skews to the PAL build, so an unnamed function just gets its address).
 const char* GuestName(uint32_t address) {
     const uint32_t* begin = kGuestMapSymbolAddresses;
     const uint32_t* end = kGuestMapSymbolAddresses + kGuestMapSymbolCount;
     const uint32_t* it = std::lower_bound(begin, end, address);
     return it != end && *it == address ? kGuestMapSymbolNames[it - begin] : "";
 }
+#endif
+
+#ifdef _WIN32
+struct Entry {
+    uintptr_t host;
+    uint32_t guest;
+};
 
 void Report(const std::unordered_map<uintptr_t, uint32_t>& samples, const std::vector<std::vector<uintptr_t>>& stacks,
             uint32_t total) {
@@ -211,6 +229,230 @@ void Run(HANDLE thread, double startSeconds, double lengthSeconds) {
 }
 #endif
 
+#if defined(__SWITCH__)
+// ---- Switch capture backend ------------------------------------------------------------------
+// The mechanism is the one SwitchWaker's in-NRO tooling and the Simpsons Hit & Run Switch port
+// prove on Horizon: from a sampler thread, svcSetThreadActivity pauses the target thread,
+// svcGetThreadContext3 dumps its registers, and the thread is resumed immediately. The target
+// is the main thread (envGetMainThreadHandle): the guest executes there (main.cpp invokes the
+// guest entry on it; guest threads are fibers on it). Aurora's frame worker is deliberately
+// NOT sampled: it encodes and presents sealed frames, so its PCs would name Aurora and Dawn
+// code, not the guest functions this profiler exists to rank. Its cost is already bounded by
+// the perftimer stage split.
+//
+// Rate: 200 samples a second. Each sample holds the game thread paused only for a register
+// dump and at most kProfileMaxDepth stack reads (microseconds), so the duty cycle is well
+// under a percent even at 15 fps; the pauses can still jitter individual frame times, which
+// is why the switch is off by default and a profiling session is not a frame-time measurement.
+//
+// Failure behaviour: a failed pause or context read skips the sample and counts it; 20 in a
+// row stops sampling with an error line. Nothing here can leave the game thread paused: the
+// resume runs on every path out of a successful pause, and the resume's own failure is counted
+// like any other. Captured samples survive a dead sampler and print when the switch turns off.
+
+constexpr int kProfilePeriodMs = 5;              // 200 samples a second
+constexpr uint32_t kProfileMaxSamples = 120000;  // 10 minutes at that rate, then sampling stops
+constexpr int kProfileMaxDepth = 12;             // PC, LR, then frame-pointer return addresses
+constexpr int kProfileMaxFailures = 20;          // consecutive failed samples before giving up
+
+std::atomic<bool> g_profileRunning{false};
+std::thread g_profileThread;
+std::mutex g_profileMutex;
+std::unordered_map<uintptr_t, uint32_t> g_profileSamples;
+std::vector<uintptr_t> g_profileFrames;  // every captured stack's addresses, concatenated
+std::vector<uint8_t> g_profileDepths;    // one depth per captured stack
+uint32_t g_profileTotal = 0;
+uint32_t g_profileFailures = 0;
+uintptr_t g_profileBase = 0;  // this module's load base, for nro+ offsets in the report
+std::chrono::steady_clock::time_point g_profileStart{};
+std::chrono::steady_clock::time_point g_profileEnd{};
+bool g_profileEnded = false;
+
+// One sample of the game thread. False when the pause or the context read failed (the caller
+// counts it and carries on); the game thread is running again on every return path.
+bool ProfileSampleOnce(Handle thread) {
+    if (R_FAILED(svcSetThreadActivity(thread, ThreadActivity_Paused))) {
+        return false;
+    }
+    ThreadContext context{};
+    const Result read = svcGetThreadContext3(&context, thread);
+    uintptr_t frames[kProfileMaxDepth];
+    int depth = 0;
+    if (R_SUCCEEDED(read)) {
+        // Registers and stack memory only while the thread is paused, into stack locals: no
+        // heap use here, the paused thread may hold the heap lock (the Windows rule, kept).
+        frames[depth++] = context.pc.x;
+        if (context.lr != 0 && context.lr != context.pc.x) {
+            frames[depth++] = context.lr;
+        }
+        // The frame-pointer chain: at [fp] the caller's fp, at [fp + 8] its return address
+        // (the AArch64 frame record). The guards are the proven capture's: 8-aligned, inside
+        // the stack window above SP, strictly increasing, so a garbage or non-frame-pointer
+        // link ends the walk instead of wandering into unrelated memory. Generated code is
+        // not built with frame pointers in mind, so chains may end early; the leaf PC, which
+        // the hot list ranks, never depends on the walk.
+        uintptr_t fp = context.fp;
+        while (depth < kProfileMaxDepth && fp != 0) {
+            if ((fp & 7u) != 0 || fp < context.sp || fp > context.sp + 0x400000) {
+                break;
+            }
+            const uintptr_t next = *reinterpret_cast<const uintptr_t*>(fp);
+            const uintptr_t ret = *reinterpret_cast<const uintptr_t*>(fp + 8);
+            if (ret != 0 && ret != frames[depth - 1]) {
+                frames[depth++] = ret;
+            }
+            if (next <= fp) {
+                break;
+            }
+            fp = next;
+        }
+    }
+    const Result resumed = svcSetThreadActivity(thread, ThreadActivity_Runnable);
+    if (R_FAILED(read) || R_FAILED(resumed)) {
+        return false;
+    }
+    if (depth > 0) {
+        std::lock_guard<std::mutex> lock(g_profileMutex);
+        ++g_profileSamples[frames[0]];
+        g_profileFrames.insert(g_profileFrames.end(), frames, frames + depth);
+        g_profileDepths.push_back(static_cast<uint8_t>(depth));
+        ++g_profileTotal;
+    }
+    return true;
+}
+
+void ProfileSamplerMain() {
+    const Handle gameThread = envGetMainThreadHandle();
+    {
+        MemoryInfo info{};
+        uint32_t pageInfo = 0;
+        if (R_SUCCEEDED(svcQueryMemory(&info, &pageInfo, reinterpret_cast<uintptr_t>(&ProfileSamplerMain)))) {
+            std::lock_guard<std::mutex> lock(g_profileMutex);
+            g_profileBase = info.addr;
+        }
+    }
+    int consecutiveFailures = 0;
+    auto next = std::chrono::steady_clock::now();
+    while (g_profileRunning.load(std::memory_order_acquire)) {
+        next += std::chrono::milliseconds(kProfilePeriodMs);
+        const auto now = std::chrono::steady_clock::now();
+        if (next > now) {
+            std::this_thread::sleep_until(next);
+        } else {
+            next = now;  // fell behind (a long pause, a stall): resync, do not burst
+        }
+        if (!g_profileRunning.load(std::memory_order_acquire)) {
+            break;
+        }
+        bool capped = false;
+        if (ProfileSampleOnce(gameThread)) {
+            consecutiveFailures = 0;
+        } else {
+            {
+                std::lock_guard<std::mutex> lock(g_profileMutex);
+                ++g_profileFailures;
+            }
+            if (++consecutiveFailures >= kProfileMaxFailures) {
+                RT_LOGF(RT_TAG_RUNTIME,
+                        "[profile] error: sampling the game thread failed %d times in a row; sampling stopped, "
+                        "toggle profile off for what was captured\n",
+                        consecutiveFailures);
+                std::fflush(stderr);
+                g_profileRunning.store(false, std::memory_order_release);
+                break;
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_profileMutex);
+            capped = g_profileTotal >= kProfileMaxSamples;
+        }
+        if (capped) {
+            RT_LOGF(RT_TAG_RUNTIME,
+                    "[profile] sample cap reached (%u samples); sampling stopped, toggle profile off for the hot list\n",
+                    kProfileMaxSamples);
+            std::fflush(stderr);
+            g_profileRunning.store(false, std::memory_order_release);
+            break;
+        }
+    }
+    std::lock_guard<std::mutex> lock(g_profileMutex);
+    g_profileEnd = std::chrono::steady_clock::now();
+    g_profileEnded = true;
+}
+
+// The hot list for the captured session, in the Windows report's shape: a begin line, the top
+// 60 leaf functions, the top 25 chains, an end line. Resolution happens here, once, through
+// the registry's host lookup (FindByHostAddress exists for exactly this: stack symbolication),
+// so the sampler itself never touches the registry or the name tables. The name shown is the
+// registry's, falling back to the decomp map name (GuestName) when the registry has none.
+void ProfileReport() {
+    std::unordered_map<uintptr_t, uint32_t> samples;
+    std::vector<std::vector<uintptr_t>> stacks;
+    uint32_t total = 0;
+    uint32_t failures = 0;
+    uintptr_t base = 0;
+    double seconds = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_profileMutex);
+        samples = g_profileSamples;
+        total = g_profileTotal;
+        failures = g_profileFailures;
+        base = g_profileBase;
+        stacks.reserve(g_profileDepths.size());
+        size_t at = 0;
+        for (const uint8_t depth : g_profileDepths) {
+            stacks.emplace_back(g_profileFrames.begin() + at, g_profileFrames.begin() + at + depth);
+            at += depth;
+        }
+        const auto end = g_profileEnded ? g_profileEnd : std::chrono::steady_clock::now();
+        seconds = std::chrono::duration<double>(end - g_profileStart).count();
+    }
+    if (total == 0) {
+        RT_LOGF(RT_TAG_RUNTIME, "[profile] no samples captured\n");
+        std::fflush(stderr);
+        return;
+    }
+    std::vector<GuestProfileFormat::Entry> entries;
+    {
+        std::unordered_map<uintptr_t, bool> resolved;
+        const auto resolve = [&](uintptr_t pc) {
+            const auto info = TranslatedFunctionRegistry::FindByHostAddress(pc);
+            if (!info || info->entryPoint == nullptr) {
+                return;
+            }
+            const uintptr_t host = reinterpret_cast<uintptr_t>(info->entryPoint);
+            if (!resolved.emplace(host, true).second) {
+                return;
+            }
+            const char* name = info->name != nullptr && info->name[0] != '\0' ? info->name : GuestName(info->address);
+            entries.push_back({host, info->address, name});
+        };
+        for (const auto& sample : samples) {
+            resolve(sample.first);
+        }
+        for (const auto& stack : stacks) {
+            for (const uintptr_t pc : stack) {
+                resolve(pc);
+            }
+        }
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const GuestProfileFormat::Entry& a, const GuestProfileFormat::Entry& b) { return a.host < b.host; });
+    RT_LOGF(RT_TAG_RUNTIME,
+            "[profile] begin: %u samples in %.1f s at %d Hz from the game thread, %u failed samples, "
+            "%zu translated functions\n",
+            total, seconds, 1000 / kProfilePeriodMs, failures, entries.size());
+    for (const auto& line : GuestProfileFormat::LeafLines(samples, entries, base, total, 60)) {
+        RT_LOGF(RT_TAG_RUNTIME, "%s\n", line.c_str());
+    }
+    for (const auto& line : GuestProfileFormat::ChainLines(stacks, entries, base, total, 25)) {
+        RT_LOGF(RT_TAG_RUNTIME, "%s\n", line.c_str());
+    }
+    RT_LOGF(RT_TAG_RUNTIME, "[profile] end\n");
+    std::fflush(stderr);
+}
+#endif
+
 } // namespace
 
 void OnFramePresented() {
@@ -243,5 +485,54 @@ void OnFramePresented() {
     std::thread(Run, thread, start, length).detach();
 #endif
 }
+
+#if defined(__SWITCH__)
+void SetSwitchProfileEnabled(bool enabled) {
+    if (enabled) {
+        if (g_profileRunning.exchange(true, std::memory_order_acq_rel)) {
+            RT_LOGF(RT_TAG_RUNTIME, "[profile] already running\n");
+            std::fflush(stderr);
+            return;
+        }
+        // A sampler that stopped on its own (failures, the cap) leaves a joinable thread
+        // behind; collect it before the object is reused.
+        if (g_profileThread.joinable()) {
+            g_profileThread.join();
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_profileMutex);
+            g_profileSamples.clear();
+            g_profileFrames.clear();
+            g_profileDepths.clear();
+            g_profileTotal = 0;
+            g_profileFailures = 0;
+            g_profileBase = 0;
+            g_profileEnded = false;
+            g_profileStart = std::chrono::steady_clock::now();
+        }
+        try {
+            g_profileThread = std::thread(ProfileSamplerMain);
+        } catch (...) {
+            g_profileRunning.store(false, std::memory_order_release);
+            RT_LOGF(RT_TAG_RUNTIME, "[profile] error: could not start the sampler thread\n");
+            std::fflush(stderr);
+            return;
+        }
+        RT_LOGF(RT_TAG_RUNTIME,
+                "[profile] started: sampling the game thread at %d Hz; toggle profile off for the hot list\n",
+                1000 / kProfilePeriodMs);
+        std::fflush(stderr);
+        return;
+    }
+    const bool wasRunning = g_profileRunning.exchange(false, std::memory_order_acq_rel);
+    if (!wasRunning && !g_profileThread.joinable()) {
+        return;  // never started: nothing to stop or report
+    }
+    if (g_profileThread.joinable()) {
+        g_profileThread.join();
+    }
+    ProfileReport();
+}
+#endif
 
 } // namespace GuestProfiler

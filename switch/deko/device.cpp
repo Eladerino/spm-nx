@@ -19,6 +19,13 @@
 
 extern "C" char* fake_heap_end;
 
+// The guest sampling profiler (runtime library; declared in guest_profiler.h). Declared here
+// rather than included, the same way the settings menu declares the swdk surface: diag_set
+// forwards the "profile" switch to it.
+namespace GuestProfiler {
+void SetSwitchProfileEnabled(bool enabled);
+}
+
 namespace swdk {
 
 Renderer R;
@@ -49,6 +56,7 @@ void diag_init() {
         if (std::strstr(line, "mtxlog")) g_diag.mtxLog = !off;
         if (std::strstr(line, "perftimer")) g_diag.perfTimer = !off;
         if (std::strstr(line, "arrayup")) g_diag.arrayUp = !off;
+        if (std::strstr(line, "profile")) g_diag.profile = !off;
     }
     std::fclose(f);
     // Aurora's switches initialise from these env vars on their first use; diag_init runs from
@@ -64,18 +72,30 @@ void diag_init() {
     if (g_diag.perfTimer) setenv("NSMBW_STAGE_TIMERS", "1", 1);
     // Same handshake for NSMBW_ARRAY_REUPLOAD: handle_draw initialises its flag from it on the first draw it handles.
     if (g_diag.arrayUp) setenv("NSMBW_ARRAY_REUPLOAD", "1", 1);
-    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d nomerge=%d uvlog=%d mtxlog=%d perftimer=%d arrayup=%d",
+    // The profiler's env bridge: NSMBW_PROFILE is set like the five above so the state is
+    // visible the same way, but the value is only a marker here - the profiler's start:length
+    // config reader is part of its Windows capture path and is not compiled on Switch, and the
+    // Switch sampler is toggle-driven (one session, reported when the switch turns off), so it
+    // has no window to read. diag_set and the end of this function drive it directly instead.
+    if (g_diag.profile) setenv("NSMBW_PROFILE", "1", 1);
+    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d nomerge=%d uvlog=%d mtxlog=%d perftimer=%d arrayup=%d profile=%d",
           g_diag.depthOff ? 1 : 0, g_diag.cullOff ? 1 : 0, g_diag.magenta ? 1 : 0, g_diag.picDump ? 1 : 0,
           g_diag.efbClear ? 1 : 0, g_diag.bufDump ? 1 : 0, g_diag.texDump ? 1 : 0, g_diag.shaderDump ? 1 : 0,
           g_diag.noMerge ? 1 : 0, g_diag.uvLog ? 1 : 0, g_diag.mtxLog ? 1 : 0, g_diag.perfTimer ? 1 : 0,
-          g_diag.arrayUp ? 1 : 0);
+          g_diag.arrayUp ? 1 : 0, g_diag.profile ? 1 : 0);
+    // A profile=1 in dk_diag.txt starts the sampler now. Renderer init runs before the guest
+    // starts, so the session covers the boot too; samples resolve at report time, so nothing
+    // about the early start hurts attribution. The clean session is still the menu toggle:
+    // on when the heavy scene is on screen, off when it is done.
+    if (g_diag.profile) GuestProfiler::SetSwitchProfileEnabled(true);
 }
 
 // diag_set (dk.h): the runtime path for the same switches. The eight interposer switches are
 // plain field flips (their use sites read g_diag per bind, per present, per compile); the five
 // Aurora switches also forward to Aurora's flags, which initialise from the env vars above and
-// are settable ever since. A flip lands from the switch's next use onward, not at a frame
-// boundary.
+// are settable ever since; the profile switch forwards to the runtime's guest profiler, whose
+// hot list prints when the switch turns off. A flip lands from the switch's next use onward,
+// not at a frame boundary.
 bool diag_set(const char* key, bool on) {
     if (!key) return false;
     if (!std::strcmp(key, "depth_off")) g_diag.depthOff = on;
@@ -101,6 +121,9 @@ bool diag_set(const char* key, bool on) {
     } else if (!std::strcmp(key, "arrayup")) {
         g_diag.arrayUp = on;
         aurora::gx::fifo::nsmbw_set_array_reupload(on);
+    } else if (!std::strcmp(key, "profile")) {
+        g_diag.profile = on;
+        GuestProfiler::SetSwitchProfileEnabled(on);
     } else {
         return false;
     }
@@ -109,7 +132,8 @@ bool diag_set(const char* key, bool on) {
 
 // diag_get (dk.h): the read side of diag_set, for the Switch settings menu's
 // Developer rows. g_diag is authoritative for every key: diag_set stores the
-// field for all thirteen keys and additionally forwards the five Aurora ones.
+// field for all fourteen keys and additionally forwards the five Aurora ones
+// (and the profile switch to the guest profiler).
 bool diag_get(const char* key) {
     if (!key) return false;
     if (!std::strcmp(key, "depth_off")) return g_diag.depthOff;
@@ -125,6 +149,7 @@ bool diag_get(const char* key) {
     else if (!std::strcmp(key, "mtxlog")) return g_diag.mtxLog;
     else if (!std::strcmp(key, "perftimer")) return g_diag.perfTimer;
     else if (!std::strcmp(key, "arrayup")) return g_diag.arrayUp;
+    else if (!std::strcmp(key, "profile")) return g_diag.profile;
     return false;
 }
 

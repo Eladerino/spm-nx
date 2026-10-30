@@ -189,12 +189,14 @@ struct Diag {
     std::atomic<bool> mtxLog = false;   // Aurora logs the postex matrices staged per draw (sets NSMBW_MTX_LOG=1 before the first draw)
     std::atomic<bool> perfTimer = false;   // Aurora stage timers: producer, map wait and encode totals every 600 frames (sets NSMBW_STAGE_TIMERS=1 before the first draw)
     std::atomic<bool> arrayUp = false;   // Aurora re-uploads every draw's vertex arrays (sets NSMBW_ARRAY_REUPLOAD=1 before the first draw)
+    std::atomic<bool> profile = false;   // the runtime's guest sampling profiler captures the game thread while on; turning it off prints the hot list
 };
 extern Diag g_diag;
 void diag_init();
 // Sets one switch by its dk_diag.txt name ("depth_off", "nomerge", ...), at runtime: the
 // interposer switches flip here, the five Aurora switches are forwarded to Aurora's own flags
-// (dk_aurora.h). False for an unknown name. Any thread.
+// (dk_aurora.h), and the profile switch to the runtime's guest profiler. False for an unknown
+// name. Any thread.
 bool diag_set(const char* key, bool on);
 // The read side of diag_set: the current state of one switch by name, for the Switch
 // settings menu's Developer rows. Unknown names read as off.
