@@ -12,8 +12,8 @@ own PC against your own disc image, and only its generated C++ is compiled here.
 ## Status
 
 The game boots and plays on Switch hardware, handheld and docked, and saves work. Output is
-1280x720 in both modes for now. Settings live in an in-game menu built for the Switch pad (see
-"Settings menu" below); the PC version's settings top bar is not part of the Switch build. It is
+1280x720 in both modes for now. Settings live in the game's Options menu (see "Settings" below); the PC version's settings
+top bar is not part of the Switch build, and neither is the PC launcher's update flow. It is
 a work in progress: performance is the standing problem (see "Known issues and performance"),
 and guest memory runs on its first phase, a checked-access path that is slower than the flat
 window planned for phase 2 (`docs/GUEST-MEMORY-PLAN.md`).
@@ -36,7 +36,7 @@ European disc (R8PP01) does not work with the Switch build yet.
 4. Put the SD card back in the Switch and launch by title takeover: hold R while starting any
    game, then run `spm-nx.nro` from the homebrew menu. Do not launch it from the album (applet
    mode): the applet does not get enough memory.
-5. First launch: a startup screen appears (it says "Hold - = settings menu"); press A to start.
+5. First launch: a startup screen appears (it says "Hold - = Options"); press A to start.
    The first session builds the shader and pipeline caches as new effects appear, so it can
    hitch in places the second session does not. Nothing is wrong when that happens.
 
@@ -78,44 +78,38 @@ Two of those deserve a line each:
   it is up to use it (WPAD A). Centre the stick and the pointer goes away again after a couple
   of seconds.
 
-## Settings menu
+## Settings
 
-Holding `-` for about half a second opens the Switch settings menu; a short press is still the
-game's `-`. The menu's framework is adapted from SwitchWakerHD's settings overlay by centollOS
-(see "Licenses" below): a panel with a tab bar across the top (Graphics, Display, Audio, Game,
-Controls and Developer), one scrolling page per tab. Use the D-pad or left stick to move, A to select
-or adjust, L and R to switch tabs, and B to close. Holding the focus on a row shows a short
-description of what it does. While the menu is open the game does not receive pad input, so
-nothing moves behind it.
+Holding `-` for about half a second opens the game's Options menu (upstream's, since
+v1.0.6); a short press is still the game's `-`. It has six pages: Display, Graphics, Sound,
+Game, Cheats and Controls. Use the D-pad or left stick to move, A to select or adjust, and B
+to close. While the menu is open the game pauses and does not receive pad input, so nothing
+moves behind it. Rows that do not apply on the Switch are not shown: there are no keyboard
+bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
 
-- **Graphics:** Resolution (0.75x, 1x, 1.5x or Auto), Aspect (original 4:3, 16:9, Fill Window or
-  cinematic 2.39:1; switching between 4:3 and widescreen takes effect after a restart, and the
-  menu says so on the row), Frame interpolation (Off, 120 or 180), Vsync, Bloom, Disable copy
-  filter, Skip draws while shaders compile, and Texture replacements (the master switch for
-  the replacement button icons and prompt pictures; takes effect after a restart, as the
-  row's own description says).
-- **Display:** Show FPS and Frame graph.
-- **Audio:** Master, Music, Sound effects, UI and Voices volume sliders, Mute, and the Audio
-  mix worker toggle.
-- **Game:** Controller vibration (rumble) and Spinning coins.
-- **Controls:** the gamepad bindings for the connected controller's style (a Pro Controller
-  edits the Nintendo table), two inputs per action. Select a slot and press the new input to
-  bind it; the change saves to `UserData/Config.toml` and applies in game right away, with no
-  restart. Press X on a focused slot to clear it, click either stick while binding to cancel,
-  and use Reset all to defaults to restore the built-in bindings for the style.
-- **Developer:** hidden until you turn on its "Show developer options" row, which is saved like
-  any other setting. It holds the renderer's fourteen diagnostic switches (each one also writes
-  back to `UserData/dk_diag.txt`, the file the same switches are read from at boot), plus Flush
-  logs and Mark log rows for test runs, a Texture dumps switch (writes every unmatched texture
-  to `Cache/texture_dumps` under the name a replacement would use, for making new replacement
-  pictures; takes effect after a restart), and a Clear shader cache row (deletes the compiled
-  shader cache on the next launch; the recovery step for a cache that has gone wrong).
-  Diagnostics can hurt performance or distort the picture; they are for bug reports, not for
-  play.
+- **Controls** remaps the gamepad. The page's lower block, labelled "Gamepad:", binds
+  player 1's twelve actions (two slots each): highlight a slot, press A, then press the
+  button or push the stick direction to bind; changes apply immediately, no restart. The
+  page's own Controller rows above it drive players 2 to 4 (unused by this single-player
+  game) and its vibration setting.
+- **Game** carries a "Developer tools" row. It opens this port's Developer shell: the rows
+  that have no place in the Options menu. The shell's framework is adapted from
+  SwitchWakerHD's settings overlay by centollOS (see "Licenses" below): one scrolling page
+  holding Bloom, Disable copy filter, Skip draws while shaders compile, Texture
+  replacements (the master switch for the replacement button icons and prompt pictures;
+  takes effect after a restart), Frame graph, UI volume, the Audio mix worker toggle and
+  Spinning coins, then the renderer's fourteen diagnostic switches (each one also writes
+  back to `UserData/dk_diag.txt`, the file the same switches are read from at boot), Flush
+  logs and Mark log rows for test runs, a Texture dumps switch (writes every unmatched
+  texture to `Cache/texture_dumps` under the name a replacement would use, for making new
+  replacement pictures; takes effect after a restart), and a Clear shader cache row
+  (deletes the compiled shader cache on the next launch; the recovery step for a cache that
+  has gone wrong). Diagnostics can hurt performance or distort the picture; they are for
+  bug reports, not for play.
 
 Fresh installs start at Resolution 1.5x (a 1280x720 render, the screen's native size in
-handheld), Aspect 16:9 and frame interpolation off. If you upgraded from an older release and
-the menu shows 2.25x and cinematic aspect, that is your old config file being kept, as
+handheld), Aspect 16:9 and frame rate 60. If you upgraded from an older release and the
+menu shows 2.25x and cinematic aspect, that is your old config file being kept, as
 promised above: set Resolution and Aspect here once and it stays.
 
 ## Known issues and performance
@@ -216,9 +210,10 @@ include/                     Horizon stand-ins for POSIX headers newlib lacks (s
 runtime/                     guest memory for Horizon, mmap/mprotect over svcSetMemoryPermission,
                              mbed TLS entropy/clock/recv, getifaddrs stub
 source/spm_switch_init.cpp   libnx startup: SD folders, stderr log, sockets, crash dump
-menu/spm_switch_menu.cpp     the Switch settings menu (plus include/spm_switch_menu.h): its
-                             framework is adapted from SwitchWakerHD's settings overlay;
-                             drawn from the overlay's Draw pass in place of the PC top bar
+menu/spm_switch_menu.cpp     the Developer shell (plus include/spm_switch_menu.h): what is
+                             left of the old Switch settings menu since the Options menu took
+                             over; its framework is adapted from SwitchWakerHD's settings
+                             overlay; drawn from the overlay's DrawTopBar seam
 sdl3_shim/                   SDL 3 implemented on libnx (sdl3_shim/PATCHES.md)
 dawn/                        SwitchWaker's Dawn recipe and Horizon patches
 aurora/                      Horizon shims for Aurora: the ImGui SDL backends and the sqlite journal
@@ -284,9 +279,16 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
 - `runtime/include/memory_access.h`: `FlatWriteRam*` honor checked access (phase 1 needs it).
 - `runtime/include/runtime_config.h`: graphics API `auto`; executable and data directories as on Apple/Android;
   `sdmc:/` paths count as absolute.
-- `runtime/src/settings_overlay.cpp`: on Switch the PC top bar is never drawn; its Draw routes to
-  the Switch settings menu (`switch/menu/`), F10 and Escape toggle that menu, and the guest
-  input block and status window offsets follow the menu's visibility.
+- `runtime/src/settings_overlay.cpp`: on Switch the PC top bar is never drawn; its DrawTopBar
+  seam draws the Developer shell (`switch/menu/`) when that is open, F10 and Escape toggle the
+  Options menu, hold-Minus opens it too, and the guest input block and status window offsets
+  follow either menu's visibility. A handful of rows do not apply on the Switch and are not
+  shown (keyboard bindings, the window row, open-folder rows, quit-to-desktop); the updater
+  is an inert stub (`switch/runtime/updater_horizon.cpp`), so its rows hide themselves.
+- `runtime/src/kpad.cpp`: one call routes guest pad input through the overlay's menu gate
+  while a menu is open, at the same place upstream put it.
+- `runtime/src/mod_runtime.cpp`: the native code-mod loader is compiled out on Switch; data
+  mods, Gecko codes and Riivolution patches still load.
 - `runtime/src/game_folder.cpp`: the game is the `game` folder beside the NRO (no folder picker).
 - `runtime/src/main.cpp`: graphics backend list; no POSIX fault handler.
 - `aurora-main/lib/webgpu/gpu.{hpp,cpp}`, `aurora-main/lib/aurora.cpp`: surfaceless on the Null device (`kSurfaceless`):
@@ -303,7 +305,7 @@ Each is a few lines, guarded by `__SWITCH__` or `MKW_PLATFORM_SWITCH`:
 The fork is GPLv3 like upstream. Code taken from SwitchWaker stays MIT and Dawn's patches stay
 BSD-3-Clause. The `deko/` interposer is MPL-2.0 (text in `licenses/MPL-2.0.txt`), as is the
 Mozilla CA bundle (`cacert.pem`) the runtime's HTTPS uses. `THIRD_PARTY.md` lists each file and
-its origin. The settings menu framework in `menu/` (its window, tab bar, gamepad navigation,
+its origin. The Developer shell's framework in `menu/` (its window, scrolling page, gamepad navigation,
 widget helpers and style) is adapted from SwitchWakerHD's settings overlay by
 [centollOS](https://github.com/centollOS/SwitchWakerHD), which builds on the ZeldaWWHDRecomp
 overlay, and stays MPL-2.0 like its source (`licenses/MPL-2.0.txt`); the menu's rows, settings
