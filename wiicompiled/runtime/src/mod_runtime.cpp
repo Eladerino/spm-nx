@@ -337,7 +337,9 @@ int ApiHook(uint32_t fn, SpmHookFn cb, void* user) {
     g_hooks[fn].push_back({cb, user});
     const uint32_t slot = (fn - 0x80000000u) >> 2;
     if (slot < g_hookBits.size() * 64) g_hookBits[slot >> 6] |= uint64_t(1) << (slot & 63);
+#if !defined(__SWITCH__)
     ModHooks::g_active = true;
+#endif
     return 1;
 }
 
@@ -440,7 +442,9 @@ void WriteSafe(uint32_t at, uint32_t size, uint32_t value) {
 } // namespace
 
 namespace ModHooks {
+#if !defined(__SWITCH__)
 bool g_active = false;
+#endif
 bool Run(uint32_t target, CpuContext* ctx) {
     // Most calls are to functions no mod hooked: one bit per 4-byte address of MEM1 answers that.
     const uint32_t slot = (target - 0x80000000u) >> 2;
