@@ -115,6 +115,10 @@ set(MBEDTLS_USER_CONFIG_FILE "${SPM_SWITCH_DIR}/include/spm_mbedtls_config.h" CA
 # CMAKE_<LANG>_COMPILER_LAUNCHER seeds the property of each target created after this point.
 set(CMAKE_C_COMPILER_LAUNCHER "${SPM_SWITCH_DIR}/cmake/clang-launcher.sh")
 set(CMAKE_CXX_COMPILER_LAUNCHER "${SPM_SWITCH_DIR}/cmake/clang-launcher.sh")
+# The launcher's thread-local model (native TLS through TPIDR_EL0, runtime/horizon_tls.c) is not on
+# the command line CMake sees, so a change to it would not rebuild anything. This definition names
+# it: changing the model means changing it here too, and every clang object rebuilds.
+add_compile_definitions(SPM_SWITCH_CLANG_TLS=tpidr_el0)
 
 # The Dawn backend toggles the runtime's aurora block reads: only the Null device exists here.
 macro(spm_switch_dawn_backends)
@@ -190,6 +194,7 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_pthread.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_tls.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_sdl.cpp"
         "${SPM_SWITCH_DIR}/runtime/updater_horizon.cpp"
         "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp")
@@ -202,6 +207,7 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_pthread.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_tls.c"
         PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
     set(${list_var} ${_sources} PARENT_SCOPE)
 endfunction()
@@ -340,6 +346,9 @@ function(spm_switch_configure_products)
     # works (runtime/horizon_pthread.c): libnx's default 128 KiB overflows in Tint, and libnx has no
     # pthread_detach, so std::thread::detach() threw and ended the game.
     target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=pthread_create" "LINKER:--wrap=pthread_detach")
+    # Every thread starts with TPIDR_EL0 set to libnx's thread pointer, which clang's thread_locals
+    # read (runtime/horizon_tls.c, cmake/clang-launcher.sh).
+    target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=threadCreate")
     # rename() over an existing file, which Horizon refuses and the NAND saves rely on
     # (runtime/horizon_unistd.c).
     target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=rename")
