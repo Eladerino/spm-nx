@@ -10,9 +10,6 @@ extern "C" uint8_t* aurora_load_png_rgba(const char* path, uint32_t* width, uint
 #include "netplay_ui.h"
 #include "settings_overlay.h"
 
-#if defined(__SWITCH__)
-#include "spm_switch_menu.h"
-#endif
 #include "audio_backend.h"
 #include "aurora_events.h"
 #include "controller_button_names.h"
@@ -87,6 +84,22 @@ void VI_HLE_SetSpeed(uint32_t speed);
 namespace AxDspHle {
 void SetMixWorkerEnabled(bool enabled);
 }
+
+#if defined(__SWITCH__)
+// The deko interposer's diag surface (switch/deko/dk.h, defined in device.cpp
+// in the spm_deko library, which the product links). Declared here rather
+// than included: dk.h pulls in deko3d and the shader translator, which the
+// runtime target does not build against. Signatures match dk.h. (These
+// declarations lived in the Developer shell's file until its rows moved into
+// the Options menu's Diagnostics page.)
+namespace swdk {
+bool diag_set(const char* key, bool on);
+bool diag_get(const char* key);
+void diag_flush_all(const char* reason);
+uint64_t diag_present_count();
+void log_flush();
+}  // namespace swdk
+#endif
 
 namespace settings_overlay {
 namespace {
@@ -333,14 +346,13 @@ bool g_topBarVisible = false;
 // below); forward-declared so OverlayMenuVisible can report it.
 bool OptionsMenuVisible();
 
-// The one visibility source every reader below shares: on Switch the top bar
-// is replaced by the Switch settings menu, whose state lives in
-// spm_switch_menu; the Options menu reports through here too, so the guest
-// pad block (spm_settings_menu_open) also holds while Options is open.
+// The one visibility source every reader below shares: on Switch the
+// Options menu is the port's only menu, so it reports through here, and
+// the guest pad block (spm_settings_menu_open) holds while it is open.
 // Elsewhere it is the bar's own flag.
 bool OverlayMenuVisible() {
 #if defined(__SWITCH__)
-    return spm_switch_menu::Visible() || OptionsMenuVisible();
+    return OptionsMenuVisible();
 #else
     return g_topBarVisible;
 #endif
@@ -569,9 +581,10 @@ std::string NativeBindingConfig(uint32_t binding) {
 
 void SetTopBarVisible(bool visible) {
 #if defined(__SWITCH__)
-    // Switch has no top bar: visibility is the Switch menu's, and the flag
+    // Switch has no top bar and no shell anymore: the Options menu is the
+    // port's only menu, toggled through RequestOptionsToggle, and the flag
     // stays false for the bar's own (unreached) drawing code below.
-    spm_switch_menu::SetVisible(visible);
+    (void)visible;
 #else
     if (g_topBarVisible == visible) {
         return;
@@ -2693,10 +2706,9 @@ void DrawMainWindow() {
 
 void DrawTopBar() {
 #if defined(__SWITCH__)
-    // The Switch settings menu replaces this bar: the bar's dropdowns are
-    // driven by ImGui navigation, which has no working pad path on the
-    // console. The menu polls the pad itself and tracks its own selection.
-    spm_switch_menu::Draw();
+    // Switch has no top bar: upstream's Options menu is the port's menu,
+    // and the Developer shell that used to draw in this slot was retired
+    // into that menu's Developer and Diagnostics pages. Nothing draws here.
     return;
 #endif
     static bool s_wasVisible = false;
@@ -2950,14 +2962,9 @@ void HandleEvents(const AuroraEvent* events) noexcept {
         }
         if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
 #if defined(__SWITCH__)
-            // The gamepad shim turns a hold of Minus into F10: that toggles the
-            // Options menu. If the Developer shell (the Switch menu) is the one
-            // open, F10 closes it instead, as it did before Options existed here.
-            if (spm_switch_menu::Visible()) {
-                SetTopBarVisible(false);
-            } else {
-                RequestOptionsToggle();
-            }
+            // The gamepad shim turns a hold of Minus into F10: that toggles
+            // the Options menu, the port's only menu.
+            RequestOptionsToggle();
 #else
             if (g_topBarVisible) {
                 SetTopBarVisible(false);
@@ -3013,7 +3020,7 @@ void HandleEvents(const AuroraEvent* events) noexcept {
 }
 
 // "Is the settings menu open", for weak consumers outside this file. On
-// Switch it reports the Switch settings menu's visibility; elsewhere the top
+// Switch it reports the Options menu's visibility; elsewhere the top
 // bar's. (The Switch gamepad shim once polled this once per pump for its
 // menu navigation filter; that filter is gone with the bar it fed. The
 // question stays here because this file owns the seams that drive the menu.)
@@ -3424,8 +3431,73 @@ void StepVolume(int& percent, int dir, void (*apply)(float), bool (*save)(float)
     save(percent / 100.0f);
 }
 
-constexpr const char* kOptTabs[] = {"Game", "Display", "Sound", "Controls", "Cheats", "Mods"};
+constexpr const char* kOptTabs[] = {
+    "Game", "Display", "Sound", "Controls", "Cheats", "Mods",
+#if defined(__SWITCH__)
+    "Developer", "Diagnostics",  // this port's own pages: the retired Developer shell's rows
+#endif
+};
 constexpr int kOptTabCount = int(std::size(kOptTabs));
+
+#if defined(__SWITCH__)
+// The dk_diag.txt keys the Diagnostics page carries, in page order, with the
+// Developer shell's row labels and help texts.
+constexpr const char* kDiagKeys[] = {
+    "depth_off", "cull_off", "magenta", "picdump", "efbclear", "bufdump", "texdump",
+    "shaderdump", "nomerge", "uvlog", "mtxlog", "perftimer", "arrayup", "profile",
+};
+constexpr const char* kDiagLabels[] = {
+    "Depth test off (depth_off)", "Face culling off (cull_off)", "Magenta unbound textures (magenta)",
+    "Dump frame pictures (picdump)", "Clear the EFB each pass (efbclear)", "Dump staged buffers (bufdump)",
+    "Dump textures (texdump)", "Dump shaders (shaderdump)", "No draw merging (nomerge)",
+    "UV trace (uvlog)", "Matrix trace (mtxlog)", "Performance timers (perftimer)",
+    "Re-upload vertex arrays (arrayup)", "Guest profiler (profile)",
+};
+constexpr const char* kDiagHelp[] = {
+    "Forces depth and stencil tests and depth writes off for every pipeline. Geometry can show through other geometry; for isolating depth problems.",
+    "Forces back-face culling off for every pipeline, so faces that would normally be hidden are drawn. For checking geometry that vanishes.",
+    "Clears the screen magenta before the finished picture is copied over it. Magenta left visible marks pixels the copy did not cover.",
+    "At a few presents, reads the picture back and logs sampled brightness, quadrant averages, and the centre pixel. It does not save an image.",
+    "Clears colour to magenta on EFB passes that have a depth target. If the result reaches the screen, those passes are reaching the picture.",
+    "At presents 600, 1800, and 3600, logs each live buffer's size, usage, and non-zero words. It waits for the GPU and can hitch.",
+    "At a few presents, saves the most-sampled textures and every mip level under UserData/Logs, for comparison with what appeared on screen.",
+    "Saves each newly compiled shader's WGSL and translated GLSL side by side under its cache key, so the code behind a suspect draw can be read.",
+    "Stops Aurora from merging compatible draws into one. This can slow rendering, but isolates bugs caused by merging.",
+    "Logs staged textures whose texture-coordinate scale and size disagree. For tracing textures that sample the wrong place.",
+    "Logs the texture matrices Aurora stages for each draw. For tracing draws that transform or sample textures incorrectly; output can be large.",
+    "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log. Use it to measure where frame time goes.",
+    "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data.",
+    "Samples the guest thread 200 times a second while on. Turning it off prints the most-sampled guest functions to the log.",
+};
+constexpr int kDiagCount = int(std::size(kDiagKeys));
+
+// Persist the full diag state after a Diagnostics flip, in the line format
+// diag_init parses (a line naming the key, "=0" for off, anything else on).
+// The shell's write-back, unchanged.
+void WriteDiagFileBack() {
+    FILE* file = std::fopen("/switch/spm-nx/UserData/dk_diag.txt", "w");
+    if (file == nullptr) {
+        std::fprintf(stderr, "[diag] menu: could not write back dk_diag.txt\n");
+        return;
+    }
+    for (const char* key : kDiagKeys) {
+        std::fprintf(file, "%s=%d\n", key, swdk::diag_get(key) ? 1 : 0);
+    }
+    std::fclose(file);
+}
+
+void SetDiagKey(int n, bool on) {
+    const char* key = kDiagKeys[n];
+    if (!swdk::diag_set(key, on)) return;
+    // diag_cmd_poll's marker format (device.cpp): diag_set does not log, so
+    // the menu emits the marker itself, then persists the file like the file
+    // had been edited by hand.
+    std::fprintf(stderr, "[diag] set %s=%s at present %llu\n", key, on ? "1" : "0",
+                 static_cast<unsigned long long>(swdk::diag_present_count()));
+    swdk::log_flush();
+    WriteDiagFileBack();
+}
+#endif
 
 std::vector<OptRow> OptionsRows(int tab) {
     std::vector<OptRow> rows;
@@ -3485,11 +3557,13 @@ std::vector<OptRow> OptionsRows(int tab) {
             SpmMapSweep::ReturnToTitle();
             SetOptionsOpen(false);
         }, "Leave the game without saving and go back to the title screen."});
+#if !defined(__SWITCH__)
         rows.push_back({"Developer tools", "", [](int d) {
             if (d != 0) return;
             SetOptionsOpen(false);
             SetTopBarVisible(true);
         }, "Warps, items and flags, for testing. F10 closes it."});
+#endif
 #if !defined(__SWITCH__)
         rows.push_back({"Quit to desktop", "", [](int d) {
             if (d != 0) return;
@@ -3652,6 +3726,99 @@ std::vector<OptRow> OptionsRows(int tab) {
             std::filesystem::create_directories(ModInstall::Folder(), ec);
             SDL_OpenURL(("file:///" + RuntimeConfigFile::PathToUtf8(ModInstall::Folder())).c_str());
         }, "Put a mod's .zip (or its folder) here; it is installed the next time the game starts."});
+#endif
+    } else if (tab == 6) {
+#if defined(__SWITCH__)
+        // This port's own page: the Developer shell's renderer and audio
+        // rows, with the shell's labels and the same getter / apply calls.
+        rows.push_back({"Bloom", OnOff((RuntimeConfigFile::DisabledPostProcessingPaths(0) & 0x10u) == 0), [](int) {
+            // Bloom is bit 0x10 of the disable mask; the row is ON when the bit is CLEAR.
+            const uint32_t paths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
+            const uint32_t next = (paths & 0x10u) == 0 ? (paths | 0x10u) : (paths & ~0x10u);
+            RuntimeGameGraphicsOptions::SetDisabledPostProcessingPaths(next);
+            RuntimeConfigFile::SetDisabledPostProcessingPaths(next);
+        }, "Enables the game's bloom post-processing. Bloom is the only post-processing path this build can switch off."});
+        const bool copyFilter = RuntimeConfigFile::DisableCopyFilter(true);
+        rows.push_back({"Disable copy filter", OnOff(copyFilter), [copyFilter](int) {
+            aurora_set_disable_copy_filter(!copyFilter);
+            RuntimeConfigFile::SetDisableCopyFilter(!copyFilter);
+        }, "When on, EFB copies bypass the game's copy filter. Their filtering can look different from the game's intended result."});
+        const bool skipDraws = RuntimeConfigFile::SkipUnreadyPipelines(true);
+        rows.push_back({"Skip draws while shaders compile", OnOff(skipDraws), [skipDraws](int) {
+            aurora_set_skip_unready_pipelines(!skipDraws);
+            RuntimeConfigFile::SetSkipUnreadyPipelines(!skipDraws);
+        }, "When a shader is still compiling, skip its draws instead of pausing to wait. This avoids compile hitches, but some effects may be missing briefly."});
+        const bool texReplacements = RuntimeConfigFile::TextureReplacements(true);
+        rows.push_back({"Texture replacements", OnOff(texReplacements), [texReplacements](int) {
+            // No Set* wrapper exists for this key (the PC launcher owns it
+            // there), so the row does what a setter does: update the live
+            // config, then write the file through WriteSetting. The
+            // replacement index itself is built once at startup, so the
+            // flip only takes effect on the next launch (the row says so).
+            RuntimeConfigFile::Mutable().textureReplacements = !texReplacements;
+            RuntimeConfigFile::WriteSetting("video", "texture_replacements", !texReplacements ? "true" : "false");
+        }, "Enables replacement textures, including button icons, prompt pictures, the Controls panel, and installed texture packs. Applies after a restart."});
+        rows.push_back({"Frame graph", OnOff(FrameGraph()), [](int) { SetFrameGraph(!FrameGraph()); },
+                        "Adds a rolling graph of the last 180 frame times to the FPS overlay, so spikes and uneven pacing are easy to see."});
+        const int uiVolume = std::clamp(static_cast<int>(std::lround(RuntimeConfigFile::UiVolume(1.0f) * 100.0f)), 0, 100);
+        rows.push_back({"UI volume", Percent(uiVolume), [uiVolume](int d) {
+            int percent = std::clamp(uiVolume + (d == 0 ? 10 : d * 10), 0, 100);
+            if (d == 0 && percent == 100) percent = 0;
+            // The apply + persist pair is the PC Audio handler's own calls.
+            const float value = static_cast<float>(percent) / 100.0f;
+            MusicAttenuation::SetUiVolume(value);
+            RuntimeConfigFile::SetUiVolume(value);
+        }, "Controls the loudness of menu and interface sounds."});
+        const bool mixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
+        rows.push_back({"Audio mix worker", OnOff(mixWorker), [mixWorker](int) {
+            AxDspHle::SetMixWorkerEnabled(!mixWorker);
+            RuntimeConfigFile::SetAudioMixWorker(!mixWorker);
+        }, "Runs the AX/DSP voice mix on a worker thread instead of inline. Turn it off if you suspect an audio problem."});
+        rows.push_back({"Spinning coins", OnOff(SpinningCoins()), [](int) { SetSpinningCoins(!SpinningCoins()); },
+                        "Enables Aurora's animated tile texture patches, including spinning coins and ? blocks. Turn it off if a patched tile looks wrong."});
+        const bool texDumps = RuntimeConfigFile::TextureDumps(false);
+        rows.push_back({"Texture dumps", OnOff(texDumps), [texDumps](int) {
+            // Same shape as Texture replacements above; main.cpp reads the
+            // pair once while Aurora initializes.
+            RuntimeConfigFile::Mutable().textureDumps = !texDumps;
+            RuntimeConfigFile::WriteSetting("video", "texture_dumps", !texDumps ? "true" : "false");
+        }, "Saves textures with no replacement to Cache/texture_dumps under the names a replacement would use, for making new pictures. Applies after a restart."});
+        rows.push_back({"Clear shader cache", "", [](int d) {
+            if (d != 0) return;
+            // The cache cannot be deleted from inside a running session:
+            // shaders.cpp appends a record for every shader compiled, all
+            // session long, so the next compile would recreate the file (and
+            // recreate it headerless, to be discarded at load anyway). Leave
+            // the sentinel instead (path must match kClearPath in
+            // switch/deko/shaders.cpp); shaders_init deletes cache + sentinel
+            // before the cache is read on the next launch.
+            FILE* file = std::fopen("/switch/spm-nx/UserData/dksh_cache.clear", "w");
+            if (file != nullptr) {
+                std::fclose(file);
+            } else {
+                std::fprintf(stderr, "[diag] menu: could not write dksh_cache.clear\n");
+            }
+        }, "Requests deletion of the compiled shader cache at the next launch. Use it for a cache that has gone wrong; shaders then compile again as needed."});
+#endif
+    } else if (tab == 7) {
+#if defined(__SWITCH__)
+        // The deko renderer's diagnostic switches, then the log actions.
+        // Flipping one persists the whole set back to dk_diag.txt, exactly
+        // as it did from the Developer shell.
+        for (int n = 0; n < kDiagCount; ++n) {
+            const bool on = swdk::diag_get(kDiagKeys[n]);
+            rows.push_back({kDiagLabels[n], OnOff(on), [n, on](int) { SetDiagKey(n, !on); }, kDiagHelp[n]});
+        }
+        rows.push_back({"Flush logs", "", [](int d) {
+            if (d == 0) swdk::diag_flush_all("menu");
+        }, "Writes buffered diagnostic output to stderr.log now. If performance timers are on, it also prints their partial 600-frame window."});
+        rows.push_back({"Mark log", "", [](int d) {
+            if (d != 0) return;
+            // diag_cmd_poll's mark, verbatim format: the line, then the flush.
+            std::fprintf(stderr, "[diag] mark \"%s\" at present %llu\n", "menu",
+                         static_cast<unsigned long long>(swdk::diag_present_count()));
+            swdk::diag_flush_all("mark");
+        }, "Writes a 'menu' marker at the current frame and flushes the log, so a moment in a test run is easy to find later."});
 #endif
     } else {
         rows.push_back({"Vibration", OnOff(g_rumbleEnabled), [](int) {

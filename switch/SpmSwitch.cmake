@@ -186,8 +186,7 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_pthread.c"
-        "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp"
-        "${SPM_SWITCH_DIR}/menu/spm_switch_menu.cpp")
+        "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp")
     # The runtime's precompiled header is C++ (mkw_pch.h); these are the only C files in its targets.
     # They also stay out of its unity build: CMake would merge them into a generated unity_*_c.c
     # file that still gets the PCH, whatever these files' own SKIP_PRECOMPILE_HEADERS says.

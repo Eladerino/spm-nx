@@ -4,7 +4,7 @@
 
 spm-nx runs the New Super Paper Bros recomp as a homebrew NRO on a modded Nintendo Switch (Horizon), rendered by the port's deko3d backend, and it boots and plays on real hardware. It needs the files from your own USA disc (R8PE01, revision 0), placed in `/switch/spm-nx/game` on the SD card. No game data is included in this repository or in the release zips.
 
-The port tracks upstream closely: release v1.0.6 of the PC project is merged in wholesale, and upstream's in-game Options menu is the port's menu (hold Minus to open it), bringing save anywhere, fast-forward, character switch, cheats and Gecko codes, and data mods. Player 1 remapping lives in that menu's Controls page, and the port's own developer tools sit behind its Developer tools entry. Performance in heavy areas is the port's known open problem.
+The port tracks upstream closely: release v1.0.6 of the PC project is merged in wholesale, and upstream's in-game Options menu is the port's menu (hold Minus to open it), bringing save anywhere, fast-forward, character switch, cheats and Gecko codes, and data mods. Player 1 remapping lives in that menu's Controls page, and the port's own developer tools live on two pages this port adds to that menu, Developer and Diagnostics. Performance in heavy areas is the port's known open problem.
 
 Installing and building the Switch version are documented in [`switch/README.md`](switch/README.md). Full credits are in the [Credits](#credits) section below.
 
@@ -160,9 +160,7 @@ the result for Horizon instead of Windows.
 - **[SwitchWaker](https://github.com/centollOS/SwitchWaker) and
   [SwitchWakerHD](https://github.com/centollOS/SwitchWakerHD)** by centollOS, MIT: the Switch
   layer's SDL shim and Dawn recipe come from SwitchWaker, and the deko3d renderer descends
-  from SwitchWakerHD's backend through it. Of this port's own earlier settings menu, only the
-  Developer shell remains (behind the Options menu's Developer tools entry); its framework is
-  modelled on SwitchWakerHD's overlay. Per-file origins are in
+  from SwitchWakerHD's backend through it. Per-file origins are in
   [`switch/THIRD_PARTY.md`](switch/THIRD_PARTY.md)
 - **[deko3d](https://github.com/devkitPro/deko3d) and [uam](https://github.com/devkitPro/uam)** by
   devkitPro and contributors, zlib: the GPU API and the GLSL to DKSH shader compiler the Switch
