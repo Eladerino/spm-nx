@@ -27,8 +27,9 @@ European disc (R8PP01) does not work with the Switch build yet.
 1. Download the Switch release zip and unzip it on your computer.
 2. Copy the `switch` folder from the zip to the root of the SD card, merging with the `switch`
    folder already there. You should end up with `sdmc:/switch/spm-nx/` holding `spm-nx.nro`,
-   its companion files (`dsp_coef.bin`, `cacert.pem` and `wii_bootstrap/`) and a `licenses/`
-   folder with the license texts for everything in the package.
+   its companion files (`dsp_coef.bin`, `cacert.pem` and `wii_bootstrap/`), a `licenses/`
+   folder with the license texts for everything in the package, and
+   `UserData/button_icons/` with the Switch button prompt icons (see Licenses).
 3. Extract your disc image and put the extracted disc (the folder that itself contains `files`
    and `sys`) in `sdmc:/switch/spm-nx/game/`. One way to extract it is the upstream launcher's
    `--extract` command, shown in the root README's "Building from source".
@@ -39,13 +40,15 @@ European disc (R8PP01) does not work with the Switch build yet.
    The first session builds the shader and pipeline caches as new effects appear, so it can
    hitch in places the second session does not. Nothing is wrong when that happens.
 
-Settings, saves and caches live in `sdmc:/switch/spm-nx/UserData/`, which the game creates
-beside the NRO on the first run. Do not delete that folder to "clean up": your saves and the
-caches that make later launches fast are in it.
+Settings, saves and caches live in `sdmc:/switch/spm-nx/UserData/` beside the NRO (the
+package seeds it with `button_icons/`; the game creates the rest on the first run). Do not
+delete that folder to "clean up": your saves and the caches that make later launches fast
+are in it.
 
 **Updating:** unzip the new release over the old `switch/spm-nx/` folder, replacing the NRO and
-its companion files. `UserData/` and `game/` are yours and are not part of the release, so
-saves, settings and caches carry over. One catch: the game never rewrites an existing
+its companion files. `UserData/` and `game/` are yours and carry over, saves, settings and
+caches included; the one release-owned corner is `UserData/button_icons/`, which the unzip
+refreshes so a stale icon set cannot win over the current one. One catch: the game never rewrites an existing
 `UserData/Config.toml`, so an install that started on an older release keeps the settings it
 already has (including the old PC-style defaults, if it has them) until you change them in the
 settings menu. Fresh installs get the current Switch defaults.
@@ -290,6 +293,15 @@ its origin. The settings menu in `menu/` is this fork's own code under GPLv3; it
 SwitchWakerHD's overlay patterns (pad polling with edge detection, the developer options gate,
 confirm on the face-down button and back on face-right), which is a design reference, not copied
 code.
+
+The button prompt icons staged into `UserData/button_icons/` are "Input Prompts" by
+[Kenney](https://kenney.nl), CC0, generated at build time from the SVGs vendored in
+`tools/button-art/`; the CC0 text travels with them as `UserData/button_icons/Kenney-License.txt`.
+Only the files drawn from that CC0 art alone ship: the generator's other outputs composite the
+glyphs into the HD texture pack's redrawn game textures, and those are never staged. The full
+set (the in-game prompt pictures replaced, and a Controls panel that opens) stays a
+do-it-yourself drop-in: run `tools/make-button-icons.py` against your own copy of the HD pack
+and copy the resulting `button_icons/` into `UserData/`.
 
 For the project's position on Nintendo's trademarks and copyrighted material, see the Legal notice
 in the root [`README.md`](../README.md).
