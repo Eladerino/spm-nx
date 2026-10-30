@@ -102,7 +102,15 @@ struct RowDef {
     const char* section;
     RowId id;
     const char* label;
+    const char* description;
 };
+
+// Description budget, measured from the draw code below: the window is
+// 560 px wide with the default 8 px window padding on each side, leaving
+// 544 px. The built-in 13 px font advances 7 px per character, so a line
+// holds 77 characters and the fixed two-line area holds 154. Every row's
+// description stays inside that budget (the host harness checks it).
+constexpr size_t kMaxDescriptionChars = 154;
 
 constexpr RowId DiagRow(int n) {
     return static_cast<RowId>(static_cast<int32_t>(RowId::kDiagFirst) + n);
@@ -110,46 +118,56 @@ constexpr RowId DiagRow(int n) {
 
 // Section order per the replacement-menu spec: Graphics, Display, Audio,
 // Game, Developer.
-const RowDef kRows[] = {
-    {"Graphics", RowId::kResolution, "Resolution"},
-    {"Graphics", RowId::kFrameInterp, "Frame interpolation"},
-    {"Graphics", RowId::kAspect, "Aspect"},
-    {"Graphics", RowId::kVsync, "Vsync"},
-    {"Graphics", RowId::kBloom, "Bloom"},
-    {"Graphics", RowId::kCopyFilter, "Disable copy filter"},
-    {"Graphics", RowId::kSkipDraws, "Skip draws while shaders compile"},
-    {"Graphics", RowId::kTexReplacements, "Texture replacements"},
-    {"Display", RowId::kShowFps, "Show FPS"},
-    {"Display", RowId::kFrameGraph, "Frame graph"},
-    {"Audio", RowId::kMasterVolume, "Master volume"},
-    {"Audio", RowId::kMusicVolume, "Music volume"},
-    {"Audio", RowId::kSfxVolume, "Sound effects volume"},
-    {"Audio", RowId::kUiVolume, "UI volume"},
-    {"Audio", RowId::kVoicesVolume, "Voices volume"},
-    {"Audio", RowId::kMute, "Mute"},
-    {"Audio", RowId::kMixWorker, "Audio mix worker"},
-    {"Game", RowId::kRumble, "Controller vibration"},
-    {"Game", RowId::kSpinningCoins, "Spinning coins"},
-    {"Developer", RowId::kDevGate, "Show developer options"},
-    {"Developer", DiagRow(0), "Depth test off (depth_off)"},
-    {"Developer", DiagRow(1), "Face culling off (cull_off)"},
-    {"Developer", DiagRow(2), "Magenta unbound textures (magenta)"},
-    {"Developer", DiagRow(3), "Dump frame pictures (picdump)"},
-    {"Developer", DiagRow(4), "Clear the EFB each pass (efbclear)"},
-    {"Developer", DiagRow(5), "Dump staged buffers (bufdump)"},
-    {"Developer", DiagRow(6), "Dump textures (texdump)"},
-    {"Developer", DiagRow(7), "Dump shaders (shaderdump)"},
-    {"Developer", DiagRow(8), "No draw merging (nomerge)"},
-    {"Developer", DiagRow(9), "UV trace (uvlog)"},
-    {"Developer", DiagRow(10), "Matrix trace (mtxlog)"},
-    {"Developer", DiagRow(11), "Performance timers (perftimer)"},
-    {"Developer", DiagRow(12), "Re-upload vertex arrays (arrayup)"},
-    {"Developer", DiagRow(13), "Guest profiler (profile)"},
-    {"Developer", RowId::kFlushLogs, "Flush logs"},
-    {"Developer", RowId::kMarkLog, "Mark log"},
-    {"Developer", RowId::kTexDumps, "Texture dumps"},
-    {"Developer", RowId::kClearShaderCache, "Clear shader cache"},
+constexpr RowDef kRows[] = {
+    {"Graphics", RowId::kResolution, "Resolution", "Scales the rendered picture from the game's 480-line base. Auto matches the screen size; lower values reduce renderer work."},
+    {"Graphics", RowId::kFrameInterp, "Frame interpolation", "Presents extra frames between the game's own frames. On the 60 Hz screen it mainly duplicates frames and costs worker time. Off is recommended."},
+    {"Graphics", RowId::kAspect, "Aspect", "Chooses the picture shape: the game's original 4:3, 16:9, filling the screen, or cinematic 2.39:1."},
+    {"Graphics", RowId::kVsync, "Vsync", "Waits for the display refresh before showing a finished frame. This prevents tearing, but a missed refresh waits for the next one."},
+    {"Graphics", RowId::kBloom, "Bloom", "Enables the game's bloom post-processing. Bloom is the only post-processing path this build can switch off."},
+    {"Graphics", RowId::kCopyFilter, "Disable copy filter", "When on, EFB copies bypass the game's copy filter. Their filtering can look different from the game's intended result."},
+    {"Graphics", RowId::kSkipDraws, "Skip draws while shaders compile", "When a shader is still compiling, skip its draws instead of pausing to wait. This avoids compile hitches, but some effects may be missing briefly."},
+    {"Graphics", RowId::kTexReplacements, "Texture replacements", "Enables replacement textures, including button icons, prompt pictures, the Controls panel, and installed texture packs. Applies after a restart."},
+    {"Display", RowId::kShowFps, "Show FPS", "Shows the presented frame rate over the game. If interpolation makes display and motion rates differ, it shows the motion rate too."},
+    {"Display", RowId::kFrameGraph, "Frame graph", "Adds a rolling graph of the last 180 frame times to the FPS overlay, so spikes and uneven pacing are easy to see."},
+    {"Audio", RowId::kMasterVolume, "Master volume", "Controls the overall loudness of all game audio."},
+    {"Audio", RowId::kMusicVolume, "Music volume", "Controls the loudness of the game's music."},
+    {"Audio", RowId::kSfxVolume, "Sound effects volume", "Controls the loudness of sound effects."},
+    {"Audio", RowId::kUiVolume, "UI volume", "Controls the loudness of menu and interface sounds."},
+    {"Audio", RowId::kVoicesVolume, "Voices volume", "Controls the loudness of character voices."},
+    {"Audio", RowId::kMute, "Mute", "Silences all game audio without changing any volume slider."},
+    {"Audio", RowId::kMixWorker, "Audio mix worker", "Runs the AX/DSP voice mix on a worker thread instead of inline. Turn it off if you suspect an audio problem."},
+    {"Game", RowId::kRumble, "Controller vibration", "Allows the game to vibrate the controller for rumble effects."},
+    {"Game", RowId::kSpinningCoins, "Spinning coins", "Enables Aurora's animated tile texture patches, including spinning coins and ? blocks. Turn it off if a patched tile looks wrong."},
+    {"Developer", RowId::kDevGate, "Show developer options", "Shows the Developer rows in this menu. They expose renderer diagnostics for test runs and bug reports, and this choice is saved."},
+    {"Developer", DiagRow(0), "Depth test off (depth_off)", "Forces depth and stencil tests and depth writes off for every pipeline. Geometry can show through other geometry; for isolating depth problems."},
+    {"Developer", DiagRow(1), "Face culling off (cull_off)", "Forces back-face culling off for every pipeline, so faces that would normally be hidden are drawn. For checking geometry that vanishes."},
+    {"Developer", DiagRow(2), "Magenta unbound textures (magenta)", "Clears the screen magenta before the finished picture is copied over it. Magenta left visible marks pixels the copy did not cover."},
+    {"Developer", DiagRow(3), "Dump frame pictures (picdump)", "At a few presents, reads the picture back and logs sampled brightness, quadrant averages, and the centre pixel. It does not save an image."},
+    {"Developer", DiagRow(4), "Clear the EFB each pass (efbclear)", "Clears colour to magenta on EFB passes that have a depth target. If the result reaches the screen, those passes are reaching the picture."},
+    {"Developer", DiagRow(5), "Dump staged buffers (bufdump)", "At presents 600, 1800, and 3600, logs each live buffer's size, usage, and non-zero words. It waits for the GPU and can hitch."},
+    {"Developer", DiagRow(6), "Dump textures (texdump)", "At a few presents, saves the most-sampled textures and every mip level under UserData/Logs, for comparison with what appeared on screen."},
+    {"Developer", DiagRow(7), "Dump shaders (shaderdump)", "Saves each newly compiled shader's WGSL and translated GLSL side by side under its cache key, so the code behind a suspect draw can be read."},
+    {"Developer", DiagRow(8), "No draw merging (nomerge)", "Stops Aurora from merging compatible draws into one. This can slow rendering, but isolates bugs caused by merging."},
+    {"Developer", DiagRow(9), "UV trace (uvlog)", "Logs staged textures whose texture-coordinate scale and size disagree. For tracing textures that sample the wrong place."},
+    {"Developer", DiagRow(10), "Matrix trace (mtxlog)", "Logs the texture matrices Aurora stages for each draw. For tracing draws that transform or sample textures incorrectly; output can be large."},
+    {"Developer", DiagRow(11), "Performance timers (perftimer)", "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log. Use it to measure where frame time goes."},
+    {"Developer", DiagRow(12), "Re-upload vertex arrays (arrayup)", "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data."},
+    {"Developer", DiagRow(13), "Guest profiler (profile)", "Samples the guest thread 200 times a second while on. Turning it off prints the most-sampled guest functions to the log."},
+    {"Developer", RowId::kFlushLogs, "Flush logs", "Writes buffered diagnostic output to stderr.log now. If performance timers are on, it also prints their partial 600-frame window."},
+    {"Developer", RowId::kMarkLog, "Mark log", "Writes a 'menu' marker at the current frame and flushes the log, so a moment in a test run is easy to find later."},
+    {"Developer", RowId::kTexDumps, "Texture dumps", "Saves textures with no replacement to Cache/texture_dumps under the names a replacement would use, for making new pictures. Applies after a restart."},
+    {"Developer", RowId::kClearShaderCache, "Clear shader cache", "Requests deletion of the compiled shader cache at the next launch. Use it for a cache that has gone wrong; shaders then compile again as needed."},
 };
+
+constexpr bool DescriptionsWithinBudget() {
+    for (const RowDef& row : kRows) {
+        size_t length = 0;
+        while (row.description[length] != '\0') ++length;
+        if (length == 0 || length > kMaxDescriptionChars) return false;
+    }
+    return true;
+}
+static_assert(DescriptionsWithinBudget(), "every menu row needs a description inside the two-line budget");
 
 // The dk_diag.txt keys, in the spec's table order; kDiagFirst + n indexes it.
 const char* const kDiagKeys[] = {
@@ -676,14 +694,24 @@ void Draw() {
                 (settings_overlay::Aspect() != DisplaySettings::kAspect4x3) != DisplaySettings::GameWidescreen()) {
                 ImGui::TextDisabled("Switching between 4:3 and widescreen takes effect after a restart");
             }
-            if (row.id == RowId::kTexDumps) {
-                ImGui::TextDisabled("Writes unmatched textures to Cache/texture_dumps under the names a replacement would use");
-            }
-            if (row.id == RowId::kTexReplacements || row.id == RowId::kTexDumps) {
-                ImGui::TextDisabled("Takes effect after a restart");
-            }
             ++index;
         }
+        // The focused row's description, in a fixed-height area at the
+        // bottom of the content: two text lines are reserved whether the
+        // text fills them or not, so the row list above never moves while
+        // the selection changes. The child's own padding is zeroed so the
+        // full content width (and the budget measured for kRows) applies.
+        const RowDef& focusedRow = VisibleRowAt(g_selected);
+        ImGui::Separator();
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        if (ImGui::BeginChild("Selected row description",
+                              ImVec2(0.0f, ImGui::GetTextLineHeight() * 2.0f), false,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
+                                  ImGuiWindowFlags_NoNav)) {
+            ImGui::TextWrapped("%s", focusedRow.description);
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
         if (!g_status.empty() && ImGui::GetTime() < g_statusUntil) {
             ImGui::Separator();
             ImGui::Text("%s", g_status.c_str());
