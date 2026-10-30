@@ -12,10 +12,11 @@
 #   search order, so the objects link with the rest of the NRO (built by GCC).
 #   clang's own resource directory replaces GCC's (intrinsics, stddef.h...).
 # - GCC's thread pointer model (-mtp=soft: libnx's __aarch64_read_tp) has no
-#   clang equivalent, so thread_local variables use emulated TLS
-#   (__emutls_get_address from devkitA64's libgcc). The runtime has several
-#   (guest CPU context, SEH-style recovery targets); emulated TLS costs a call
-#   per access, which is worth measuring once the game runs.
+#   clang equivalent. Emulated TLS (libgcc's __emutls_get_address) worked but
+#   cost three calls per thread_local access, on paths the runtime reads on
+#   every guest call. clang reads TPIDR_EL0 instead (-mtp=el0), local-exec as
+#   GCC's code is (one static image), and runtime/horizon_tls.c makes
+#   TPIDR_EL0 equal libnx's thread pointer on every thread.
 set -euo pipefail
 
 compiler=$1
@@ -50,5 +51,5 @@ if [[ $cxx == 1 ]]; then
 fi
 includes+=(-isystem "$resource/include" -isystem "$gcc_root/include")
 
-exec "$clang" --target=aarch64-none-elf -mcpu=cortex-a57 -femulated-tls \
+exec "$clang" --target=aarch64-none-elf -mcpu=cortex-a57 -mtp=el0 -ftls-model=local-exec \
     "${includes[@]}" "${args[@]}"

@@ -137,17 +137,24 @@ void MakeDirectory(const char* path) {
 
 extern "C" {
 
+// runtime/horizon_tls.c: the thread pointer clang's thread_locals use (TPIDR_EL0) for this thread.
+void spm_switch_tls_init_main_thread(void);
+void spm_switch_tls_check_main_thread(void);
+
 // The exception handler runs on its own stack: the faulting thread's may be the problem.
 alignas(16) u8 __nx_exception_stack[0x4000];
 u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
 
 void userAppInit(void) {
+    // Before anything that could touch a thread_local: libnx runs the static constructors after this.
+    spm_switch_tls_init_main_thread();
     MakeDirectory(kRoot);
     MakeDirectory(kUserData);
     MakeDirectory(kLogs);
     if (std::freopen(kStderrLog, "w", stderr) != nullptr) {
         std::setvbuf(stderr, nullptr, _IOLBF, 0);  // line-buffered: a crash keeps the last lines
     }
+    spm_switch_tls_check_main_thread();
     setenv("WIICOMPILED_RUNTIME_DIR", kRoot, 1);
     setenv("WIICOMPILED_DATA_DIR", kUserData, 1);
 
