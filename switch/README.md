@@ -81,17 +81,20 @@ Two of those deserve a line each:
 ## Settings menu
 
 Holding `-` for about half a second opens the Switch settings menu; a short press is still the
-game's `-`. The menu is a single window made for the pad: D-pad or left stick moves, A selects
-or cycles a value forward, Left and Right adjust the selected row, and B closes it. A short
-description of the selected row is shown at the bottom of the window. While the
+game's `-`. The menu is a top bar made for the pad: Left and Right (D-pad or left stick) move along
+the bar between its Graphics, Display, Audio, Game and Developer sections, A or Down
+opens the focused section, Up and Down move inside it, Left and Right adjust the
+focused row (on a row they do not adjust, they switch to the next section instead),
+and B closes the section, then the menu. A short description of the focused row, or
+of the section when none is open, is shown at the bottom of the screen. While the
 menu is open the game does not receive pad input, so nothing moves behind it.
 
 - **Graphics:** Resolution (0.75x, 1x, 1.5x or Auto), Aspect (original 4:3, 16:9, Fill Window or
   cinematic 2.39:1; switching between 4:3 and widescreen takes effect after a restart, and the
   menu says so on the row), Frame interpolation (Off, 120 or 180), Vsync, Bloom, Disable copy
   filter, Skip draws while shaders compile, and Texture replacements (the master switch for
-  the replacement button icons and prompt pictures; takes effect after a restart, and the menu
-  says so on the row).
+  the replacement button icons and prompt pictures; takes effect after a restart, as the
+  row's description at the bottom of the screen says).
 - **Display:** Show FPS and Frame graph.
 - **Audio:** Master, Music, Sound effects, UI and Voices volume sliders, Mute, and the Audio
   mix worker toggle.
