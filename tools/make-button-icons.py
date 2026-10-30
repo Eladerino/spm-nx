@@ -213,12 +213,12 @@ def controller_picture(style, name=None):
     return out.crop(out.getchannel("A").getbbox())
 
 
-def render(src, kind, buttons, style):
+def render(src, kind, buttons, style, names=None):
     img = Image.open(src).convert("RGBA")
     w, h = img.size
     changed = kind == "none"  # unchanged art, only there to be reported (a marker)
     for button, fx, fy, fr in buttons:
-        name = STYLES[style].get(button) if button else None
+        name = (names or {}).get(button, STYLES[style].get(button)) if button else None
         if name is None:
             continue
         if kind == "tippi":
@@ -320,7 +320,11 @@ def build_clean(out_root):
     # The pack-independent prompt textures (PROMPT_CLEAN_KINDS): rendered from a blank canvas at
     # the pack's 8x size and saved at 4x under their own names, like the full set, so the in-game
     # prompts they belong to (the button glyphs inside text boxes, the shake prompt's icon) show
-    # Switch buttons in the package too.
+    # Switch buttons in the package too. The glyphs' pictures follow the port's pad mapping, the
+    # same override the panel's icons take above: STYLES follows virtual_remote.cpp's
+    # position-based defaults (Wii 1 = Y, Wii A = X), but the pad layer reports the buttons by
+    # name, one step around the diamond, so Wii 1 is the pad's X and Wii A its Y. The shake
+    # icon's R is the same under both mappings, so it needs no override.
     for name, kind, buttons in TEXTURES:
         if kind not in PROMPT_CLEAN_KINDS:
             continue
@@ -328,7 +332,8 @@ def build_clean(out_root):
         with tempfile.TemporaryDirectory() as tmp:
             blank = os.path.join(tmp, name)
             Image.new("RGBA", (w * 8, h * 8), (0, 0, 0, 0)).save(blank)
-            img = render(blank, kind, buttons, style)
+            img = render(blank, kind, buttons, style,
+                         names={"1": "switch_button_x", "A": "switch_button_y"})
         img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
         img.save(os.path.join(out, name))
     print(f"{style} (clean): -> {out}")
