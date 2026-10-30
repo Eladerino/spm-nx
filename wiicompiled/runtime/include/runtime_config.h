@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -702,14 +703,22 @@ inline const std::optional<std::string>& ControllerButton(size_t index) {
 // user-specific paths. This is used by the in-game F10 settings bar.
 inline bool WriteSetting(std::string_view section, std::string_view key, std::string_view value) {
     const auto path = ResolveConfigPath();
-    std::ifstream input(path);
     std::vector<std::string> lines;
-    std::string line;
-    while (std::getline(input, line)) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
+    {
+        // The reader is scoped on purpose: it must be closed again before the
+        // write below opens the same file. The Switch filesystem refuses a
+        // write open of a file that is still open for reading, so with the
+        // reader held open every in-game settings change failed its write
+        // there ("[runtime-config] Unable to write .../Config.toml" in the
+        // log) and was lost on the next launch.
+        std::ifstream input(path);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            lines.push_back(std::move(line));
         }
-        lines.push_back(std::move(line));
     }
 
     const std::string normalizedSection = Trim(section);
@@ -768,8 +777,26 @@ inline bool WriteSetting(std::string_view section, std::string_view key, std::st
     }
     std::ofstream output(path, std::ios::trunc);
     if (!output) {
-        std::cerr << "[runtime-config] Unable to write " << PathToUtf8(path) << std::endl;
-        return false;
+        // Fall back to C stdio before giving the setting up as lost: on the
+        // Switch the C file API writes this folder reliably (the settings
+        // menu's dk_diag.txt write-back uses it), while a C++ stream open
+        // can fail there even with no handle held, and a silently dropped
+        // write is the one outcome the caller cannot see or undo.
+        FILE* file = std::fopen(PathToUtf8(path).c_str(), "w");
+        if (file == nullptr) {
+            std::cerr << "[runtime-config] Unable to write " << PathToUtf8(path) << std::endl;
+            return false;
+        }
+        bool wrote = true;
+        for (const auto& outputLine : lines) {
+            wrote = wrote && std::fputs(outputLine.c_str(), file) >= 0 && std::fputc('\n', file) != EOF;
+        }
+        wrote = wrote && std::fclose(file) == 0;
+        if (!wrote) {
+            std::cerr << "[runtime-config] Unable to write " << PathToUtf8(path) << std::endl;
+            return false;
+        }
+        return true;
     }
     for (const auto& outputLine : lines) {
         output << outputLine << '\n';
