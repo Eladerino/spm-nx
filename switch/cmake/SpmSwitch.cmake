@@ -190,6 +190,7 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_unistd.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_pthread.c"
+        "${SPM_SWITCH_DIR}/runtime/horizon_sdl.cpp"
         "${SPM_SWITCH_DIR}/runtime/updater_horizon.cpp"
         "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp"
         "${SPM_SWITCH_DIR}/menu/spm_switch_menu.cpp")
