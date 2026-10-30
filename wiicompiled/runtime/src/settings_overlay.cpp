@@ -775,7 +775,7 @@ const char* KeyBindingName(int scancode) {
     }
 }
 
-enum class RebindKind { KeyboardButton, KeyboardAxis, Controller, MuteHotkey };
+enum class RebindKind { KeyboardButton, KeyboardAxis, Controller, MuteHotkey, Gamepad };
 struct RebindState {
     bool active = false;
     bool openPopup = false;
@@ -792,6 +792,147 @@ struct RebindState {
     std::array<bool, SDL_GAMEPAD_AXIS_COUNT> axesReady{};
 } g_rebind;
 
+// ---- Player 1's gamepad table ([gamepad] in Config.toml) -------------------
+// The Options > Controls block at the bottom of this file edits it (Switch
+// only; on PC the launcher owns the table). It is the table player 1's input
+// is actually built from (virtual_remote's GamepadIntent); the Controller
+// rows of the same page remap the PAD route, which serves players 2-4 in
+// this game. The capture reuses this page's rebind machinery (the g_rebind
+// snapshot and the PollOptionsCapture poll); only the completion differs:
+// the captured button or axis becomes a [gamepad] grammar name, written
+// through RuntimeConfigFile::SetGamepadBinding and live-applied through
+// VirtualRemote::ReloadPadLayouts. The binding helpers mirror the ones the
+// Switch settings menu's Controls tab used for the same table.
+int g_optGamepadCapture = -1;  // gamepad row (action * 2 + slot) waiting for an input, or -1
+
+const char* const kGamepadActionLabels[] = {
+    "Up", "Down", "Left", "Right", "Jump", "Run", "A", "Shake", "Tilt left", "Tilt right", "Plus", "Minus",
+};
+
+std::vector<std::string> SplitBindingNames(const std::string& text) {
+    std::vector<std::string> names;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t comma = text.find(',', start);
+        std::string name = text.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        const size_t first = name.find_first_not_of(" \t");
+        const size_t last = name.find_last_not_of(" \t");
+        name = first == std::string::npos ? "" : name.substr(first, last - first + 1);
+        if (!name.empty()) names.push_back(name);
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return names;
+}
+
+// The inputs an action currently answers to: the config value when one is
+// saved, the parser's built-in defaults when the key is absent.
+std::vector<std::string> GamepadBindingNames(int style, int action) {
+    const char* styleName = VirtualRemote::PadStyleName(style);
+    const char* actionKey = VirtualRemote::PadActionKey(action);
+    if (styleName == nullptr || actionKey == nullptr) return {};
+    const std::string custom = RuntimeConfigFile::GamepadBinding(std::string(styleName) + "_" + actionKey);
+    const char* fallback = VirtualRemote::PadDefaultBinding(style, action);
+    return SplitBindingNames(custom.empty() ? (fallback != nullptr ? fallback : "") : custom);
+}
+
+void WriteGamepadBindingNames(int style, int action, std::vector<std::string> names) {
+    // One entry per input: binding the same input twice keeps the first.
+    std::vector<std::string> unique;
+    for (const std::string& name : names) {
+        if (std::find(unique.begin(), unique.end(), name) == unique.end()) unique.push_back(name);
+    }
+    std::string joined;
+    for (const std::string& name : unique) {
+        if (!joined.empty()) joined += ",";
+        joined += name;
+    }
+    // An empty value in the config means "use the defaults", so it cannot
+    // say "nothing bound". A lone comma parses back to zero inputs, which
+    // is the one true unbound encoding.
+    if (joined.empty()) joined = ",";
+    const char* styleName = VirtualRemote::PadStyleName(style);
+    const char* actionKey = VirtualRemote::PadActionKey(action);
+    if (styleName == nullptr || actionKey == nullptr) return;
+    RuntimeConfigFile::SetGamepadBinding(std::string(styleName) + "_" + actionKey, joined);
+}
+
+void BindGamepadSlot(int style, int action, int slot, const std::string& name) {
+    std::vector<std::string> names = GamepadBindingNames(style, action);
+    if (slot < static_cast<int>(names.size())) {
+        names[static_cast<size_t>(slot)] = name;
+    } else {
+        names.push_back(name);  // slot 1 with a shorter list appends as the only entry
+    }
+    WriteGamepadBindingNames(style, action, names);
+    VirtualRemote::ReloadPadLayouts();
+}
+
+void ResetGamepadBindings(int style) {
+    for (int action = 0; action < 12; ++action) {
+        const char* fallback = VirtualRemote::PadDefaultBinding(style, action);
+        WriteGamepadBindingNames(style, action, SplitBindingNames(fallback != nullptr ? fallback : ""));
+    }
+    VirtualRemote::ReloadPadLayouts();
+}
+
+// Friendly names for config inputs, per style. On the Switch the SDL names
+// read as the printed Nintendo letters (the shim maps buttons by label):
+// a is A, b is B, x is X, y is Y, the shoulders are L and R, the triggers
+// ZL and ZR, back is Minus and start is Plus.
+std::string GamepadBindingLabel(const std::string& name, int style) {
+    std::string base = name;
+    char sign = 0;
+    if (base.size() > 1 && (base.back() == '+' || base.back() == '-')) {
+        sign = base.back();
+        base.pop_back();
+    }
+    if (base == "leftx" || base == "lefty" || base == "rightx" || base == "righty") {
+        const bool left = base[0] == 'l';
+        const bool horizontal = base.back() == 'x';
+        const char* direction = horizontal ? (sign == '-' ? "left" : "right") : (sign == '-' ? "up" : "down");
+        return std::string(left ? "Left stick " : "Right stick ") + direction;
+    }
+    if (base == "lefttrigger") return style == 0 ? "LT" : (style == 1 ? "L2" : "ZL");
+    if (base == "righttrigger") return style == 0 ? "RT" : (style == 1 ? "R2" : "ZR");
+    if (base == "a") return style == 1 ? "Cross" : "A";
+    if (base == "b") return style == 1 ? "Circle" : "B";
+    if (base == "x") return style == 1 ? "Square" : "X";
+    if (base == "y") return style == 1 ? "Triangle" : "Y";
+    if (base == "back") return style == 0 ? "Back" : (style == 1 ? "Share" : "Minus");
+    if (base == "start") return style == 0 ? "Menu" : (style == 1 ? "Options" : "Plus");
+    if (base == "guide") return style == 2 ? "Home" : "Guide";
+    if (base == "leftstick") return "Left stick click";
+    if (base == "rightstick") return "Right stick click";
+    if (base == "leftshoulder") return style == 0 ? "LB" : (style == 1 ? "L1" : "L");
+    if (base == "rightshoulder") return style == 0 ? "RB" : (style == 1 ? "R1" : "R");
+    if (base == "dpup") return "D-pad up";
+    if (base == "dpdown") return "D-pad down";
+    if (base == "dpleft") return "D-pad left";
+    if (base == "dpright") return "D-pad right";
+    if (base == "touchpad") return "Touchpad";
+    return name;
+}
+
+// The [gamepad] grammar name for a captured input (a gamepad button index,
+// or a PADEncodeAxisButton axis), through SDL's own name tables, with a
+// direction suffix for the stick axes. Empty when the input is outside the
+// bindable set: the stick clicks (elsewhere in this file the right click is
+// fast-forward and the left click switches character; in the Switch menu
+// they were the capture's cancel gesture, and they cancel here too).
+std::string GamepadCaptureName(uint32_t value) {
+    if (PADIsAxisButton(value)) {
+        const auto axis = static_cast<SDL_GamepadAxis>(PADAxisButtonAxis(value));
+        const char* name = SDL_GetGamepadStringForAxis(axis);
+        if (name == nullptr) return "";
+        if (axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) return name;
+        return std::string(name) + (PADAxisButtonNegative(value) ? "-" : "+");
+    }
+    if (value == SDL_GAMEPAD_BUTTON_LEFT_STICK || value == SDL_GAMEPAD_BUTTON_RIGHT_STICK) return "";
+    const char* name = SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(value));
+    return name != nullptr ? name : "";
+}
+
 void BeginRebind(RebindKind kind, uint16_t target, const char* label, bool secondary = false) {
     g_rebind = {};
     g_rebind.active = true;
@@ -807,7 +948,7 @@ void BeginRebind(RebindKind kind, uint16_t target, const char* label, bool secon
     std::copy_n(keys, std::min(count, static_cast<int>(g_rebind.keys.size())), g_rebind.keys.begin());
     g_rebind.mouse = SDL_GetMouseState(nullptr, nullptr);
     const int index = PADGetIndexForPort(g_rebind.port);
-    if (kind == RebindKind::Controller && index >= 0) {
+    if ((kind == RebindKind::Controller || kind == RebindKind::Gamepad) && index >= 0) {
         if (auto* pad = PADGetSDLGamepadForIndex(index)) {
             g_rebind.instance = SDL_GetGamepadID(pad);
             for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; ++i)
@@ -820,6 +961,16 @@ void BeginRebind(RebindKind kind, uint16_t target, const char* label, bool secon
 
 void CompleteRebind(uint32_t value) {
     const auto& capture = g_rebind;
+    if (capture.kind == RebindKind::Gamepad) {
+        // The pad that was captured from sets the style table being edited.
+        if (auto* pad = SDL_GetGamepadFromID(capture.instance)) {
+            if (const std::string name = GamepadCaptureName(value); !name.empty()) {
+                BindGamepadSlot(VirtualRemote::PadStyleOf(pad), capture.target / 2, capture.target % 2, name);
+            }
+        }
+        g_rebind.active = false;
+        return;
+    }
     if (capture.kind == RebindKind::Controller) {
         const int index = PADGetIndexForPort(capture.port);
         auto* pad = index >= 0 ? PADGetSDLGamepadForIndex(index) : nullptr;
@@ -3205,9 +3356,10 @@ std::string PadBindingLabel(uint16_t target) {
 // The key or controller button being picked for a Controls row: polled every frame until it is pressed.
 void PollOptionsCapture() {
     if (Keybinds::Capturing() >= 0 && Keybinds::PollCapture()) g_optCaptureEnd = Clock::now();
-    if (g_optPadCapture < 0) return;
+    if (g_optPadCapture < 0 && g_optGamepadCapture < 0) return;
     if (!g_rebind.active) {
         g_optPadCapture = -1;
+        g_optGamepadCapture = -1;
         g_optCaptureEnd = Clock::now();
         return;
     }
@@ -3229,7 +3381,8 @@ void PollOptionsCapture() {
 }
 
 bool OptionsCapturing() {
-    return Keybinds::Capturing() >= 0 || g_optPadCapture >= 0 || Clock::now() - g_optCaptureEnd < std::chrono::milliseconds(400);
+    return Keybinds::Capturing() >= 0 || g_optPadCapture >= 0 || g_optGamepadCapture >= 0 ||
+           Clock::now() - g_optCaptureEnd < std::chrono::milliseconds(400);
 }
 
 void SetOptionsOpen(bool open) {
@@ -3530,6 +3683,40 @@ std::vector<OptRow> OptionsRows(int tab) {
                 g_optPadCapture = i;
             }, "Press A / 2, then the controller button to use. Takes a controller that is connected."});
         }
+#if defined(__SWITCH__)
+        // Player 1's own gamepad table ([gamepad] in Config.toml). The
+        // Controller rows above remap the PAD route, which in this game
+        // serves players 2-4; player 1's pad is read through this table
+        // (virtual_remote's GamepadIntent), so this block is the one that
+        // remaps the pad in hand. Two slots per action, like the table
+        // itself; a change writes through and applies at once.
+        {
+            const int index = PADGetIndexForPort(static_cast<uint32_t>(g_controllerPort));
+            auto* pad = index >= 0 ? PADGetSDLGamepadForIndex(static_cast<uint32_t>(index)) : nullptr;
+            const int style = pad != nullptr ? VirtualRemote::PadStyleOf(pad) : 2;
+            for (int action = 0; action < 12; ++action) {
+                const std::vector<std::string> names = GamepadBindingNames(style, action);
+                for (int slot = 0; slot < 2; ++slot) {
+                    const int idx = action * 2 + slot;
+                    const std::string bound = slot < static_cast<int>(names.size()) ? names[static_cast<size_t>(slot)] : "";
+                    rows.push_back({std::string("Gamepad: ") + kGamepadActionLabels[action] + (slot == 1 ? " 2" : ""),
+                                    g_optGamepadCapture == idx ? "Press a button..."
+                                                                 : (bound.empty() ? "-" : GamepadBindingLabel(bound, style)),
+                                    [idx](int d) {
+                        if (d != 0) return;
+                        const int index = PADGetIndexForPort(static_cast<uint32_t>(g_controllerPort));
+                        if (index < 0 || !PADGetSDLGamepadForIndex(static_cast<uint32_t>(index))) return;
+                        BeginRebind(RebindKind::Gamepad, static_cast<uint16_t>(idx), kGamepadActionLabels[idx / 2]);
+                        g_rebind.openPopup = false;  // picked here, not in the developer window
+                        g_optGamepadCapture = idx;
+                    }, "Player 1's gamepad. Select it, then press the button to use; it applies at once. Clicking a stick cancels."});
+                }
+            }
+            rows.push_back({"Gamepad: reset to defaults", "", [style](int d) {
+                if (d == 0) ResetGamepadBindings(style);
+            }, "Restore every Gamepad action above to the built-in bindings."});
+        }
+#endif
     }
     return rows;
 }
