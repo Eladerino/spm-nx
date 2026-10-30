@@ -82,8 +82,8 @@ Two of those deserve a line each:
 
 Holding `-` for about half a second opens the Switch settings menu; a short press is still the
 game's `-`. The menu's framework is adapted from SwitchWakerHD's settings overlay by centollOS
-(see "Licenses" below): a panel with a tab bar across the top (Graphics, Display, Audio, Game
-and Developer), one scrolling page per tab. Use the D-pad or left stick to move, A to select
+(see "Licenses" below): a panel with a tab bar across the top (Graphics, Display, Audio, Game,
+Controls and Developer), one scrolling page per tab. Use the D-pad or left stick to move, A to select
 or adjust, L and R to switch tabs, and B to close. Holding the focus on a row shows a short
 description of what it does. While the menu is open the game does not receive pad input, so
 nothing moves behind it.
@@ -98,6 +98,11 @@ nothing moves behind it.
 - **Audio:** Master, Music, Sound effects, UI and Voices volume sliders, Mute, and the Audio
   mix worker toggle.
 - **Game:** Controller vibration (rumble) and Spinning coins.
+- **Controls:** the gamepad bindings for the connected controller's style (a Pro Controller
+  edits the Nintendo table), two inputs per action. Select a slot and press the new input to
+  bind it; the change saves to `UserData/Config.toml` and applies in game right away, with no
+  restart. Press X on a focused slot to clear it, click either stick while binding to cancel,
+  and use Reset all to defaults to restore the built-in bindings for the style.
 - **Developer:** hidden until you turn on its "Show developer options" row, which is saved like
   any other setting. It holds the renderer's fourteen diagnostic switches (each one also writes
   back to `UserData/dk_diag.txt`, the file the same switches are read from at boot), plus Flush

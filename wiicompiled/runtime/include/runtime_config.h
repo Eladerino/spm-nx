@@ -937,6 +937,11 @@ inline std::string GamepadBinding(const std::string& key) {
     return it == Get().gamepadBindings.end() ? std::string() : it->second;
 }
 
+inline bool SetGamepadBinding(const std::string& key, const std::string& value) {
+    Mutable().gamepadBindings[key] = value;
+    return WriteSetting("gamepad", key, FormatString(value));
+}
+
 inline std::string KeyboardBinding(const std::string& key) {
     const auto it = Get().keyboardBindings.find(key);
     return it == Get().keyboardBindings.end() ? std::string() : it->second;
