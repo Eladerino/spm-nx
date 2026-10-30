@@ -1502,7 +1502,11 @@ int RuntimeMain(int argc, char** argv) {
             RuntimeConfigFile::ForceAspect169Enabled()      ? DisplaySettings::kAspect16x9
             : !RuntimeConfigFile::WidescreenEnabled(true) ? DisplaySettings::kAspect4x3
                                                           : DisplaySettings::kAspectFill);
+#if defined(__SWITCH__)
+        displaySettings.renderScale = RuntimeConfigFile::ResolutionMultiplier(1.5f);  // 720p: the panel's own size
+#else
         displaySettings.renderScale = RuntimeConfigFile::ResolutionMultiplier(2.25f);  // 1080p
+#endif
         DisplaySettings::Initialize(displaySettings);
         const bool configWidescreen = DisplaySettings::GameWidescreen();
         auroraConfig.windowWidth = configWidescreen ? 854 : 640;
