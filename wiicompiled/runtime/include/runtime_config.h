@@ -52,6 +52,7 @@ struct RuntimeUserConfig {
     std::optional<bool> textureReplacements;
     std::optional<bool> textureDumps;
     std::optional<bool> showFps;
+    std::optional<bool> mousePointer;   // [input] mouse_pointer: the mouse aims the Wii pointer (default on)
     std::optional<bool> spinningCoins;  // NSMBW: [video] spinning_coins, animated tiles
     std::optional<bool> frameGraph;     // NSMBW: [video] frame_graph, frame times under the FPS counter
     std::optional<bool> showDeveloperOptions;  // [dev] show_developer_options: the Switch menu's Developer section gate
@@ -102,6 +103,11 @@ struct RuntimeUserConfig {
     std::array<std::optional<std::string>, 12> controllerButtons;
     std::optional<bool> rumbleEnabled;
     std::optional<int32_t> muteHotkey;
+    std::optional<int32_t> fastForwardSpeed;  // [game] fast_forward_speed: 2..8 times
+    std::optional<bool> fastForwardToggle;    // [game] fast_forward_toggle: a press toggles it, else hold
+    std::optional<bool> fasterMenus;          // [game] faster_menus: menus, saves and loads run faster
+    std::optional<bool> saveAnywhere;         // [game] save_anywhere: Options > Game has "Save game"
+    std::optional<bool> checkUpdates;         // [game] check_updates: look for a new release at start
     std::map<std::string, std::string> controllerExpressions;
     // NSMBW: [keyboard] action = "comma-separated SDL scancode names" (keybinds.h).
     std::map<std::string, std::string> keyboardBindings;
@@ -333,6 +339,7 @@ inline void AdoptEarlierUserData(const std::filesystem::path& target) {
 #endif
 
 inline std::filesystem::path ApplicationDataDirectory() {
+    if (auto frontend = RuntimePlatform::FrontendDataDirectory()) return *frontend;
     if (const auto& portableRoot = PortableRootDirectory()) {
         return *portableRoot / kPortableUserDataDirectoryName;
     }
@@ -534,6 +541,13 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     if (auto value = FindConfigInt(document, "audio", "mute_key")) {
         config.muteHotkey = *value;
     }
+    if (auto value = FindConfigInt(document, "game", "fast_forward_speed")) {
+        config.fastForwardSpeed = *value;
+    }
+    config.fastForwardToggle = FindConfigValue<bool>(document, "game", "fast_forward_toggle");
+    config.fasterMenus = FindConfigValue<bool>(document, "game", "faster_menus");
+    config.saveAnywhere = FindConfigValue<bool>(document, "game", "save_anywhere");
+    config.checkUpdates = FindConfigValue<bool>(document, "game", "check_updates");
 
     if (const auto* section = document.contains("controller") ? &document.at("controller") : nullptr;
         section != nullptr && section->is_table()) {
@@ -606,6 +620,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
     config.showDeveloperOptions = FindConfigValue<bool>(document, "dev", "show_developer_options");
+    config.mousePointer = FindConfigValue<bool>(document, "input", "mouse_pointer");
     config.spinningCoins = FindConfigValue<bool>(document, "video", "spinning_coins");
     config.frameGraph = FindConfigValue<bool>(document, "video", "frame_graph");
     config.vsync = FindConfigValue<bool>(document, "video", "vsync");
@@ -847,6 +862,17 @@ inline bool SetMetalFxSpatialUpscaling(bool value) {
     return WriteSetting("video", "metalfx_spatial_upscaling", value ? "true" : "false");
 }
 
+inline bool SetLanguage(std::string value) {
+    static constexpr const char* kCodes[] = {"en", "de", "fr", "es", "it"};
+    bool known = false;
+    for (const char* code : kCodes) known = known || value == code;
+    if (!known) {
+        return false;
+    }
+    Mutable().language = value;
+    return WriteSetting("game", "language", FormatString(value));
+}
+
 inline bool SetDisplayMode(std::string value) {
     if (!IsSupportedDisplayMode(value)) {
         return false;
@@ -863,6 +889,15 @@ inline bool SetSkipUnreadyPipelines(bool value) {
 inline bool SetDisableCopyFilter(bool value) {
     Mutable().disableCopyFilter = value;
     return WriteSetting("video", "disable_copy_filter", value ? "true" : "false");
+}
+
+inline bool MousePointer(bool fallback = true) {
+    return Get().mousePointer.value_or(fallback);
+}
+
+inline bool SetMousePointer(bool value) {
+    Mutable().mousePointer = value;
+    return WriteSetting("input", "mouse_pointer", value ? "true" : "false");
 }
 
 inline bool SpinningCoins(bool fallback = true) {
@@ -968,6 +1003,51 @@ inline int32_t MuteHotkey(int32_t fallback) {
 inline bool SetMuteHotkey(int32_t value) {
     Mutable().muteHotkey = value;
     return WriteSetting("audio", "mute_key", std::to_string(value));
+}
+
+inline int32_t FastForwardSpeed(int32_t fallback = 3) {
+    return std::clamp(Get().fastForwardSpeed.value_or(fallback), 2, 8);
+}
+
+inline bool SetFastForwardSpeed(int32_t value) {
+    Mutable().fastForwardSpeed = value;
+    return WriteSetting("game", "fast_forward_speed", std::to_string(value));
+}
+
+inline bool FastForwardToggle(bool fallback = false) {
+    return Get().fastForwardToggle.value_or(fallback);
+}
+
+inline bool SetFastForwardToggle(bool value) {
+    Mutable().fastForwardToggle = value;
+    return WriteSetting("game", "fast_forward_toggle", value ? "true" : "false");
+}
+
+inline bool CheckUpdates(bool fallback = true) {
+    return Get().checkUpdates.value_or(fallback);
+}
+
+inline bool SetCheckUpdates(bool value) {
+    Mutable().checkUpdates = value;
+    return WriteSetting("game", "check_updates", value ? "true" : "false");
+}
+
+inline bool SaveAnywhere(bool fallback = true) {
+    return Get().saveAnywhere.value_or(fallback);
+}
+
+inline bool SetSaveAnywhere(bool value) {
+    Mutable().saveAnywhere = value;
+    return WriteSetting("game", "save_anywhere", value ? "true" : "false");
+}
+
+inline bool FasterMenus(bool fallback = true) {
+    return Get().fasterMenus.value_or(fallback);
+}
+
+inline bool SetFasterMenus(bool value) {
+    Mutable().fasterMenus = value;
+    return WriteSetting("game", "faster_menus", value ? "true" : "false");
 }
 
 inline bool SetAudioVolume(float value) {

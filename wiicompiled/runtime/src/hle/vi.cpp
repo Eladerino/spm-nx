@@ -1,3 +1,4 @@
+#include "frontend/runtime_mode.h"
 #include <vector>
 #include "frame_input.h"
 #include "det_hash.h"
@@ -16,6 +17,7 @@
 #include "runtime_log.h"
 #include "guest_profiler.h"
 #include "spm_map_sweep.h"
+#include "save_state.h"
 
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
@@ -29,6 +31,7 @@
 #include <chrono>
 #include <cmath>
 #include <string>
+#include <optional>
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
@@ -41,9 +44,11 @@
 #endif
 #include <windows.h>
 #include <dwmapi.h>
+#include <dxgi.h>
 #endif
 
 #include <aurora/aurora.h>
+#include <SDL3/SDL_video.h>
 
 // Forward declaration for OSWakeupThread - used to wake threads on VI retrace queue
 extern "C" void OSWakeupThread_HLE_801aaaa4(CpuContext* ctx);
@@ -186,10 +191,77 @@ struct DisplayLock {
     int k = 0;
     std::chrono::nanoseconds period{0};
     Clock::time_point vblank{};
+    bool phaseKnown = false;  // vblank is a real vblank time (DWM's period agreed with the display mode)
     Clock::time_point lastQuery{};
     bool logged = false;
 };
 DisplayLock g_displayLock;  // under g_viMutex
+
+#if defined(_WIN32)
+// The game window's own monitor, timed by DXGI WaitForVBlank on a helper thread: its real vblank times and period.
+// DWM's timing is one clock for every display (wrong for a 240 Hz screen next to a 60 Hz one), and without a
+// phase the frames land wherever the clock started, sometimes right on a vblank edge, where they slip back and forth.
+struct VBlankClock {
+    std::atomic<int64_t> lastNs{0};    // steady-clock time of the latest vblank on the grid
+    std::atomic<int64_t> periodNs{0};  // the display mode's period, set by RefreshDisplayLockLocked
+    std::atomic<HMONITOR> monitor{nullptr};
+    std::once_flag started;
+};
+VBlankClock g_vblankClock;
+
+void VBlankThread() {
+    using CreateFactoryFn = HRESULT(WINAPI*)(REFIID, void**);
+    HMODULE dxgi = ::LoadLibraryW(L"dxgi.dll");
+    const auto create = dxgi ? reinterpret_cast<CreateFactoryFn>(reinterpret_cast<void*>(::GetProcAddress(dxgi, "CreateDXGIFactory1")))
+                             : nullptr;
+    if (!create) return;
+    static const GUID kIidFactory1 = {0x770aae78, 0xf26f, 0x4dba, {0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87}};
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(create(kIidFactory1, reinterpret_cast<void**>(&factory))) || !factory) return;
+    IDXGIOutput* output = nullptr;
+    HMONITOR outputMonitor = nullptr;
+    int64_t previous = 0;
+    for (;;) {
+        const HMONITOR want = g_vblankClock.monitor.load();
+        if (want != outputMonitor) {  // the window moved to another monitor: find its output
+            if (output) output->Release();
+            output = nullptr;
+            outputMonitor = want;
+            previous = 0;
+            g_vblankClock.lastNs = 0;
+            IDXGIAdapter1* adapter = nullptr;
+            for (UINT a = 0; !output && factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND; ++a) {
+                IDXGIOutput* candidate = nullptr;
+                for (UINT o = 0; !output && adapter->EnumOutputs(o, &candidate) != DXGI_ERROR_NOT_FOUND; ++o) {
+                    DXGI_OUTPUT_DESC desc{};
+                    if (SUCCEEDED(candidate->GetDesc(&desc)) && desc.Monitor == want) output = candidate;
+                    else candidate->Release();
+                }
+                adapter->Release();
+            }
+        }
+        if (!output || FAILED(output->WaitForVBlank())) {
+            std::this_thread::sleep_for(250ms);
+            continue;
+        }
+        // The rate comes from the display mode (exact); these wakeups only give the phase. They jitter and now and
+        // then return early (an average of their spacing read 244 Hz on a 240.3 Hz screen), so a stamp counts only
+        // when it lies a whole number of periods, within 5%, after the last one that counted.
+        const int64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+        const int64_t period = g_vblankClock.periodNs.load();
+        if (period <= 0) continue;
+        const int64_t delta = now - previous;
+        const int64_t periods = (delta + period / 2) / period;
+        const bool onGrid = previous != 0 && periods >= 1 && std::llabs(delta - periods * period) < period / 20;
+        static int misses = 0;
+        if (onGrid || ++misses >= 8 || previous == 0) {  // 8 off-grid in a row: the grid itself moved
+            misses = 0;
+            previous = now;
+            if (onGrid) g_vblankClock.lastNs = now;
+        }
+    }
+}
+#endif
 
 void RefreshDisplayLockLocked(Clock::time_point now) {
     DisplayLock& d = g_displayLock;
@@ -214,8 +286,37 @@ void RefreshDisplayLockLocked(Clock::time_point now) {
     info.cbSize = sizeof(info);
     LARGE_INTEGER frequency{}, qpcNow{};
     const HRESULT result = getTiming != nullptr ? getTiming(nullptr, &info) : E_NOTIMPL;
-    if (FAILED(result) || info.qpcRefreshPeriod == 0 || !::QueryPerformanceFrequency(&frequency) ||
-        !::QueryPerformanceCounter(&qpcNow)) {
+    const bool dwmOk = SUCCEEDED(result) && info.qpcRefreshPeriod != 0 && ::QueryPerformanceFrequency(&frequency) &&
+                       ::QueryPerformanceCounter(&qpcNow);
+    // The game window's display mode: DWM's timing is one clock for all displays and was 288-468 Hz on a
+    // 240 Hz screen next to a 60 Hz one, which left the lock off ("120 FPS needs to truly work").
+    double modeHz = 0.0;
+    int windowCount = 0;
+    if (SDL_Window** windows = SDL_GetWindows(&windowCount)) {
+        if (windowCount > 0) {
+            if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(windows[0])))
+                modeHz = mode->refresh_rate;
+            if (auto* hwnd = static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(windows[0]),
+                                                                      SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr))) {
+                g_vblankClock.monitor = ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                std::call_once(g_vblankClock.started, [] { std::thread(VBlankThread).detach(); });
+            }
+        }
+        SDL_free(windows);
+    }
+    const auto steadyNow = Clock::now();
+    const double nsPerTick = dwmOk ? 1e9 / static_cast<double>(frequency.QuadPart) : 0.0;
+    const double dwmHz = dwmOk ? 1e9 / (info.qpcRefreshPeriod * nsPerTick) : 0.0;
+    // The rate: the window's display mode (exact; DWM read 240.33 and 258.7 Hz for a 240.30 Hz screen). DWM's
+    // vblank phase is used only while its rate agrees closely.
+    d.phaseKnown = dwmOk && (modeHz <= 1.0 || std::fabs(dwmHz - modeHz) < modeHz * 0.005);
+    const double hz = modeHz > 1.0 ? modeHz : dwmHz;
+    if (hz > 1.0) g_vblankClock.periodNs = static_cast<int64_t>(1e9 / hz);
+    // The phase: the window's own monitor's vblanks (VBlankThread), when it has seen one lately.
+    const int64_t vblankLast = g_vblankClock.lastNs.load();
+    const int64_t steadyNs = std::chrono::duration_cast<std::chrono::nanoseconds>(steadyNow.time_since_epoch()).count();
+    const bool measured = vblankLast != 0 && steadyNs - vblankLast < 200'000'000;
+    if (hz <= 1.0) {
         if (!d.logged) {
             d.logged = true;
             RT_LOGF(RT_TAG_VI, "V-Sync: no display timing (0x%08lX); the game keeps its own clock\n",
@@ -224,19 +325,28 @@ void RefreshDisplayLockLocked(Clock::time_point now) {
         d.valid = false;
         return;
     }
-    const auto steadyNow = Clock::now();
-    const double nsPerTick = 1e9 / static_cast<double>(frequency.QuadPart);
-    const auto period = std::chrono::nanoseconds(static_cast<int64_t>(info.qpcRefreshPeriod * nsPerTick));
-    const double hz = 1e9 / static_cast<double>(period.count());
+    const auto period = std::chrono::nanoseconds(static_cast<int64_t>(1e9 / hz));
     const int k = static_cast<int>(std::lround(hz / 60.0));
     d.valid = k >= 1 && k <= 8 && std::fabs(hz / k - 60.0) < 60.0 * 0.02;
     d.k = k;
     d.period = period;
-    d.vblank = steadyNow - std::chrono::nanoseconds(static_cast<int64_t>(
-                               static_cast<double>(qpcNow.QuadPart - static_cast<LONGLONG>(info.qpcVBlank)) * nsPerTick));
+    if (measured) {
+        d.phaseKnown = true;
+        d.vblank = Clock::time_point(std::chrono::nanoseconds(vblankLast));
+    } else if (d.phaseKnown) {
+        d.vblank = steadyNow - std::chrono::nanoseconds(static_cast<int64_t>(
+                                   static_cast<double>(qpcNow.QuadPart - static_cast<LONGLONG>(info.qpcVBlank)) * nsPerTick));
+    }
+    static bool loggedMeasured = false;
+    if (measured && !loggedMeasured) {
+        loggedMeasured = true;
+        RT_LOGF(RT_TAG_VI, "V-Sync: frames are timed to the vblanks of the window's monitor (%.3f Hz, %d per frame)\n",
+                hz, k);
+    }
     if (!d.logged) {
         d.logged = true;
-        RT_LOGF(RT_TAG_VI, "V-Sync: display %.3f Hz, %s\n", hz,
+        RT_LOGF(RT_TAG_VI, "V-Sync: display %.3f Hz (DWM %.3f Hz, mode %.3f Hz%s), %s\n", hz, dwmHz, modeHz,
+                d.phaseKnown ? "" : ", no vblank phase",
                 d.valid ? (std::string("game clock locked at ") + std::to_string(k) + " refresh(es) per frame").c_str()
                         : "no whole fraction near 60 Hz; the game keeps its own clock");
     }
@@ -252,10 +362,13 @@ std::chrono::nanoseconds LockedIntervalAfter(Clock::time_point retrace) {
         return std::chrono::nanoseconds(0);
     }
     const int64_t period = d.period.count();
+    if (!d.phaseKnown) return std::chrono::nanoseconds(period * d.k);  // the rate alone, no phase pull
     // Presents go out about 6.5 ms after their retrace (aurora's kNativePresentOffsetNanos): put that
-    // moment halfway between two vblanks, the most room either way.
-    constexpr int64_t kPresentOffset = 6'500'000;
-    int64_t target = (period / 2 - kPresentOffset) % period;
+    // moment halfway between two vblanks, the most room either way. Above 60 FPS the inserted frames go out
+    // on the retrace itself and every display period after it, so the retrace goes halfway instead: with the
+    // 6.5 ms offset they landed 0.25 ms before a 240 Hz vblank and slipped to the next one now and then.
+    const int64_t presentOffset = aurora_get_frame_interpolation_fps() > 60 ? 0 : 6'500'000;
+    int64_t target = (period / 2 - presentOffset) % period;
     if (target < 0) target += period;
     int64_t phase = (std::chrono::duration_cast<std::chrono::nanoseconds>(retrace - d.vblank).count()) % period;
     if (phase < 0) phase += period;
@@ -360,8 +473,14 @@ void WriteGuestStateLocked() {
     }
 }
 
+// Fast-forward: the game's clock runs this many times faster (1 = normal).
+std::atomic<uint32_t> g_viSpeed{1};
+
 // The interval to the next retrace: the display lock's while V-Sync holds one (NTSC only).
 std::chrono::nanoseconds ActiveIntervalLocked() {
+    if (const uint32_t speed = g_viSpeed.load(std::memory_order_relaxed); speed > 1) {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(g_vi.retraceInterval) / speed;
+    }
     if (g_vi.lockedInterval.count() > 0 && g_vi.tvFormat != 1) {
         return g_vi.lockedInterval;
     }
@@ -408,6 +527,7 @@ static uint32_t SpmPresentedFramesLocal() { return s_presentedXfbFrames.load(std
 static uint32_t (*const g_spmFramesFn)() = &SpmPresentedFramesLocal;
 
 void StartStallWatchdogOnce() {
+    if (RuntimeFrontend::Active()) return;
     static std::once_flag once;
     std::call_once(once, [] {
         // Unattended bring-up: autoexit.txt beside the executable holds a run length in seconds.
@@ -558,6 +678,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         g_vi.lastRetrace = retraceStamp;
         RefreshDisplayLockLocked(Clock::now());
         g_vi.lockedInterval = LockedIntervalAfter(retraceStamp);
+        aurora_set_display_periods_per_frame(g_displayLock.valid ? static_cast<uint32_t>(g_displayLock.k) : 0u);
         retraceValue = g_vi.retraceCount;
         preCb = g_vi.preRetraceCallback;
         postCb = g_vi.postRetraceCallback;
@@ -571,7 +692,9 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
     // frame left it, then latch every channel's input for the new one before any guest code reads it.
     if (DetClock::Enabled()) {
         DetHash::OnRetrace(retraceValue);
-        FrameInput::Latch(retraceValue);
+        // A libretro frontend latches when it resumes the guest with that frame's input instead
+        // (AdvanceOneFrame); latching here would hand the game the previous frame's buttons.
+        if (!RuntimeFrontend::Active()) FrameInput::Latch(retraceValue);
     }
 
     // Wake up threads sleeping on the VI retrace queue (VIWaitForRetrace).
@@ -633,7 +756,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         const bool shouldSubmit = frameActive && (shouldPresentXfb || shouldPresentBlack);
 
         if (shouldSubmit) {
-            if (!isBlack || settings_overlay::StartupScreenVisible()) {
+            if (!RuntimeFrontend::Active() && (!isBlack || settings_overlay::StartupScreenVisible())) {
                 // Normal presentation: draw overlay on top of GX content
                 settings_overlay::Draw();
             }
@@ -649,6 +772,9 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
 
     // Clear re-entry guard
     s_inAdvanceRetrace.store(false);
+    // A libretro frontend's frame ends here; the scheduler's idle loop suspends right after its
+    // idle step (RuntimeFrontend::SuspendIfRequested), a resume point a save state can rebuild.
+    RuntimeFrontend::RequestSuspendAtVI();
 }
 
 bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
@@ -670,6 +796,7 @@ bool AdvanceDueRetraces(CpuContext* ctx, int maxToProcess, bool serviceAurora)
             }
             AdvanceRetrace(ctx, Clock::now(), serviceAurora);
             advancedAny = true;
+            if (RuntimeFrontend::SuspendRequested()) break;  // one retrace per libretro frame
         }
         return advancedAny;
     }
@@ -709,6 +836,14 @@ void VI_HLE_ForceRetrace(CpuContext* ctx) {
         target = g_vi.lastRetrace + ActiveIntervalLocked();
     }
     AdvanceRetrace(ctx, target, true);
+}
+
+void VI_HLE_SetSpeed(uint32_t speed) {
+    g_viSpeed.store(speed < 1 ? 1 : speed, std::memory_order_relaxed);
+}
+
+uint32_t VI_HLE_Speed() {
+    return g_viSpeed.load(std::memory_order_relaxed);
 }
 
 bool VI_HLE_IsAdvancingRetrace() {
@@ -837,12 +972,21 @@ static bool LogFpsEnabled() {
 
 // dvd.cpp: time in the game's disc reads since start, and their count.
 uint64_t DvdReadNanosTotal();
+extern std::atomic<uint64_t> g_copyDispWorkerWaitNanos;  // gx_copy.cpp
 uint32_t DvdReadCount();
 
 void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     if (s_presentSequenceActive.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
+    // Frontend frame timing: encode/submit cost, reported apart from guest CPU time.
+    struct PresentTimer {
+        Clock::time_point start = Clock::now();
+        ~PresentTimer() {
+            if (RuntimeFrontend::Active())
+                RuntimeFrontend::AddPresentTime(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count());
+        }
+    } presentTimer;
     GuestProfiler::OnFramePresented();
     static FrameTimes times;
     const Clock::time_point presentStart = Clock::now();
@@ -897,7 +1041,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     bool paceThisFrame = false;
     // Deterministic mode paces in the scheduler's idle wait instead, and must not deliver the
     // retrace from here (PaceToRetraceBoundary does), so frames present as soon as they are sealed.
-    if (DetClock::Enabled()) {
+    if (DetClock::Enabled() || RuntimeFrontend::Active()) {
         paceToRetrace = false;
     }
     if (paceToRetrace) {
@@ -929,7 +1073,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         // cadence, and zero only happens when production outruns VI. "Kept up" means <=1 retrace
         // elapsed; 2+ means a boundary was missed, so Aurora seals that frame without its interpolated
         // slots (a windowed backstop lowers the slot target only under sustained overload).
-        aurora_report_producer_paced(retracesElapsed <= 1);
+        // Room changes and file loads always overrun; counting them took the inserted frames away after every door.
+        const int seq = SpmMapSweep::Seq();
+        aurora_report_producer_paced(retracesElapsed <= 1 || seq == 3 || seq == 5);
         // Stamp the sealed frame's presentation schedule so Aurora paces interpolated slots against
         // this same VI timeline. Anchor to the NEXT retrace boundary, not the period just produced,
         // since slots anchored to the current period would already be expired by seal time. Encoding
@@ -965,11 +1111,14 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     if (presentedXfb) {
         static Clock::time_point s_lastEnd{}, s_windowStart{};
         static int s_logged = 0;
-        static uint64_t s_lastGx = 0, s_lastDvd = 0;
+        static uint64_t s_lastGx = 0, s_lastDvd = 0, s_lastWorker = 0;
         static uint32_t s_lastDvdReads = 0;
         const uint64_t gxTotal = AuroraGxProcessNanosTotal();
         const double gxMs = (gxTotal - s_lastGx) / 1e6;
         s_lastGx = gxTotal;
+        const uint64_t workerTotal = g_copyDispWorkerWaitNanos.load(std::memory_order_relaxed);
+        const double workerMs = (workerTotal - s_lastWorker) / 1e6;
+        s_lastWorker = workerTotal;
         const uint64_t dvdTotal = DvdReadNanosTotal();
         const uint32_t dvdReads = DvdReadCount();
         const double dvdMs = (dvdTotal - s_lastDvd) / 1e6;
@@ -987,9 +1136,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
                 uint32_t sceneWord = 0;
                 Memory::TryRead32(0x80428730u, sceneWord);
                 RT_LOGF(RT_TAG_VI,
-                        "slow frame %.1f ms (scene 0x%03X): game %.2f (gx %.2f, disc %.2f in %u reads), present %.2f, "
+                        "slow frame %.1f ms (scene 0x%03X): game %.2f (gx %.2f, worker wait %.2f, disc %.2f in %u reads), present %.2f, "
                         "end_frame %.2f, pace %.2f\n",
-                        frame, sceneWord & 0xFFFFu, ms(presentStart - s_lastEnd), gxMs, dvdMs, frameReads,
+                        frame, sceneWord & 0xFFFFu, ms(presentStart - s_lastEnd), gxMs, workerMs, dvdMs, frameReads,
                         ms(endFrameStart - presentStart),
                         ms(paceStart - endFrameStart), ms(now - paceStart));
             }
@@ -1019,10 +1168,14 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
             AuroraTakeGxStats(&gxNanos, &lockNanos, &draws);
             uint64_t copies = 0, creates = 0;
             AuroraTakeCopyStats(&copies, &creates);
+            static uint64_t s_lastWorkerWait = 0;
+            const uint64_t workerTotal = g_copyDispWorkerWaitNanos.load(std::memory_order_relaxed);
+            const uint64_t workerWait = workerTotal - s_lastWorkerWait;
+            s_lastWorkerWait = workerTotal;
             RT_LOGF(RT_TAG_VI,
-                    "fps %.1f: game %.2f ms (gx %.2f ms, lock wait %.2f ms, %.0f draws, %.1f copies, %.1f new copy "
+                    "fps %.1f: game %.2f ms (gx %.2f ms, worker wait %.2f ms, lock wait %.2f ms, %.0f draws, %.1f copies, %.1f new copy "
                     "textures), end_frame %.2f ms, pace %.2f ms, worst frame %.1f ms, jitter %.2f ms, %d over 20 ms\n",
-                    n * 1000.0 / window, times.gameMs / n, gxNanos / 1e6 / n, lockNanos / 1e6 / n, draws / n,
+                    n * 1000.0 / window, times.gameMs / n, gxNanos / 1e6 / n, workerWait / 1e6 / n, lockNanos / 1e6 / n, draws / n,
                     copies / n, creates / n, times.endFrameMs / n, times.paceMs / n, times.worstMs,
                     std::sqrt(std::max(0.0, times.sumSq / n - (window / n) * (window / n))), times.slow);
             if (aurora_get_frame_interpolation_fps() != 0) {  // what the screen shows vs the 60 Hz game
@@ -1042,7 +1195,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
             times.lastPresentEnd = now;
         }
     }
-    settings_overlay::AdvancePresentedFrame();
+    if (!RuntimeFrontend::Active()) settings_overlay::AdvancePresentedFrame();
     g_auroraFrameActive.store(false, std::memory_order_release);
     g_auroraFrameHadWork.store(false, std::memory_order_release);
     if (presentedXfb) {
@@ -1375,22 +1528,38 @@ extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
     
     if (Fiber::GuestFiberManager::IsInitialized()) {
-        const int32_t irqState = OS__DisableInterrupts_801a65ac();
+        bool resumedRunning = false;
+        const SaveState::YieldRecord* resumed = SaveState::TakeYield(SaveState::YieldKind::ViWaitForRetrace, resumedRunning);
+        const CpuContext entry = *cpu;
+        const int32_t irqState = resumed ? static_cast<int32_t>(resumed->extra[1]) : OS__DisableInterrupts_801a65ac();
         uint32_t retraceCount = 0;
-        {
+        if (resumed) {
+            retraceCount = resumed->extra[0];
+        } else {
             std::lock_guard<std::mutex> lock(g_viMutex);
             EnsureInitializedLocked();
             retraceCount = g_vi.retraceCount;
         }
+        // Save states: the wait every frame's main loop parks in; a restored thread continues after its sleep.
+        std::optional<SaveState::YieldScope> yieldScope;
+        if (resumed) yieldScope.emplace(*resumed);
+        else yieldScope.emplace(SaveState::YieldKind::ViWaitForRetrace, entry,
+                                std::initializer_list<uint32_t>{retraceCount, static_cast<uint32_t>(irqState)});
+        bool continuing = resumed != nullptr;
 
         do {
             cpu->gpr[3] = kViRetraceQueueAddr;
-            OSSleepThread_HLE_801aa9b8(cpu);
+            if (continuing) {
+                OS_HLE_SleepResume(cpu, resumedRunning, 0);  // the sleep ran with interrupts already off
+                continuing = false;
+            } else {
+                OSSleepThread_HLE_801aa9b8(cpu);
+            }
 
             {
                 std::lock_guard<std::mutex> lock(g_viMutex);
                 EnsureInitializedLocked();
-                if (g_vi.retraceCount != retraceCount) {
+                if (g_vi.retraceCount - retraceCount >= RuntimeFrontend::FrameStep()) {
                     break;
                 }
             }
@@ -1424,3 +1593,26 @@ PPC_NATIVE_OVERRIDE(8028211C, VIGetScanMode_HLE, uint32_t, (), ());
 
 
 uint32_t SpmPresentedFrames() { return g_spmFramesFn(); }
+
+// Called only after guest producers stop, before the next content session starts.
+void VI_HLE_ResetFrontend() {
+    std::lock_guard lock(g_viMutex);
+    g_vi = ViState{};
+    g_auroraFrameActive = false;
+    g_auroraFrameHadWork = false;
+    s_inAdvanceRetrace = false;
+    s_presentSequenceActive = false;
+    s_presentedXfbFrames = 0;
+    s_lastPacedRetraceCount = ~0u;
+    s_lastPresentAnchorNanos = 0;
+}
+
+void VI_HLE_SaveState(SaveState::Writer& out) {
+    std::lock_guard<std::mutex> lock(g_viMutex);
+    out.Pod(g_vi);
+}
+
+void VI_HLE_LoadState(SaveState::Reader& in) {
+    std::lock_guard<std::mutex> lock(g_viMutex);
+    in.Pod(g_vi);
+}

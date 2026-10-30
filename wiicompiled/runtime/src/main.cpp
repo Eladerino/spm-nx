@@ -1,3 +1,4 @@
+#include "frontend/runtime_mode.h"
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -65,6 +66,9 @@
 #include "frame_input.h"
 #include "det_clock.h"
 #include "game_folder.h"
+#include "mod_runtime.h"
+#include "mod_install.h"
+#include "disc_image.h"
 #include "abi_bridge.h"
 #include "guest_flat_memory.h"
 #include "gx_guest_write.h"
@@ -80,6 +84,7 @@
 #include "hle_stubs.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
+#include "platform/host_platform.h"
 #include "runtime_product.h"
 #include "recomp_mod_loader.h"
 #include <aurora/aurora.h>
@@ -144,6 +149,7 @@ void ConfigureWindowsFatalDialogBehavior() {
 // A busy PC (browsers, launchers, sync and antivirus tools) delays the game's threads when they wake
 // for a frame, which shows as dropped frames at 60. Run above normal priority, and opt out of
 // Windows' power throttling (EcoQoS), which can slow the process down and coarsen its timers.
+std::string g_cpuSetNote;
 void RaiseWindowsProcessPriority() {
     if (!::SetPriorityClass(::GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS)) {
         RT_LOG(RT_TAG_RUNTIME) << "SetPriorityClass failed: " << ::GetLastError() << std::endl;
@@ -163,6 +169,38 @@ void RaiseWindowsProcessPriority() {
         if (!setInfo(::GetCurrentProcess(), kProcessPowerThrottling, &state, sizeof(state))) {
             state.ControlMask = kExecutionSpeed;  // before Windows 11 the timer flag is unknown
             setInfo(::GetCurrentProcess(), kProcessPowerThrottling, &state, sizeof(state));
+        }
+    }
+    // Hybrid CPUs (Intel 12th gen and later): keep the game on its performance cores. On an i5-13400F the
+    // game thread now and then landed on an efficiency core, where a frame's GX work took 9-12 ms instead of
+    // 3, enough to miss frames at 60 and most inserted frames at 120-240 FPS.
+    using GetCpuSetsFn = BOOL(WINAPI*)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG, HANDLE, ULONG);
+    using SetDefaultCpuSetsFn = BOOL(WINAPI*)(HANDLE, const ULONG*, ULONG);
+    HMODULE kernel = ::GetModuleHandleW(L"kernel32.dll");
+    const auto getCpuSets = reinterpret_cast<GetCpuSetsFn>(reinterpret_cast<void*>(::GetProcAddress(kernel, "GetSystemCpuSetInformation")));
+    const auto setDefaultCpuSets =
+        reinterpret_cast<SetDefaultCpuSetsFn>(reinterpret_cast<void*>(::GetProcAddress(kernel, "SetProcessDefaultCpuSets")));
+    ULONG length = 0;
+    if (getCpuSets && setDefaultCpuSets) getCpuSets(nullptr, 0, &length, ::GetCurrentProcess(), 0);
+    std::vector<uint8_t> buffer(length);
+    if (length && getCpuSets(reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()), length, &length,
+                             ::GetCurrentProcess(), 0)) {
+        std::vector<std::pair<ULONG, BYTE>> sets;  // id, efficiency class (higher = faster)
+        for (size_t at = 0; at + sizeof(SYSTEM_CPU_SET_INFORMATION) <= length;) {
+            const auto* info = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() + at);
+            if (info->Size == 0) break;
+            if (info->Type == CpuSetInformation) sets.emplace_back(info->CpuSet.Id, info->CpuSet.EfficiencyClass);
+            at += info->Size;
+        }
+        BYTE fastest = 0;
+        for (const auto& [id, cls] : sets) fastest = std::max(fastest, cls);
+        std::vector<ULONG> fast;
+        for (const auto& [id, cls] : sets)
+            if (cls == fastest) fast.push_back(id);
+        if (!fast.empty() && fast.size() < sets.size() && fast.size() >= 4 &&
+            setDefaultCpuSets(::GetCurrentProcess(), fast.data(), static_cast<ULONG>(fast.size()))) {
+            g_cpuSetNote = "hybrid CPU: the game runs on its " + std::to_string(fast.size()) + " performance threads (of " +
+                           std::to_string(sets.size()) + ")";  // logged once logging is up
         }
     }
 }
@@ -809,6 +847,10 @@ void MarkFatalErrorReported() {
 }
 
 void ShowRuntimeFatalPopup(std::string_view category, std::string_view details) noexcept {
+    if (RuntimeFrontend::Active()) {
+        RT_LOGF(RT_TAG_RUNTIME, "Frontend fatal: %.*s: %.*s\n", int(category.size()), category.data(), int(details.size()), details.data());
+        return;
+    }
     if (g_fatalPopupShown.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
@@ -858,7 +900,12 @@ void WriteCrashArtifacts(std::string_view reason, std::string_view extraDetails,
     }
 }
 
-[[noreturn]] void FatalMissingGuestTarget(uint32_t target, CpuContext* cpu) noexcept {
+[[noreturn]] void FatalMissingGuestTarget(uint32_t target, CpuContext* cpu) {
+    if (RuntimeFrontend::Active()) {
+        std::ostringstream error;
+        error << "Missing guest function 0x" << std::hex << target << " (LR 0x" << (cpu ? cpu->lr : 0) << ")";
+        RuntimeFrontend::Fail(error.str().c_str());
+    }
     RT_LOG(RT_TAG_RUNTIME) << "InvokeIndirectCpu: target 0x" << std::hex << target
               << " not translated (missing function)" << std::dec << std::endl;
     RT_LOG(RT_TAG_RUNTIME) << "Caller LR = 0x" << std::hex << (cpu ? cpu->lr : 0u)
@@ -1378,7 +1425,14 @@ static void TerminateHandler() {
 }
 
 // Runtime entry point: loads the configuration, brings up aurora and runs the game.
+#if defined(MKW_FRONTEND_DIAGNOSTIC)
+int RunFrontendDiagnostic(int argc, char** argv);
+#endif
 int RuntimeMain(int argc, char** argv) {
+#if defined(MKW_FRONTEND_DIAGNOSTIC)
+    if (argc > 1 && std::string_view(argv[1]) == "--frontend-diagnostic")
+        return RunFrontendDiagnostic(argc, argv);
+#endif
     // Must run before the transcript duplicates stdout/stderr: it decides what
     // those descriptors are mirrored to now that the products are GUI-subsystem.
     AttachParentConsoleForDiagnostics();
@@ -1402,12 +1456,46 @@ int RuntimeMain(int argc, char** argv) {
             throw std::invalid_argument("The game runtime does not accept command-line options; use Config.toml through the installed host.");
         }
         RuntimeConfigFile::LogLoadedConfig();
-        // The player's own extracted game (game_folder.h); on Windows it is asked for at first start.
+#if defined(_WIN32)
+        if (!g_cpuSetNote.empty()) RT_LOGF(RT_TAG_RUNTIME, "%s\n", g_cpuSetNote.c_str());
+#endif
+#if defined(__ANDROID__)
+        if (const auto line = RuntimePlatform::PinCurrentThreadToFastCores(); !line.empty())
+            RT_LOGF(RT_TAG_RUNTIME, "fast cores %s\n", line.c_str());
+#endif
+        if (const char* selftest = std::getenv("SPM_SELFTEST"); selftest && *selftest == '1') {
+            bool ok = ModInstall::SelfCheck();
+            RT_LOGF(RT_TAG_RUNTIME, "selftest: mod install %s\n", ok ? "ok" : "FAILED");
+            const bool gecko = ModRuntime::SelfCheck();
+            RT_LOGF(RT_TAG_RUNTIME, "selftest: gecko codes %s\n", gecko ? "ok" : "FAILED");
+            ok = ok && gecko;
+            if (const char* image = std::getenv("SPM_SELFTEST_IMAGE")) {  // a disc image: what the first-run setup sees
+                DiscImage::Info info;
+                std::string error;
+                const bool usable = DiscImage::Probe(RuntimeConfigFile::PathFromUtf8(image), info, error);
+                RT_LOGF(RT_TAG_RUNTIME, "selftest: image %s: %s\n", image, usable ? (info.id + " rev " + std::to_string(info.revision)).c_str() : error.c_str());
+                ok = ok && usable;
+                // SPM_SELFTEST_EXTRACT=<folder>: also extract it there, as the first-run setup does (no window).
+                if (const char* extractTo = std::getenv("SPM_SELFTEST_EXTRACT"); usable && extractTo) {
+                    int files = 0;
+                    const bool extracted = DiscImage::Extract(RuntimeConfigFile::PathFromUtf8(image), RuntimeConfigFile::PathFromUtf8(extractTo),
+                                                              [&](int done, int) { files = done; }, error);
+                    RT_LOGF(RT_TAG_RUNTIME, "selftest: extract: %s (%d files)\n", extracted ? "ok" : error.c_str(), files);
+                    ok = ok && extracted;
+                }
+            }
+            SetRuntimeExitCodeImpl(ok ? 0 : 7);
+            ShutdownProcessTranscript();
+            return ok ? 0 : 7;
+        }
+        // The player's own game (game_folder.h): set up from a disc image at first start.
         if (!GameFolder::EnsureConfigured()) {
             SetRuntimeExitCodeImpl(0);
             ShutdownProcessTranscript();
             return 0;
         }
+        ModInstall::InstallDroppedZips();
+        ModRuntime::Load();
 #if defined(__ANDROID__)
         // Determinism testing on a phone: debug.nsmbw.det=1 turns the lockstep timing on,
         // debug.nsmbw.dethash / detdump set NSMBW_DET_HASH / NSMBW_DET_DUMP (det_hash.h) and

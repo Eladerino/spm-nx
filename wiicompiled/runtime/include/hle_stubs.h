@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 
 #include "abi_bridge.h"
 
@@ -16,11 +17,27 @@ void VI_HLE_WaitForNextRetracePoll();
 // Deterministic mode (det_clock.h): the virtual tick of the next VI retrace, DetClock::kNever
 // before VIInit.
 uint64_t VI_HLE_DetNextRetraceTicks();
+namespace SaveState { class Writer; class Reader; }
+void VI_HLE_SaveState(SaveState::Writer& out);
+void VI_HLE_LoadState(SaveState::Reader& in);
+void OS_HLE_SaveState(SaveState::Writer& out);
+void OS_HLE_LoadState(SaveState::Reader& in);
+void AI_HLE_SaveState(SaveState::Writer& out);
+void AI_HLE_LoadState(SaveState::Reader& in);
+void KPAD_HLE_SaveState(SaveState::Writer& out);
+void KPAD_HLE_LoadState(SaveState::Reader& in);
+bool NAND_HLE_SaveState(SaveState::Writer& out, std::string& error);
+void NAND_HLE_LoadState(SaveState::Reader& in);
+bool GXDL_HLE_SaveState(SaveState::Writer& out, std::string& error);
+void GXDL_HLE_LoadState(SaveState::Reader& in);
 // Single owner of the Aurora frame presentation sequence (seal, optional pace
 // to the VI retrace boundary, pre-warm the next frame). paceToRetrace is true
 // for the GXCopyDisp producer path and false for retrace-context presents.
 void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace);
 bool VI_HLE_IsAdvancingRetrace();
+// Fast-forward: the game's clock runs `speed` times faster (1 = normal).
+void VI_HLE_SetSpeed(uint32_t speed);
+uint32_t VI_HLE_Speed();
 void VI_HLE_SetXfbReady(uint32_t xfbAddr); // Called by GXCopyDisp to signal EFB→XFB copy
 void Audio_HLE_Tick(CpuContext* ctx, uint32_t deltaMicros);
 void Audio_HLE_Poll(CpuContext* ctx);

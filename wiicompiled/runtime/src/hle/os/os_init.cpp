@@ -1,3 +1,4 @@
+#include "frontend/runtime_mode.h"
 // Boot/init hooks, OSFatal, and assorted hardware-init stubs.
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 
 #include "abi_bridge.h"
 #include "memory.h"
+#include "mod_runtime.h"
 #include "hle_stubs.h"
 #include "ppc_runtime.h"
 #include "recomp_mod_loader.h"
@@ -25,6 +27,7 @@ extern "C" void func_8055531C(CpuContext* ctx);
 
 extern "C" void OSInitAlarm_RecompModLateInit_801a961c(CpuContext* ctx) {
     func_80274664(ctx);
+    ModRuntime::ApplyEarlyPatches();  // mods' Riivolution memory patches inside the main program
 }
 
 REGISTER_NATIVE_FUNCTION_AS(0x80274664, OSInitAlarm_RecompModLateInit_801a961c, "OSInitAlarm_RecompModLateInit_801a961c");
@@ -79,6 +82,7 @@ extern "C" void OSFatal_HLE_801a4ec4(CpuContext* ctx) {
         guestMessage.empty() ? std::string("OS::Fatal was called without a message.") : guestMessage;
     // MarkFatalErrorReported below suppresses the atexit reporter, so this path
     // has to write its own artifacts or the run folder gets nothing.
+    if (RuntimeFrontend::Active()) RuntimeFrontend::Fail(details.c_str());
     RuntimeCrash::WriteCrashArtifacts("osfatal", details);
     SetRuntimeExitCode(EXIT_FAILURE);
     ShowRuntimeFatalPopup("the guest operating system reported a fatal error", details);
