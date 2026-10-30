@@ -1,6 +1,6 @@
 # New Super Paper Bros.
 
-> **This repository is spm-nx**, a Nintendo Switch port of [New Super Paper Bros](https://github.com/josiahg2502-glitch/NewSuperPaperBros) by JosiahG. It carries the Switch port of that project (the deko3d renderer and Horizon support); the original PC project lives at the link above, and full credits are in the [Credits](#credits) section below.
+> **This repository is spm-nx**, a Nintendo Switch port of [New Super Paper Bros](https://github.com/josiahg2502-glitch/NewSuperPaperBros) by JosiahG. The Switch port is by Elad (Eladerino). It carries the Switch port of that project (the deko3d renderer and Horizon support); the original PC project lives at the link above, and full credits are in the [Credits](#credits) section below.
 
 A native PC port of **Super Paper Mario** (Wii, 2007), made by statically recompiling the game's PowerPC code to C++
 with [WiiCompiled](https://github.com/patchzyy/Wiicompiled). No emulator: the game runs as a Windows or Linux program.
@@ -22,9 +22,12 @@ documented in full as well.
 
 Two things differ from the PC build. The Switch build currently needs the **USA disc (R8PE01,
 revision 0)**; the European disc (R8PP01) is PC-only for now, because only the USA game has been
-translated for the Switch. And there is no launcher on the Switch: the NRO boots straight into
-the game by title takeover, with no Play, Display, Controls or Mods pages. Installing, building
-and the state of the port are documented in [`switch/README.md`](switch/README.md).
+translated for the Switch. And there is no launcher on the Switch: the NRO boots by title
+takeover to a startup screen, and settings live in an in-game menu made for the Switch pad
+(hold `-` for about half a second to open it). Fresh Switch installs start from Switch defaults
+(1.5x rendering, which is the 720p screen's native size, 16:9, frame interpolation off), not
+the PC ones above. Installing, building and the state of the port are documented in
+[`switch/README.md`](switch/README.md).
 
 ## Features
 
@@ -51,7 +54,8 @@ You need **Windows 10/11 (64-bit)**, a graphics card with DirectX 12 or Vulkan, 
    isn't needed after that.
 4. Press **PLAY**.
 
-In the game, F10 opens the settings menu and F11 switches between fullscreen and a window.
+In the game, F10 opens the settings menu and F11 switches between fullscreen and a window. (That
+is the PC build; on Switch, hold `-` instead. See [`switch/README.md`](switch/README.md).)
 
 **Controls (Xbox layout):** left stick or D-pad = Wii Remote D-pad, A = 2 (jump), B or X = 1, Y = A, RB or RT = shake,
 Start = +, Back or LB = -, right stick = pointer. Keyboard and mouse work too. Change them on the launcher's
@@ -125,11 +129,24 @@ the result for Horizon instead of Windows.
 
 ## Credits
 
-- **Port:** JosiahG
+- **Original project and PC port:** JosiahG, creator of New Super Paper Bros, the PC recomp this
+  repository ports to the Switch. The PC project lives at
+  [josiahg2502-glitch/NewSuperPaperBros](https://github.com/josiahg2502-glitch/NewSuperPaperBros);
+  this repository is the Switch port of it.
+- **Switch port (spm-nx):** Elad (Eladerino)
 - **[WiiCompiled](https://github.com/patchzyy/Wiicompiled)** (the recompiler and runtime) by patchzyy and
   contributors, GPLv3
-- **Aurora** by Luke Street, MIT; Dawn, SDL3 and the other components listed in
+- **[Aurora](https://github.com/encounter/aurora)** by Luke Street and the Aurora contributors, MIT; Dawn, SDL3 and the other components listed in
   [`wiicompiled/THIRD-PARTY-NOTICES.md`](wiicompiled/THIRD-PARTY-NOTICES.md)
+- **[SwitchWaker](https://github.com/centollOS/SwitchWaker) and
+  [SwitchWakerHD](https://github.com/centollOS/SwitchWakerHD)** by centollOS, MIT: the Switch
+  layer's SDL shim and Dawn recipe come from SwitchWaker, the deko3d renderer descends from
+  SwitchWakerHD's backend through it, and the Switch settings menu is modelled on
+  SwitchWakerHD's overlay. Per-file origins are in
+  [`switch/THIRD_PARTY.md`](switch/THIRD_PARTY.md)
+- **[deko3d](https://github.com/devkitPro/deko3d) and [uam](https://github.com/devkitPro/uam)** by
+  devkitPro and contributors, zlib: the GPU API and the GLSL to DKSH shader compiler the Switch
+  renderer is built on
 - **Higher-quality music:** the "SPM High Definition Audio" mod by Toadette Hack Fan and PaperToadette, with game
   patches by JohnP55
 - **HD textures:** converted from the "SPM Textures v1.0" HD texture pack
@@ -137,7 +154,8 @@ the result for Horizon instead of Windows.
 - **Dolphin Emulator** data files (DSP coefficients, Wii system files), GPL-2.0-or-later
 - Symbol names from the Super Paper Mario decompilation community ([spm-decomp](https://github.com/SeekyCt/spm-decomp))
 
-Full credits and licenses ship in the release as `CREDITS.txt`, `LICENSE.txt` and `engine\licenses\`.
+Full credits and licenses ship in the PC release as `CREDITS.txt`, `LICENSE.txt` and `engine\licenses\`;
+the Switch package carries them in the `licenses\` folder beside the NRO.
 
 ## AI assistance
 
