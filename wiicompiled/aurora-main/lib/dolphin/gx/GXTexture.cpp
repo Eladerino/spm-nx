@@ -429,7 +429,21 @@ void GXLoadTlut(const GXTlutObj* obj_, u32 idx) {
   GX_WRITE_RAS_REG(loadTlut1);
   __GXFlushTextureState();
 
-  aurora::gfx::texture_replacement::load_tlut(obj_, idx);
+  if (aurora::gx::fifo::decode_thread_active()) {
+    // The decoder reads the loaded palettes, so the decode thread installs this one where
+    // load_tlut ran; the registration is taken here, as load_tlut takes it.
+    if (aurora::g_config.allowTextureReplacements && idx < aurora::gx::MaxTluts) {
+      aurora::gx::fifo::DirectCommand cmd;
+      cmd.put8(GX_LOAD_AURORA);
+      cmd.put16(GX_LOAD_AURORA_REPLACEMENT_TLUT);
+      cmd.put8(static_cast<u8>(idx));
+      cmd.put64(reinterpret_cast<u64>(obj_));
+      cmd.put64(reinterpret_cast<u64>(aurora::gfx::texture_replacement::take_pending_tlut(obj_)));
+      aurora::gx::fifo::insert_at_drain_point(cmd);
+    }
+  } else {
+    aurora::gfx::texture_replacement::load_tlut(obj_, idx);
+  }
   emit_loaded_tlut_metadata(*obj, idx);
 }
 

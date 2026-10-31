@@ -3444,14 +3444,14 @@ constexpr int kOptTabCount = int(std::size(kOptTabs));
 // Developer shell's row labels and help texts.
 constexpr const char* kDiagKeys[] = {
     "depth_off", "cull_off", "magenta", "picdump", "efbclear", "bufdump", "texdump",
-    "shaderdump", "nomerge", "uvlog", "mtxlog", "perftimer", "arrayup", "profile",
+    "shaderdump", "nomerge", "uvlog", "mtxlog", "perftimer", "arrayup", "profile", "cpthread",
 };
 constexpr const char* kDiagLabels[] = {
     "Depth test off (depth_off)", "Face culling off (cull_off)", "Magenta unbound textures (magenta)",
     "Dump frame pictures (picdump)", "Clear the EFB each pass (efbclear)", "Dump staged buffers (bufdump)",
     "Dump textures (texdump)", "Dump shaders (shaderdump)", "No draw merging (nomerge)",
     "UV trace (uvlog)", "Matrix trace (mtxlog)", "Performance timers (perftimer)",
-    "Re-upload vertex arrays (arrayup)", "Guest profiler (profile)",
+    "Re-upload vertex arrays (arrayup)", "Guest profiler (profile)", "GX decode thread (cpthread)",
 };
 constexpr const char* kDiagHelp[] = {
     "Forces depth and stencil tests and depth writes off for every pipeline. Geometry can show through other geometry; for isolating depth problems.",
@@ -3468,6 +3468,7 @@ constexpr const char* kDiagHelp[] = {
     "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log. Use it to measure where frame time goes.",
     "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data.",
     "Samples the guest thread 200 times a second while on. Turning it off prints the most-sampled guest functions to the log.",
+    "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. Switches at the end of the frame. Turn it off if anything draws wrong.",
 };
 constexpr int kDiagCount = int(std::size(kDiagKeys));
 

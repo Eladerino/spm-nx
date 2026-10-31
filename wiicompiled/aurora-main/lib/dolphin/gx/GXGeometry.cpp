@@ -2,6 +2,7 @@
 #include "__gx.h"
 #include "dolphin/gd/GDGeometry.h"
 #include "../../gx/fifo.hpp"
+#include "dolphin/gx/GXAurora.h"
 
 static inline void SETVCDATTR(GXAttr attr, GXAttrType type) {
   switch (attr) {
@@ -153,11 +154,19 @@ static inline void SETVAT(u32* va, u32* vb, u32* vc, GXAttr attr, GXCompCnt cnt,
   }
 }
 
+// These compare against the decoder's state. With the decode thread on, that state is its own,
+// so they report a change and the setter dirties the registers; the decoder drops the repeats.
 static inline bool AuroraVtxDescDiffers(GXAttr attr, GXAttrType type) {
+  if (aurora::gx::fifo::decode_thread_active()) {
+    return true;
+  }
   return attr >= GX_VA_PNMTXIDX && attr < GX_VA_MAX_ATTR && g_gxState.vtxDesc[attr] != type;
 }
 
 static inline bool AuroraVtxAttrFmtDiffers(GXVtxFmt vtxfmt, GXAttr attr, GXCompCnt cnt, GXCompType type, u8 frac) {
+  if (aurora::gx::fifo::decode_thread_active()) {
+    return true;
+  }
   if (vtxfmt < GX_VTXFMT0 || vtxfmt >= GX_MAX_VTXFMT || attr < GX_VA_POS || attr >= GX_VA_MAX_ATTR) {
     return true;
   }
@@ -190,6 +199,15 @@ void GXSetVtxDesc(GXAttr attr, GXAttrType type) {
 
 void GXSetSourceVtxDesc(GXAttr attr, GXAttrType type) {
   if (attr >= GX_VA_PNMTXIDX && attr < GX_VA_MAX_ATTR) {
+    if (aurora::gx::fifo::decode_thread_active()) {
+      aurora::gx::fifo::DirectCommand cmd;
+      cmd.put8(GX_LOAD_AURORA);
+      cmd.put16(GX_LOAD_AURORA_SOURCE_VTX_DESC);
+      cmd.put8(static_cast<u8>(attr));
+      cmd.put8(static_cast<u8>(type));
+      aurora::gx::fifo::insert_at_drain_point(cmd);
+      return;
+    }
     g_gxState.sourceVtxDesc[attr] = type;
   }
 }

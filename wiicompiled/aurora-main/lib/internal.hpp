@@ -135,6 +135,12 @@ extern char g_gameName[4];
 void wait_for_frame_worker() noexcept;
 std::chrono::nanoseconds wait_for_frame_worker_sealed() noexcept;
 bool wait_for_frame_worker_for(std::chrono::microseconds timeout) noexcept;
+bool wait_for_frame_worker_sealed_for(std::chrono::microseconds timeout) noexcept;
+// The frame worker waits service the guest's timing (the runtime's wait callback) on each timeout,
+// which only the game thread may do. The GX decode thread opts out; the game thread services the
+// callback through service_frame_worker_wait_callback while it waits for the decode thread.
+void skip_frame_worker_wait_callback_on_this_thread() noexcept;
+void service_frame_worker_wait_callback() noexcept;
 std::recursive_mutex& renderer_gpu_mutex() noexcept;
 
 template <typename T>

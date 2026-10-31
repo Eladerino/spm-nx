@@ -332,6 +332,13 @@ void stage_time_add_frametotal(std::chrono::nanoseconds duration) noexcept;
 // "producer" does not cover), gxcall is the runtime's whole GX__CallDisplayList HLE including it.
 void stage_time_add_dlprocess(std::chrono::nanoseconds duration) noexcept;
 void stage_time_add_gxcall(std::chrono::nanoseconds duration) noexcept;
+// The GX decode thread (lib/gx/fifo.cpp), printed as a [cpthread] line after [frametime] for a
+// window it ran in. cpwait is the game thread waiting for it (syncs, and a full queue); cpbatch is
+// one batch decoded: its decode time, the sealed wait before it and its size. With the thread on,
+// producer and dlprocess above are its time, not the game thread's.
+void stage_time_add_cpwait(std::chrono::nanoseconds duration) noexcept;
+void stage_time_add_cpbatch(std::chrono::nanoseconds decode, std::chrono::nanoseconds sealedWait,
+                            uint32_t bytes) noexcept;
 // Prints the current, partial [frametime] window now and re-baselines, so a test segment
 // gets its own numbers instead of whatever window it happened to land in; a no-op while
 // the timers are off.
