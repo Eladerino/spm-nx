@@ -2329,7 +2329,7 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
     GXVtxFmt fmt = static_cast<GXVtxFmt>(0);
   };
   static Memo memo{};
-  // Draws the memo answered since the last full lookup, handed to the perftimer's [pipeline] line with it.
+  // Lookups the memo answered since the last full one, handed to the perftimer's [pipeline] line with it.
   static u32 memoHits = 0;
 
   const u32 sampleCount = gfx::get_sample_count();

@@ -346,8 +346,9 @@ void stage_time_add_cpwait(std::chrono::nanoseconds duration, AuroraGxWaitSite s
 void stage_time_add_cpsync(AuroraGxWaitSite site) noexcept;
 // Where the game is (AuroraSetPerfPlace): the perftimer's [place] line lists the places of each window.
 void stage_time_set_place(const char* place) noexcept;
-// One full pipeline lookup by the GX decoder (its per-draw memo missed), with the draws the memo
-// answered before it and whether the lookup had to create a cache entry: the [pipeline] line.
+// One full pipeline lookup by the GX decoder (its memo missed), with the lookups the memo answered
+// before it and whether the lookup had to create a cache entry: the [pipeline] line. A draw looks its
+// pipeline up twice (admitting it, then recording it), so lookups run at about twice the draw count.
 void stage_time_add_pipeline_lookup(uint32_t memoHits, bool created) noexcept;
 void stage_time_add_cpbatch(std::chrono::nanoseconds decode, std::chrono::nanoseconds sealedWait,
                             uint32_t bytes) noexcept;
