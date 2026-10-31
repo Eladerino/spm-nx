@@ -42,6 +42,7 @@ constexpr const char* kCrashLog = "/switch/spm-nx/UserData/Logs/crash.txt";
 bool g_sockets = false;
 u64 g_mainThreadId = 0;
 std::atomic<bool> g_crashing{false};
+std::atomic<u64> g_exitingThread{0};  // the thread in userAppExit(), which unmaps guest memory
 int g_crashFd = -1;
 char g_crashLine[512];
 
@@ -174,7 +175,11 @@ void userAppInit(void) {
 }
 
 void userAppExit(void) {
-    // After main() and the static destructors, so nothing touches guest memory any more.
+    // After main() and the static destructors. A thread still running (the fatal exit leaves
+    // Aurora's alive) may touch guest memory once it is unmapped; the crash handler parks it.
+    u64 self = 0;
+    svcGetThreadId(&self, CUR_THREAD_HANDLE);
+    g_exitingThread = self;
     spm_switch_guest_memory_release();
     std::fflush(stderr);
     if (g_sockets) {
@@ -183,16 +188,20 @@ void userAppExit(void) {
 }
 
 void __libnx_exception_handler(ThreadExceptionDump* ctx) {
+    u64 threadId = 0;
+    svcGetThreadId(&threadId, CUR_THREAD_HANDLE);
+    // During exit, another thread's fault is one that outlived the unmapped guest memory, not a
+    // crash worth a report over the one that may have caused the exit: it waits, like a second
+    // crash does. The exiting thread's own fault is still reported.
+    const u64 exiting = g_exitingThread;
     bool expected = false;
-    if (!g_crashing.compare_exchange_strong(expected, true)) {
+    if ((exiting != 0 && exiting != threadId) || !g_crashing.compare_exchange_strong(expected, true)) {
         for (;;) {  // a second thread's exception waits for the first report to end the process
             svcSleepThread(1000000000ULL);
         }
     }
     g_crashFd = open(kCrashLog, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 
-    u64 threadId = 0;
-    svcGetThreadId(&threadId, CUR_THREAD_HANDLE);
     Say("[switch] CRASH: %s (0x%" PRIx32 ") esr=0x%" PRIx32 " far=0x%016" PRIx64 " on thread %" PRIu64 "%s\n",
         ExceptionName(ctx->error_desc), ctx->error_desc, ctx->esr, ctx->far.x, threadId,
         threadId == g_mainThreadId ? " (the main thread: guest scheduler)" : " (not the main thread)");
