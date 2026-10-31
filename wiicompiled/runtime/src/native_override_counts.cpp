@@ -1,7 +1,7 @@
 // Calls per native override per perftimer window: the [calls] lines.
 //
-// Every PPC_NATIVE_OVERRIDE carries a NativeOverrideCounter (hle_stubs.h), linked here at static
-// init. At the end of each perftimer window aurora calls PrintNativeOverrideCounts, which prints
+// Every native override has a NativeOverrideCounter keyed by its guest address (NativeOverrideCalls<>
+// in abi_bridge.h), hit on both paths guest code dispatches through, and linked here at static init. At the end of each perftimer window aurora calls PrintNativeOverrideCounts, which prints
 // the overrides that ran in it, busiest first, as calls per frame. The GX worker design uses these
 // to tell which GX calls run often enough that the game thread must not wait on them.
 
@@ -26,6 +26,15 @@ constexpr double kOverrideCountMinPerFrame = 0.05;
 constexpr size_t kOverrideCountMaxEntries = 60;
 constexpr size_t kOverrideCountPerLine = 6;
 
+// An override's counter has no name of its own: it takes the registered winner's at its address.
+const char* CounterName(NativeOverrideCounter& c) {
+    if (c.name == nullptr) {
+        const TranslatedFunctionInfo* info = TranslatedFunctionRegistry::FindByAddressPtr(c.address);
+        c.name = (info != nullptr && info->name != nullptr && info->name[0] != '\0') ? info->name : "(unnamed override)";
+    }
+    return c.name;
+}
+
 void PrintNativeOverrideCounts(uint64_t firstFrame, uint64_t lastFrame) {
     if (lastFrame < firstFrame) {
         return;
@@ -42,7 +51,7 @@ void PrintNativeOverrideCounts(uint64_t firstFrame, uint64_t lastFrame) {
         }
         total += delta;
         if (static_cast<double>(delta) / frames >= kOverrideCountMinPerFrame) {
-            ran.emplace_back(delta, c->name);
+            ran.emplace_back(delta, CounterName(*c));
         }
     }
     if (ran.empty()) {
@@ -75,6 +84,11 @@ void PrintNativeOverrideCounts(uint64_t firstFrame, uint64_t lastFrame) {
 } // namespace
 
 NativeOverrideCounter::NativeOverrideCounter(const char* counterName) noexcept : name(counterName) {
+    next = g_nativeOverrideCounterHead;
+    g_nativeOverrideCounterHead = this;
+}
+
+NativeOverrideCounter::NativeOverrideCounter(uint32_t guestAddress) noexcept : address(guestAddress) {
     next = g_nativeOverrideCounterHead;
     g_nativeOverrideCounterHead = this;
 }
