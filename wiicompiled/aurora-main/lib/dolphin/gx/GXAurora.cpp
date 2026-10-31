@@ -185,6 +185,8 @@ void AuroraGxEndWaitSite(AuroraGxWaitSite previous) { aurora::gx::fifo::end_wait
 
 uint32_t AuroraGxDecodeThreadHandle() { return aurora::gx::fifo::decode_thread_handle(); }
 
+void AuroraSetPerfPlace(const char* place) { aurora::gfx::stage_time_set_place(place); }
+
 void GXRestoreViewportScissorRender() {
   // Run queued GX draws before leaving the direct layout safe area.
   aurora::gx::fifo::drain();
