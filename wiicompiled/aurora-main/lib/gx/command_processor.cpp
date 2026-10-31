@@ -1584,6 +1584,12 @@ static void handle_bp(u32 value, bool bigEndian) {
 }
 
 extern "C" void GXApplyBPReg(u8 reg, u32 value) {
+  // With the decode thread on, the write is decoded where this applied it (NSMBW_MERGE_SUSPECTS then
+  // lists it as a FIFO write).
+  if (decode_thread_active()) {
+    queue_bp_write((static_cast<u32>(reg) << 24) | (value & 0x00FFFFFFu));
+    return;
+  }
   const bool wasDirty = g_gxState.stateDirty;
   handle_bp((static_cast<u32>(reg) << 24) | (value & 0x00FFFFFFu), true);
   if (MergeSuspectsOn()) note_write(0, 0x100 | reg, value & 0x00FFFFFFu, wasDirty);
@@ -2817,9 +2823,21 @@ bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, ui
     __GXSetDirtyState();
   }
 
+  // With the decode thread on, the vertices go into its batch and are checked there; a size
+  // mismatch is logged and dropped instead of being handed back for the caller's fallback.
+  if (decode_thread_active()) {
+    queue_raw_draw(static_cast<uint8_t>(prim), static_cast<uint8_t>(fmt), vertices, vtxCount, vertexBytes);
+    return true;
+  }
+
   // Raw bridge draws consume live decoded GX state that is also maintained by the HLE producer.
   drain();
+  return decode_raw_draw(prim, fmt, vertices, vtxCount, vertexBytes);
+}
 
+bool decode_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
+                     uint32_t vertexBytes) {
+  ProcessTimer timer; // nested in submit_raw_draw's on the game thread, so it counts once there
   u32 vtxSize;
   if (g_gxState.lastVtxFmt == fmt) LIKELY {
     vtxSize = g_gxState.lastVtxSize;
@@ -3345,6 +3363,29 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     pos += 8;
   } else if (subCmd == GX_LOAD_AURORA_INVALIDATE_TEX_ALL) {
     invalidate_static_texture_cache();
+  } else if (subCmd == GX_LOAD_AURORA_SOURCE_VTX_DESC) {
+    CHECK(pos + 2 <= size, "GX_LOAD_AURORA_SOURCE_VTX_DESC read overrun");
+    const u8 attr = data[pos];
+    const u8 type = data[pos + 1];
+    pos += 2;
+    if (attr >= GX_VA_PNMTXIDX && attr < GX_VA_MAX_ATTR) {
+      g_gxState.sourceVtxDesc[attr] = static_cast<GXAttrType>(type);
+    }
+  } else if (subCmd == GX_LOAD_AURORA_SCISSOR_OFFSET) {
+    CHECK(pos + 8 <= size, "GX_LOAD_AURORA_SCISSOR_OFFSET read overrun");
+    g_gxState.scissorOffsetX = static_cast<s32>(read_u32(data + pos, bigEndian));
+    pos += 4;
+    g_gxState.scissorOffsetY = static_cast<s32>(read_u32(data + pos, bigEndian));
+    pos += 4;
+  } else if (subCmd == GX_LOAD_AURORA_REPLACEMENT_TLUT) {
+    CHECK(pos + 17 <= size, "GX_LOAD_AURORA_REPLACEMENT_TLUT read overrun");
+    const u8 idx = data[pos];
+    pos += 1;
+    const auto* obj = reinterpret_cast<const GXTlutObj*>(read_u64(data + pos, bigEndian));
+    pos += 8;
+    auto* taken = reinterpret_cast<void*>(read_u64(data + pos, bigEndian));
+    pos += 8;
+    gfx::texture_replacement::load_taken_tlut(obj, taken, idx);
   } else if (subCmd == GX_LOAD_AURORA_DEBUG_GROUP_PUSH) {
     auto label = read_string(data, pos, size, bigEndian);
     gfx::push_debug_group(std::move(label));
@@ -3395,6 +3436,7 @@ extern "C" void AuroraSetWidePerspectiveAspect(float aspect) {
 // Decoded vertex descriptor/format state, so the runtime can mirror changes a host display list made.
 extern "C" void aurora_spm_vtx_state(uint8_t* desc26, uint8_t* fmt8x26x3) {
   using namespace aurora::gx;  // defined outside the namespace for C linkage
+  fifo::sync();                // the decode thread's state, when it is on
   for (int a = 0; a < 26 && a < int(MaxVtxAttr); ++a) desc26[a] = static_cast<uint8_t>(g_gxState.vtxDesc[a]);
   for (int f = 0; f < 8; ++f)
     for (int a = 0; a < 26 && a < int(MaxVtxAttr); ++a) {

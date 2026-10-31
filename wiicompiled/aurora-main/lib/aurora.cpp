@@ -69,6 +69,7 @@ AuroraConfig g_config;
 uint32_t g_sdlCustomEventsStart;
 char g_gameName[4];
 std::atomic<AuroraFrameWorkerWaitCallback> g_frameWorkerWaitCallback{nullptr};
+thread_local bool t_skipFrameWorkerWaitCallback = false;
 // Presentation schedule for the frame being sealed, set by the producer. Jobs carry absolute
 // deadlines derived from it, so the presenter cannot drift. Zero means present when ready.
 std::atomic<uint64_t> g_presentScheduleBaseNanos{0};
@@ -412,8 +413,8 @@ bool wait_for_frame_worker_private_for(FrameWorkerPhase phase, std::chrono::micr
   lock.unlock();
   // Both phases service the guest's alarm/retrace pump identically; the
   // producer must keep its own timing alive however long it waits.
-  if (const auto callback = g_frameWorkerWaitCallback.load(std::memory_order_acquire)) {
-    callback();
+  if (!t_skipFrameWorkerWaitCallback) {
+    service_frame_worker_wait_callback();
   }
   return false;
 }
@@ -1491,6 +1492,9 @@ wgpu::BindGroup encode_presentation_snapshot(wgpu::CommandEncoder& encoder,
 #endif
 
 void shutdown() noexcept {
+#ifdef AURORA_ENABLE_GX
+  gx::fifo::stop_decode_thread();
+#endif
   stop_frame_worker();
 #ifdef AURORA_ENABLE_GX
   stop_presenter();
@@ -2153,6 +2157,8 @@ void end_frame() {
   // Seal all current GX work on the CPU while the renderer is known ready.
   // Later FIFO writes belong exclusively to the next frame.
   gx::fifo::drain();
+  // Everything recorded is decoded now, so the decode thread toggle switches here.
+  gx::fifo::apply_decode_thread_request();
   {
     std::lock_guard lock(g_frameWorker.mutex);
     g_frameWorker.framePrepared = false;
@@ -2167,6 +2173,15 @@ void end_frame() {
 } // namespace
 
 void wait_for_frame_worker() noexcept { wait_for_frame_worker_private(FrameWorkerPhase::Done); }
+bool wait_for_frame_worker_sealed_for(std::chrono::microseconds timeout) noexcept {
+  return wait_for_frame_worker_private_for(FrameWorkerPhase::Sealed, timeout);
+}
+void skip_frame_worker_wait_callback_on_this_thread() noexcept { t_skipFrameWorkerWaitCallback = true; }
+void service_frame_worker_wait_callback() noexcept {
+  if (const auto callback = g_frameWorkerWaitCallback.load(std::memory_order_acquire)) {
+    callback();
+  }
+}
 std::chrono::nanoseconds wait_for_frame_worker_sealed() noexcept {
   if (g_frameWorker.sealed.load(std::memory_order_acquire)) {
     return std::chrono::nanoseconds::zero();
@@ -2288,6 +2303,8 @@ bool aurora_button_icon_marker(int id) {
 }
 bool aurora_flush_efb_copies_to_ram() {
 #ifdef AURORA_ENABLE_GX
+  // The decode thread's staging splits retire EFB copies too.
+  aurora::gx::fifo::sync();
   if (!aurora::gfx::efb_ram::has_pending()) {
     return true;
   }
@@ -2324,6 +2341,7 @@ bool aurora_flush_efb_copies_to_ram() {
 }
 bool aurora_flush_efb_copy_to_ram(void* dest) {
 #ifdef AURORA_ENABLE_GX
+  aurora::gx::fifo::sync();
   if (dest == nullptr || !aurora::gfx::efb_ram::has_pending(dest)) {
     return false;
   }

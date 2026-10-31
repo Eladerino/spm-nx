@@ -10,36 +10,6 @@
 
 static __GXData_struct sSavedGXData;
 
-// process() stops at a draw that no longer fits the staging batch and returns where it stopped; submit the batch and
-// resume there, as fifo::drain does. Ignoring that return dropped the rest of the list (SPM: back walls and floors of
-// big map display lists never drew).
-static void process_display_list(const u8* data, u32 nbytes, bool bigEndian) {
-  struct ReplayScope {
-    bool prev = aurora::gx::fifo::g_replayingDisplayList;
-    ReplayScope() { aurora::gx::fifo::g_replayingDisplayList = true; }
-    ~ReplayScope() { aurora::gx::fifo::g_replayingDisplayList = prev; }
-  } replayScope;
-  struct TimeScope {
-    const bool on = aurora::gfx::stage_timers_enabled();
-    const std::chrono::steady_clock::time_point start =
-        on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    ~TimeScope() {
-      if (on) aurora::gfx::stage_time_add_dlprocess(std::chrono::steady_clock::now() - start);
-    }
-  } timeScope;
-  u32 consumed = 0;
-  bool retried = false;
-  while (consumed < nbytes) {
-    const u32 count = aurora::gx::fifo::process(data + consumed, nbytes - consumed, bigEndian);
-    if (count == 0 && retried)
-      throw aurora::gfx::StagingCapacityError("display list draw does not fit after capacity submission");
-    consumed += count;
-    if (consumed >= nbytes) break;
-    aurora::gfx::split_staging_batch();
-    retried = true;
-  }
-}
-
 extern "C" {
 bool GXDisplayListIsEmpty() {
   return aurora::gx::fifo::in_display_list() && aurora::gx::fifo::detail::sDlWritePos == 0 &&
@@ -101,9 +71,16 @@ void GXCallDisplayList(const void* data, u32 nbytes) {
     return;
   }
 
+  // With the decode thread on, the list's bytes go into its batch: the caller's buffer is only
+  // borrowed for this call.
+  if (aurora::gx::fifo::decode_thread_active()) {
+    aurora::gx::fifo::queue_display_list(static_cast<const u8*>(data), nbytes, true);
+    return;
+  }
+
   // Decode the display list immediately while its borrowed resources are valid.
   aurora::gx::fifo::drain();
-  process_display_list(static_cast<const u8*>(data), nbytes, true);
+  aurora::gx::fifo::process_display_list(static_cast<const u8*>(data), nbytes, true);
 }
 
 void GXCallDisplayListLE(const void* data, u32 nbytes) {
@@ -117,10 +94,15 @@ void GXCallDisplayListLE(const void* data, u32 nbytes) {
     __GXSendFlushPrim();
   }
 
+  if (aurora::gx::fifo::decode_thread_active()) {
+    aurora::gx::fifo::queue_display_list(static_cast<const u8*>(data), nbytes, false);
+    return;
+  }
+
   // Decode little-endian lists separately after finishing the normal FIFO work.
   aurora::gx::fifo::drain();
 
   // Process the display list through the command processor (little-endian)
-  process_display_list(static_cast<const u8*>(data), nbytes, false);
+  aurora::gx::fifo::process_display_list(static_cast<const u8*>(data), nbytes, false);
 }
 }

@@ -63,6 +63,28 @@ extern "C" {
 
 #define GX_LOAD_AURORA_INVALIDATE_TEX_ALL 0x0035
 
+/*
+ * State that GX functions write directly when the decoder runs on the game thread. With the
+ * decode thread on, these carry the same writes through the FIFO instead.
+ */
+
+/**
+ * GXSetSourceVtxDesc. Followed by u8 attribute and u8 attribute type.
+ */
+#define GX_LOAD_AURORA_SOURCE_VTX_DESC 0x0040
+
+/**
+ * GXSetScissorBoxOffset's exact offsets (BP 0x59 holds them rounded to even).
+ * Followed by s32 x offset and s32 y offset.
+ */
+#define GX_LOAD_AURORA_SCISSOR_OFFSET 0x0041
+
+/**
+ * GXLoadTlut's texture replacement palette. Followed by u8 TLUT slot, u64 GXTlutObj address and
+ * u64 address of the palette copy taken on the game thread (0 for none).
+ */
+#define GX_LOAD_AURORA_REPLACEMENT_TLUT 0x0042
+
 
 /*
  * Debug marker stuff
@@ -157,6 +179,14 @@ void GXCreateFrameBuffer(u32 width, u32 height);
 void GXRestoreFrameBuffer(void);
 
 void GXApplyBPReg(u8 reg, u32 value);
+
+/**
+ * With the decode thread on (Switch Diagnostics "cpthread"), waits until it has decoded what the
+ * calling thread would have by now: every draw and display list recorded so far. For host code
+ * that reuses memory a recorded draw still points at, or that treats a draw sync token as reached.
+ * Does nothing while GX decodes on the calling thread.
+ */
+void AuroraGxSync(void);
 
 #if __cplusplus
 }

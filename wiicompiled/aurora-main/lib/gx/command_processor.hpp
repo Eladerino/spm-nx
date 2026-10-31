@@ -24,5 +24,8 @@ void nsmbw_set_array_reupload(bool on);
 // Submit already-packed direct vertex bytes against the current GX state.
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
                      uint32_t vertexBytes);
+// submit_raw_draw's decode half, after its drain: what the decode thread runs for a raw draw.
+bool decode_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
+                     uint32_t vertexBytes);
 
 } // namespace aurora::gx::fifo
