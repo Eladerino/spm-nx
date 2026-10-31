@@ -2,6 +2,8 @@
 // SelectThread scheduler, OSWakeupThread and the OSMutex primitives.
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 
@@ -164,6 +166,14 @@ extern "C" void func_8026DE74(CpuContext* ctx);
 
 static void SelectThreadSwitch(CpuContext* cpu, uint32_t runningContext, bool resumeInIdle);
 
+// SelectThreadSwitch's idle loop, timed (OS_HLE_IdleNanosTotal).
+static std::atomic<uint64_t> g_idleNanos{0};
+
+uint64_t OS_HLE_IdleNanosTotal() noexcept
+{
+    return g_idleNanos.load(std::memory_order_relaxed);
+}
+
 extern "C" void SelectThread_801a9c08(CpuContext* ctx)
 {
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
@@ -265,6 +275,16 @@ static void SelectThreadSwitch(CpuContext* cpu, uint32_t runningContext, bool re
     // Check if there are any runnable threads
     uint32_t reschedPending = ::Memory::Read32(kSchedulerPendingFlagAddr);
     if (resumeInIdle || reschedPending == 0) {
+        struct IdleTimer {
+            std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+            ~IdleTimer()
+            {
+                const auto elapsed = std::chrono::steady_clock::now() - start;
+                g_idleNanos.fetch_add(
+                    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
+                    std::memory_order_relaxed);
+            }
+        } idleTimer;
         if (!resumeInIdle) {
             // No threads to run - enter idle loop
             TryInvokeSwitchCallback(runningContext, 0, cpu);

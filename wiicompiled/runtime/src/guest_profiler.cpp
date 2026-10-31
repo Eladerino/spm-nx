@@ -10,7 +10,9 @@
 // thread that pauses the main thread - the guest runs there; Aurora's frame worker only encodes
 // and presents sealed frames - about 200 times a second and records its PC, LR and frame-pointer
 // chain. Turning the switch off prints the hot list to stderr.log in the same style as the
-// Windows report: top guest functions by leaf samples, then the top call chains.
+// Windows report: top guest functions by leaf samples, then the top call chains. While aurora's GX
+// decode thread runs, it is sampled on the same ticks, and both threads' stacks are also printed
+// raw, as module offsets, for switch/scripts/profile-report.py to name with the build's symbols.
 #include "guest_profiler.h"
 
 #include "abi_bridge.h"
@@ -37,6 +39,9 @@
 
 #if defined(__SWITCH__)
 #include <switch.h>
+
+// aurora (GXAurora.h, which cannot be included next to switch.h: their u32 types differ).
+extern "C" uint32_t AuroraGxDecodeThreadHandle(void);
 #endif
 
 extern "C" {
@@ -239,42 +244,73 @@ void Run(HANDLE thread, double startSeconds, double lengthSeconds) {
 // prove on Horizon: from a sampler thread, svcSetThreadActivity pauses the target thread,
 // svcGetThreadContext3 dumps its registers, and the thread is resumed immediately. The target
 // is the main thread (envGetMainThreadHandle): the guest executes there (main.cpp invokes the
-// guest entry on it; guest threads are fibers on it). Aurora's frame worker is deliberately
-// NOT sampled: it encodes and presents sealed frames, so its PCs would name Aurora and Dawn
-// code, not the guest functions this profiler exists to rank. Its cost is already bounded by
-// the perftimer stage split.
+// guest entry on it; guest threads are fibers on it). On the same ticks the sampler also takes
+// aurora's GX decode thread while it runs (AuroraGxDecodeThreadHandle; the cpthread switch), which
+// decodes what the game thread records and is what the game thread waits on while drawing. Its
+// samples are kept apart and reported raw only: aurora is not in the translated-function
+// registry. Aurora's frame worker is deliberately NOT sampled: it encodes and presents sealed
+// frames, and its cost is already bounded by the perftimer stage split.
 //
-// Rate: 200 samples a second. Each sample holds the game thread paused only for a register
+// Rate: 200 samples a second per thread. Each sample holds a thread paused only for a register
 // dump and at most kProfileMaxDepth stack reads (microseconds), so the duty cycle is well
 // under a percent even at 15 fps; the pauses can still jitter individual frame times, which
 // is why the switch is off by default and a profiling session is not a frame-time measurement.
 //
 // Failure behaviour: a failed pause or context read skips the sample and counts it; 20 in a
-// row stops sampling with an error line. Nothing here can leave the game thread paused: the
-// resume runs on every path out of a successful pause, and the resume's own failure is counted
-// like any other. Captured samples survive a dead sampler and print when the switch turns off.
+// row on the game thread stops sampling with an error line. The decode thread's failures are
+// only counted: it can end between the read of its handle and the pause. Nothing here can leave
+// a thread paused: the resume runs on every path out of a successful pause, and the resume's own
+// failure is counted like any other. Captured samples survive a dead sampler and print when the switch turns off.
 
 constexpr int kProfilePeriodMs = 5;              // 200 samples a second
 constexpr uint32_t kProfileMaxSamples = 120000;  // 10 minutes at that rate, then sampling stops
 constexpr int kProfileMaxDepth = 20;             // PC, LR, then frame-pointer return addresses
 constexpr int kProfileMaxFailures = 20;          // consecutive failed samples before giving up
 
+constexpr size_t kProfileRawLeafLines = 20000;  // per thread, hottest first
+
+// One sampled thread's capture, under g_profileMutex.
+struct ProfileCapture {
+    std::unordered_map<uintptr_t, uint32_t> samples;  // leaf address -> samples
+    std::vector<uintptr_t> frames;  // every captured stack's addresses, concatenated
+    std::vector<uint8_t> depths;    // one depth per captured stack
+    uint32_t total = 0;
+    uint32_t failures = 0;
+
+    void Clear() {
+        samples.clear();
+        frames.clear();
+        depths.clear();
+        total = 0;
+        failures = 0;
+    }
+
+    std::vector<std::vector<uintptr_t>> Stacks() const {
+        std::vector<std::vector<uintptr_t>> stacks;
+        stacks.reserve(depths.size());
+        size_t at = 0;
+        for (const uint8_t depth : depths) {
+            stacks.emplace_back(frames.begin() + at, frames.begin() + at + depth);
+            at += depth;
+        }
+        return stacks;
+    }
+};
+
 std::atomic<bool> g_profileRunning{false};
 std::thread g_profileThread;
 std::mutex g_profileMutex;
-std::unordered_map<uintptr_t, uint32_t> g_profileSamples;
-std::vector<uintptr_t> g_profileFrames;  // every captured stack's addresses, concatenated
-std::vector<uint8_t> g_profileDepths;    // one depth per captured stack
-uint32_t g_profileTotal = 0;
-uint32_t g_profileFailures = 0;
+ProfileCapture g_profileGame;    // the main thread, where the guest runs
+ProfileCapture g_profileDecode;  // aurora's GX decode thread, on the ticks it was running
+uint32_t g_profileDecodeAbsent = 0;  // ticks with no decode thread to sample
 uintptr_t g_profileBase = 0;  // this module's load base, for nro+ offsets in the report
 std::chrono::steady_clock::time_point g_profileStart{};
 std::chrono::steady_clock::time_point g_profileEnd{};
 bool g_profileEnded = false;
 
-// One sample of the game thread. False when the pause or the context read failed (the caller
-// counts it and carries on); the game thread is running again on every return path.
-bool ProfileSampleOnce(Handle thread) {
+// One sample of a thread into its capture. False when the pause or the context read failed (the
+// caller counts it and carries on); the thread is running again on every return path.
+bool ProfileSampleOnce(Handle thread, ProfileCapture& capture) {
     if (R_FAILED(svcSetThreadActivity(thread, ThreadActivity_Paused))) {
         return false;
     }
@@ -294,10 +330,18 @@ bool ProfileSampleOnce(Handle thread) {
         // the stack window above SP, strictly increasing, so a garbage or non-frame-pointer
         // link ends the walk instead of wandering into unrelated memory. Generated code is
         // not built with frame pointers in mind, so chains may end early; the leaf PC, which
-        // the hot list ranks, never depends on the walk.
+        // the hot list ranks, never depends on the walk. The walk also stays inside the mapping
+        // that holds SP, so a frame pointer that code used as an ordinary register can never send
+        // it into unmapped memory (a thread's stack can be far smaller than the window above).
+        uintptr_t stackEnd = 0;
+        MemoryInfo stackInfo{};
+        uint32_t stackPage = 0;
+        if (R_SUCCEEDED(svcQueryMemory(&stackInfo, &stackPage, context.sp)) && (stackInfo.perm & Perm_R) != 0) {
+            stackEnd = stackInfo.addr + stackInfo.size;
+        }
         uintptr_t fp = context.fp;
         while (depth < kProfileMaxDepth && fp != 0) {
-            if ((fp & 7u) != 0 || fp < context.sp || fp > context.sp + 0x400000) {
+            if ((fp & 7u) != 0 || fp < context.sp || fp > context.sp + 0x400000 || fp + 16 > stackEnd) {
                 break;
             }
             const uintptr_t next = *reinterpret_cast<const uintptr_t*>(fp);
@@ -317,15 +361,19 @@ bool ProfileSampleOnce(Handle thread) {
     }
     if (depth > 0) {
         std::lock_guard<std::mutex> lock(g_profileMutex);
-        ++g_profileSamples[frames[0]];
-        g_profileFrames.insert(g_profileFrames.end(), frames, frames + depth);
-        g_profileDepths.push_back(static_cast<uint8_t>(depth));
-        ++g_profileTotal;
+        ++capture.samples[frames[0]];
+        capture.frames.insert(capture.frames.end(), frames, frames + depth);
+        capture.depths.push_back(static_cast<uint8_t>(depth));
+        ++capture.total;
     }
     return true;
 }
 
 void ProfileSamplerMain() {
+    // Above the game, decode and worker threads (all 0x2C, and Horizon does not time-slice one
+    // priority): at their priority this thread would only get a core when one of them blocks or
+    // yields, and would then catch the thread it samples blocked or yielding far too often.
+    svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2B);
     const Handle gameThread = envGetMainThreadHandle();
     {
         MemoryInfo info{};
@@ -349,12 +397,12 @@ void ProfileSamplerMain() {
             break;
         }
         bool capped = false;
-        if (ProfileSampleOnce(gameThread)) {
+        if (ProfileSampleOnce(gameThread, g_profileGame)) {
             consecutiveFailures = 0;
         } else {
             {
                 std::lock_guard<std::mutex> lock(g_profileMutex);
-                ++g_profileFailures;
+                ++g_profileGame.failures;
             }
             if (++consecutiveFailures >= kProfileMaxFailures) {
                 RT_LOGF(RT_TAG_RUNTIME,
@@ -366,9 +414,17 @@ void ProfileSamplerMain() {
                 break;
             }
         }
+        const Handle decodeThread = static_cast<Handle>(AuroraGxDecodeThreadHandle());
+        if (decodeThread == INVALID_HANDLE) {
+            std::lock_guard<std::mutex> lock(g_profileMutex);
+            ++g_profileDecodeAbsent;
+        } else if (!ProfileSampleOnce(decodeThread, g_profileDecode)) {
+            std::lock_guard<std::mutex> lock(g_profileMutex);
+            ++g_profileDecode.failures;
+        }
         {
             std::lock_guard<std::mutex> lock(g_profileMutex);
-            capped = g_profileTotal >= kProfileMaxSamples;
+            capped = g_profileGame.total >= kProfileMaxSamples;
         }
         if (capped) {
             RT_LOGF(RT_TAG_RUNTIME,
@@ -392,22 +448,25 @@ void ProfileSamplerMain() {
 void ProfileReport() {
     std::unordered_map<uintptr_t, uint32_t> samples;
     std::vector<std::vector<uintptr_t>> stacks;
+    std::vector<std::vector<uintptr_t>> decodeStacks;
     uint32_t total = 0;
     uint32_t failures = 0;
+    uint32_t decodeTotal = 0;
+    uint32_t decodeFailures = 0;
+    uint32_t decodeAbsent = 0;
     uintptr_t base = 0;
     double seconds = 0;
     {
         std::lock_guard<std::mutex> lock(g_profileMutex);
-        samples = g_profileSamples;
-        total = g_profileTotal;
-        failures = g_profileFailures;
+        samples = g_profileGame.samples;
+        total = g_profileGame.total;
+        failures = g_profileGame.failures;
+        stacks = g_profileGame.Stacks();
+        decodeStacks = g_profileDecode.Stacks();
+        decodeTotal = g_profileDecode.total;
+        decodeFailures = g_profileDecode.failures;
+        decodeAbsent = g_profileDecodeAbsent;
         base = g_profileBase;
-        stacks.reserve(g_profileDepths.size());
-        size_t at = 0;
-        for (const uint8_t depth : g_profileDepths) {
-            stacks.emplace_back(g_profileFrames.begin() + at, g_profileFrames.begin() + at + depth);
-            at += depth;
-        }
         const auto end = g_profileEnded ? g_profileEnd : std::chrono::steady_clock::now();
         seconds = std::chrono::duration<double>(end - g_profileStart).count();
     }
@@ -455,6 +514,18 @@ void ProfileReport() {
     for (const auto& line : GuestProfileFormat::InclusiveNativeLines(stacks, entries, base, total, 25)) {
         RT_LOGF(RT_TAG_RUNTIME, "%s\n", line.c_str());
     }
+    // Both threads raw, for switch/scripts/profile-report.py (see RawLines).
+    RT_LOGF(RT_TAG_RUNTIME,
+            "[profile] raw begin: game %u samples; decode %u samples, %u ticks with no decode thread, "
+            "%u failed samples\n",
+            total, decodeTotal, decodeAbsent, decodeFailures);
+    for (const auto& line : GuestProfileFormat::RawLines("game", stacks, base, kProfileRawLeafLines)) {
+        RT_LOGF(RT_TAG_RUNTIME, "%s\n", line.c_str());
+    }
+    for (const auto& line : GuestProfileFormat::RawLines("decode", decodeStacks, base, kProfileRawLeafLines)) {
+        RT_LOGF(RT_TAG_RUNTIME, "%s\n", line.c_str());
+    }
+    RT_LOGF(RT_TAG_RUNTIME, "[profile] raw end\n");
     RT_LOGF(RT_TAG_RUNTIME, "[profile] end\n");
     std::fflush(stderr);
 }
@@ -508,11 +579,9 @@ void SetSwitchProfileEnabled(bool enabled) {
         }
         {
             std::lock_guard<std::mutex> lock(g_profileMutex);
-            g_profileSamples.clear();
-            g_profileFrames.clear();
-            g_profileDepths.clear();
-            g_profileTotal = 0;
-            g_profileFailures = 0;
+            g_profileGame.Clear();
+            g_profileDecode.Clear();
+            g_profileDecodeAbsent = 0;
             g_profileBase = 0;
             g_profileEnded = false;
             g_profileStart = std::chrono::steady_clock::now();
@@ -526,7 +595,8 @@ void SetSwitchProfileEnabled(bool enabled) {
             return;
         }
         RT_LOGF(RT_TAG_RUNTIME,
-                "[profile] started: sampling the game thread at %d Hz; toggle profile off for the hot list\n",
+                "[profile] started: sampling the game thread (and the GX decode thread while it runs) at %d Hz; "
+                "toggle profile off for the hot list\n",
                 1000 / kProfilePeriodMs);
         std::fflush(stderr);
         return;

@@ -8,6 +8,8 @@ extern "C" int g_spmSweepDump;
 #include "ppc_runtime.h"
 #include "runtime_log.h"
 
+#include <dolphin/gx/GXAurora.h>
+
 #include <tuple>
 #include <algorithm>
 #include <chrono>
@@ -643,7 +645,38 @@ void Assert57SelfTest(CpuContext* cpu) {
     RT_LOGF(RT_TAG_RUNTIME, "assert57 test: the game carried on\n");
 }
 
+// Where the game is, for logs: "<map> 2D" or "<map> 3D" while in a map (gp->mapName, marioCheck3d), else the
+// sequence ("title", "mapchange", ...). A change is logged as one [place] line with its frame, and handed to
+// aurora so the perftimer's [place] line names the rooms each window covered.
+std::mutex g_placeMutex;
+char g_place[48] = "boot";
+
+void TrackPlace(CpuContext* cpu, uint32_t presentedFrames) {
+    static constexpr const char* kSeqNames[] = {"logo", "title", "game", "mapchange", "gameover", "load"};
+    uint32_t now = 0, gp = 0;
+    if (!Memory::TryRead32(kNowSeq, now)) return;
+    char place[48];
+    if (now == 2 && cpu) {
+        char map[32] = {};
+        if (Memory::TryRead32(kGp, gp) && gp >= 0x80004000 && Memory::Contains(gp + 0x44, sizeof map)) {
+            for (uint32_t i = 0; i + 1 < sizeof map && (map[i] = char(Memory::Read8(gp + 0x44 + i))); ++i) {}
+        }
+        const bool is3d = CallGuest(cpu, 0x8012A624, 0) != 0;  // marioCheck3d
+        std::snprintf(place, sizeof place, "%s %s", map[0] ? map : "?", is3d ? "3D" : "2D");
+    } else {
+        std::snprintf(place, sizeof place, "%s", now < 6 ? kSeqNames[now] : "none");
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_placeMutex);
+        if (std::strcmp(place, g_place) == 0) return;
+        RT_LOGF(RT_TAG_RUNTIME, "[place] %s -> %s (frame %u)\n", g_place, place, presentedFrames);
+        std::memcpy(g_place, place, sizeof g_place);
+    }
+    AuroraSetPerfPlace(place);
+}
+
 void Tick(CpuContext* cpu, uint32_t presentedFrames) {
+    TrackPlace(cpu, presentedFrames);
     Assert57SelfTest(cpu);
     CheatSelfTest(cpu);
     SaveAndCheatsStep(cpu);
@@ -756,6 +789,11 @@ void SetGamePaused(bool paused) {
             s_savedLevel = -1;
         }
     });
+}
+void CurrentPlace(char* out, size_t size) {
+    if (size == 0) return;
+    std::lock_guard<std::mutex> lock(g_placeMutex);
+    std::snprintf(out, size, "%s", g_place);
 }
 int Seq() {
     uint32_t now = 0;

@@ -213,6 +213,18 @@ typedef enum AuroraGxWaitSite {
 AuroraGxWaitSite AuroraGxBeginWaitSite(AuroraGxWaitSite site);
 void AuroraGxEndWaitSite(AuroraGxWaitSite previous);
 
+/**
+ * The decode thread's kernel thread handle while it runs, on Switch, so the guest profiler can
+ * sample it; 0 elsewhere and while GX decodes on the game thread. Any thread.
+ */
+uint32_t AuroraGxDecodeThreadHandle(void);
+
+/**
+ * Where the game is ("he3_08 3D", "title"), for the perftimer: each window's [place] line lists the
+ * places it covered, in order. Any thread; cheap to call with an unchanged place.
+ */
+void AuroraSetPerfPlace(const char* place);
+
 #if __cplusplus
 }
 
