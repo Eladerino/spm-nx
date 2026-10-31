@@ -225,6 +225,12 @@ uint32_t AuroraGxDecodeThreadHandle(void);
  */
 void AuroraSetPerfPlace(const char* place);
 
+/**
+ * Called at the end of each perftimer window's lines with the window's first and last frame, so the
+ * host can print its own lines for the same window. Null removes it. Set it before frames run.
+ */
+void AuroraSetPerfWindowHook(void (*hook)(uint64_t firstFrame, uint64_t lastFrame));
+
 #if __cplusplus
 }
 

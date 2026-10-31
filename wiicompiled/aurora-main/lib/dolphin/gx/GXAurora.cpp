@@ -187,6 +187,10 @@ uint32_t AuroraGxDecodeThreadHandle() { return aurora::gx::fifo::decode_thread_h
 
 void AuroraSetPerfPlace(const char* place) { aurora::gfx::stage_time_set_place(place); }
 
+void AuroraSetPerfWindowHook(void (*hook)(uint64_t firstFrame, uint64_t lastFrame)) {
+  aurora::gfx::stage_time_set_window_hook(hook);
+}
+
 void GXRestoreViewportScissorRender() {
   // Run queued GX draws before leaving the direct layout safe area.
   aurora::gx::fifo::drain();

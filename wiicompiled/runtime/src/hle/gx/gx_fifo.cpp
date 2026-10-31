@@ -352,7 +352,12 @@ void SubmitAttribute(GXAttr attr, float* comps, const VtxAttrFmt& fmt, const u32
 
 // `val` is a raw big-endian bit pattern: the FIFO stream is type-agnostic, and
 // the float entry point converts before it gets here.
+// The perftimer's [calls] lines: guest stores to the GX FIFO address, one per store or burst.
+static NativeOverrideCounter s_fifoStoreCalls{"(GX FIFO store)"};
+static NativeOverrideCounter s_fifoBurstCalls{"(GX FIFO burst)"};
+
 void HleFifoWrite(u32 val, uint32_t sizeBytes) {
+    s_fifoStoreCalls.Hit();
     const bool recordOnly = IsDisplayListActive();
     if (recordOnly) {
         WriteDisplayListData(val, sizeBytes);
@@ -787,6 +792,7 @@ extern "C" void GX_HLE_FIFO_WriteBurst(const uint8_t* data, uint32_t sizeBytes) 
     if (data == nullptr || sizeBytes == 0) {
         return;
     }
+    s_fifoBurstCalls.Hit();
 
     if (IsDisplayListActive() && WriteDisplayListBurst(data, sizeBytes)) {
         return;
