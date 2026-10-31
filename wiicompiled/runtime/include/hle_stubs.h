@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <string>
 
 #include "abi_bridge.h"
@@ -66,10 +67,25 @@ extern "C" void OS_HLE_EndDeferredGuestCallbacks();
 // renaming requires updating Translator.Cli/Program.cs, RuntimeNativeGuestEffectAnalyzer.cs,
 // TranslatedBuildShardEmitter.cs and RuntimeNativeFunctionAbiProvider.cs together.
 
+// Calls per native override (and per other counted HLE entry, such as guest stores to the GX FIFO),
+// for the perftimer's [calls] lines: how often each runs per frame, which decides what the GX worker
+// can queue and what must answer the game at once. One counter per override, linked at static init.
+// Hit() is a relaxed load and store, not an atomic add: each counter has one writing thread at a time.
+struct NativeOverrideCounter {
+    const char* name;
+    std::atomic<uint64_t> calls{0};
+    uint64_t printed = 0;  // calls at the last [calls] print; only the printing thread touches it
+    NativeOverrideCounter* next = nullptr;
+    explicit NativeOverrideCounter(const char* counterName) noexcept;
+    void Hit() noexcept { calls.store(calls.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); }
+};
+
 #define PPC_NATIVE_OVERRIDE(addr_hex, name, ret_type, arg_list, call_list) \
-    extern "C" ret_type func_##addr_hex arg_list { return name call_list; } \
+    static NativeOverrideCounter s_nativeOverrideCalls_##addr_hex{#name}; \
+    extern "C" ret_type func_##addr_hex arg_list { s_nativeOverrideCalls_##addr_hex.Hit(); return name call_list; } \
     REGISTER_NATIVE_FUNCTION(0x##addr_hex, name)
 
 #define PPC_NATIVE_OVERRIDE_VOID(addr_hex, name, arg_list, call_list) \
-    extern "C" void func_##addr_hex arg_list { name call_list; } \
+    static NativeOverrideCounter s_nativeOverrideCalls_##addr_hex{#name}; \
+    extern "C" void func_##addr_hex arg_list { s_nativeOverrideCalls_##addr_hex.Hit(); name call_list; } \
     REGISTER_NATIVE_FUNCTION(0x##addr_hex, name)
