@@ -303,6 +303,27 @@ struct KnownTranslatedCpuCall {
         static constexpr void (*Entry)(CpuContext*) = &winner;                            \
     }
 
+// Calls per native override (and per other counted HLE entry, such as guest stores to the GX FIFO),
+// for the perftimer's [calls] lines: how often each runs per frame, which decides what the GX worker
+// can queue and what must answer the game at once. Counters link into one list at static init and
+// runtime/src/native_override_counts.cpp prints them. An override's counter is keyed by its guest
+// address and named from the registry when printed. Guest code reaches an override two ways, the
+// typed catalog in native_cpu_calls.inc and the registry's raw invoker, and both hit the same counter.
+// Hit() is a relaxed load and store, not an atomic add: each counter has one writing thread at a time.
+struct NativeOverrideCounter {
+    const char* name = nullptr;  // null for an override: named by address at print time
+    uint32_t address = 0;
+    std::atomic<uint64_t> calls{0};
+    uint64_t printed = 0;  // calls at the last [calls] print; only the printing thread touches it
+    NativeOverrideCounter* next = nullptr;
+    explicit NativeOverrideCounter(const char* counterName) noexcept;
+    explicit NativeOverrideCounter(uint32_t guestAddress) noexcept;
+    void Hit() noexcept { calls.store(calls.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); }
+};
+
+template <uint32_t Address>
+inline NativeOverrideCounter NativeOverrideCalls{Address};
+
 template <uint32_t Target>
 struct KnownNativeCpuCall {
     static constexpr bool kAvailable = false;
@@ -800,14 +821,27 @@ public:
 #define MKW_DETAIL_CAT(a, b) a##b
 #define MKW_DETAIL_MAKE_UNIQUE(a, b) MKW_DETAIL_CAT(a, b)
 
-// Three hand-written registration macros. Generated code never registers per function; every
+// Four hand-written registration macros. Generated code never registers per function; every
 // translated function reaches the registry via the bulk BulkTranslatedFunctionRecord tables
 // in the translator's *_registration TUs.
 #define REGISTER_TRANSLATED_FUNCTION(address, fn) \
     static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::BaseTranslated, false, kPpcAllNonvolatileFprMask, 0, 0, nullptr, KnownTranslatedCpuCall<address>::kMustRemainDynamicallyDispatchable)
+
+// The raw invoker of a counted native override: counts the call, then runs the plain thunk.
+template <uint32_t Address, auto Target>
+struct CountedAbiRawCpuThunk {
+    static void Invoke(CpuContext* cpu) {
+        NativeOverrideCalls<Address>.Hit();
+        AbiRawCpuThunk<Target>::Invoke(cpu);
+    }
+};
 
 #define REGISTER_NATIVE_FUNCTION(address, fn) \
     static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &AbiRawCpuThunk<&fn>::Invoke)
 
 #define REGISTER_NATIVE_FUNCTION_AS(address, fn, pretty_name) \
     static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_named_, __COUNTER__)(address, pretty_name, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &AbiRawCpuThunk<&fn>::Invoke)
+
+// REGISTER_NATIVE_FUNCTION for PPC_NATIVE_OVERRIDE: the same entry, with a raw invoker that counts.
+#define REGISTER_COUNTED_NATIVE_FUNCTION(address, fn) \
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &CountedAbiRawCpuThunk<address, &fn>::Invoke)
