@@ -20,11 +20,9 @@ inline constexpr size_t kGuestPageSize = 0x1000;
 // placement.
 inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'1000'0000'0000ull;
 #elif defined(__SWITCH__)
-// Horizon randomizes where its heap, alias and stack regions land in the 39-bit address space, so
-// no address is guaranteed free. The Switch build starts on the checked path (RequiresCheckedAccess,
-// switch/runtime/guest_flat_memory_horizon.cpp) and only reserves this window when the flat path is
-// enabled; 64 GiB, as on other AArch64 targets, is checked against those regions at that point.
-inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0010'0000'0000ull;
+// No fixed base: Horizon randomizes where its heap, alias and stack regions land in the 39-bit
+// address space, so no address is guaranteed free. switch/runtime/guest_flat_memory_horizon.cpp
+// takes the window from free code-region space at startup instead; MKW_FLAT_GUEST_BASE below.
 #elif defined(__aarch64__) && defined(__APPLE__)
 // Keep this well above the low address ranges that Darwin's ASLR may use for
 // a PIE executable and its shared cache. Apple Silicon's user VA is wider
@@ -46,7 +44,20 @@ inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0010'0000'0000ull;
 #error "guest_flat_memory.h has no fixed flat guest base chosen for this architecture"
 #endif
 
+#if defined(__SWITCH__)
+} // namespace GuestFlat
+
+// The window's runtime base. Declared const so the compiler treats it as invariant: a translated
+// function loads it once, where a plain global would be reloaded after every guest store (a byte
+// store may alias any object but a const one). It is written once, before any guest code runs, by
+// switch/runtime/horizon_flat_base.c, a C file that defines it non-const.
+extern "C" uint8_t* const mkw_flat_guest_base;
+#define MKW_FLAT_GUEST_BASE (::mkw_flat_guest_base)
+
+namespace GuestFlat {
+#else
 #define MKW_FLAT_GUEST_BASE (reinterpret_cast<uint8_t*>(GuestFlat::kFixedFlatGuestBase))
+#endif
 
 enum class Backing {
     Owned,
@@ -84,10 +95,15 @@ bool IsActive();
 #endif
 
 #if defined(__SWITCH__)
-// The Switch build maps no flat view (switch/runtime/guest_flat_memory_horizon.cpp), so every access
-// is checked, and saying so at compile time keeps the flag load, its branch and the dead flat arm
-// out of each of the translated game's guest loads and stores.
+// Horizon uses 4 KiB pages, so the Switch build is flat unless it was configured with
+// SPM_SWITCH_CHECKED_GUEST_MEMORY (the bring-up mode: no flat view is mapped and every access is
+// checked). Either way it is a compile-time answer, which keeps the flag load and its branch, and
+// the dead arm, out of each of the translated game's guest loads and stores.
+#if defined(SPM_SWITCH_CHECKED_GUEST_MEMORY)
 inline constexpr bool RequiresCheckedAccess() noexcept { return true; }
+#else
+inline constexpr bool RequiresCheckedAccess() noexcept { return false; }
+#endif
 #elif defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
 inline constexpr bool RequiresCheckedAccess() noexcept { return false; }
 #else

@@ -140,6 +140,8 @@ extern "C" {
 // runtime/horizon_tls.c: the thread pointer clang's thread_locals use (TPIDR_EL0) for this thread.
 void spm_switch_tls_init_main_thread(void);
 void spm_switch_tls_check_main_thread(void);
+// runtime/guest_flat_memory_horizon.cpp: unmaps the flat guest window, which hbloader needs gone.
+void spm_switch_guest_memory_release(void);
 
 // The exception handler runs on its own stack: the faulting thread's may be the problem.
 alignas(16) u8 __nx_exception_stack[0x4000];
@@ -172,6 +174,8 @@ void userAppInit(void) {
 }
 
 void userAppExit(void) {
+    // After main() and the static destructors, so nothing touches guest memory any more.
+    spm_switch_guest_memory_release();
     std::fflush(stderr);
     if (g_sockets) {
         socketExit();
@@ -192,10 +196,10 @@ void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     Say("[switch] CRASH: %s (0x%" PRIx32 ") esr=0x%" PRIx32 " far=0x%016" PRIx64 " on thread %" PRIu64 "%s\n",
         ExceptionName(ctx->error_desc), ctx->error_desc, ctx->esr, ctx->far.x, threadId,
         threadId == g_mainThreadId ? " (the main thread: guest scheduler)" : " (not the main thread)");
-    const uint64_t flatBase = GuestFlat::kFixedFlatGuestBase;
-    if (ctx->far.x >= flatBase && ctx->far.x - flatBase < GuestFlat::kGuestSpaceSize) {
-        Say("  -> guest address 0x%08" PRIx64 " through the flat view, which the Switch build does not map "
-            "yet: some code bypassed RequiresCheckedAccess()\n",
+    const uint64_t flatBase = reinterpret_cast<uint64_t>(MKW_FLAT_GUEST_BASE);
+    if (flatBase != 0 && ctx->far.x >= flatBase && ctx->far.x - flatBase < GuestFlat::kGuestSpaceSize) {
+        Say("  -> guest address 0x%08" PRIx64 " through the flat window, where nothing is mapped: a wild "
+            "guest pointer or an MMIO read (the window has no page traps)\n",
             ctx->far.x - flatBase);
     }
     SayAddress("  pc=", ctx->pc.x);

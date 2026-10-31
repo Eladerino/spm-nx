@@ -120,6 +120,15 @@ set(CMAKE_CXX_COMPILER_LAUNCHER "${SPM_SWITCH_DIR}/cmake/clang-launcher.sh")
 # rebuild anything. Bump this revision whenever they change, and every clang object rebuilds.
 add_compile_definitions(SPM_SWITCH_LAUNCHER_REV=2)
 
+# Guest memory: a flat 4 GiB window with the Wii's mirrors aliased onto one store each
+# (runtime/guest_flat_memory_horizon.cpp). ON goes back to the bring-up mode: no window, every guest
+# access checked against the page tables. Slower, but it needs none of the window's SVCs and reports
+# a bad guest access with the guest's CPU state instead of a data abort.
+option(SPM_SWITCH_CHECKED_GUEST_MEMORY "Switch: check every guest memory access (no flat window)" OFF)
+if(SPM_SWITCH_CHECKED_GUEST_MEMORY)
+    add_compile_definitions(SPM_SWITCH_CHECKED_GUEST_MEMORY=1)
+endif()
+
 # The Dawn backend toggles the runtime's aurora block reads: only the Null device exists here.
 macro(spm_switch_dawn_backends)
     set(DAWN_ENABLE_D3D12 OFF CACHE BOOL "" FORCE)
@@ -189,6 +198,7 @@ function(spm_switch_runtime_sources list_var)
     list(APPEND _sources
         "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/platform/android/co_switch.S"
         "${SPM_SWITCH_DIR}/runtime/guest_flat_memory_horizon.cpp"
+        "${SPM_SWITCH_DIR}/runtime/horizon_flat_base.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_mman.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_net.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
@@ -202,6 +212,7 @@ function(spm_switch_runtime_sources list_var)
     # They also stay out of its unity build: CMake would merge them into a generated unity_*_c.c
     # file that still gets the PCH, whatever these files' own SKIP_PRECOMPILE_HEADERS says.
     set_source_files_properties(
+        "${SPM_SWITCH_DIR}/runtime/horizon_flat_base.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_mman.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_net.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_mbedtls.c"
