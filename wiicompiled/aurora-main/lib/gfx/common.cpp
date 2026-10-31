@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 
 #include <absl/container/flat_hash_map.h>
 #include <magic_enum.hpp>
@@ -360,6 +361,14 @@ std::atomic<uint64_t> g_stageCpDecodeNs{0};
 std::atomic<uint64_t> g_stageCpSealedWaitNs{0};
 std::atomic<uint64_t> g_stageCpBatches{0};
 std::atomic<uint64_t> g_stageCpBytes{0};
+std::array<std::atomic<uint64_t>, AURORA_GX_WAIT_SITE_COUNT> g_stageCpSiteWaitNs{};
+std::array<std::atomic<uint64_t>, AURORA_GX_WAIT_SITE_COUNT> g_stageCpSiteWaits{};
+std::array<std::atomic<uint64_t>, AURORA_GX_WAIT_SITE_COUNT> g_stageCpSiteCalls{};
+// The [cpwait] line's names, in AuroraGxWaitSite order.
+constexpr std::array<const char*, AURORA_GX_WAIT_SITE_COUNT> kCpWaitSiteNames{
+    "other", "queue", "endframe", "copydisp", "copytex", "copysetup", "drawdone", "drawsync", "bbox",
+};
+static_assert(kCpWaitSiteNames.back() != nullptr, "a name for every AuroraGxWaitSite");
 
 // The [frametime] print's baselines: each print reports the deltas since the previous one
 // and re-baselines, so an on-demand print (stage_time_print_now) gives the segment just
@@ -379,6 +388,9 @@ uint64_t s_printedCpDecodeNs = 0;
 uint64_t s_printedCpSealedWaitNs = 0;
 uint64_t s_printedCpBatches = 0;
 uint64_t s_printedCpBytes = 0;
+std::array<uint64_t, AURORA_GX_WAIT_SITE_COUNT> s_printedCpSiteWaitNs{};
+std::array<uint64_t, AURORA_GX_WAIT_SITE_COUNT> s_printedCpSiteWaits{};
+std::array<uint64_t, AURORA_GX_WAIT_SITE_COUNT> s_printedCpSiteCalls{};
 std::mutex g_stagePrintMutex;
 
 void stage_time_print_window(uint64_t frame) {
@@ -417,6 +429,24 @@ void stage_time_print_window(uint64_t frame) {
                  ms(cpDecodeNs - s_printedCpDecodeNs), ms(cpSealedWaitNs - s_printedCpSealedWaitNs),
                  static_cast<unsigned long long>(cpBatches - s_printedCpBatches),
                  static_cast<unsigned long long>((cpBytes - s_printedCpBytes) / 1024));
+    std::string sites;
+    for (size_t i = 0; i < kCpWaitSiteNames.size(); ++i) {
+      char item[96];
+      std::snprintf(item, sizeof(item), "%s%s %.1f ms %llu/%llu", i == 0 ? "" : ", ", kCpWaitSiteNames[i],
+                    ms(g_stageCpSiteWaitNs[i].load(std::memory_order_relaxed) - s_printedCpSiteWaitNs[i]),
+                    static_cast<unsigned long long>(g_stageCpSiteWaits[i].load(std::memory_order_relaxed) -
+                                                    s_printedCpSiteWaits[i]),
+                    static_cast<unsigned long long>(g_stageCpSiteCalls[i].load(std::memory_order_relaxed) -
+                                                    s_printedCpSiteCalls[i]));
+      sites += item;
+    }
+    std::fprintf(stderr, "[cpwait] frames %llu-%llu: %s\n", static_cast<unsigned long long>(s_printedFrame + 1),
+                 static_cast<unsigned long long>(frame), sites.c_str());
+  }
+  for (size_t i = 0; i < kCpWaitSiteNames.size(); ++i) {
+    s_printedCpSiteWaitNs[i] = g_stageCpSiteWaitNs[i].load(std::memory_order_relaxed);
+    s_printedCpSiteWaits[i] = g_stageCpSiteWaits[i].load(std::memory_order_relaxed);
+    s_printedCpSiteCalls[i] = g_stageCpSiteCalls[i].load(std::memory_order_relaxed);
   }
   s_printedCpWaitNs = cpWaitNs;
   s_printedCpWaits = cpWaits;
@@ -455,9 +485,17 @@ void stage_time_add_gxcall(std::chrono::nanoseconds duration) noexcept {
   g_stageGxCallNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
 }
 
-void stage_time_add_cpwait(std::chrono::nanoseconds duration) noexcept {
+void stage_time_add_cpwait(std::chrono::nanoseconds duration, AuroraGxWaitSite site) noexcept {
   g_stageCpWaitNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
   g_stageCpWaits.fetch_add(1, std::memory_order_relaxed);
+  const size_t i = static_cast<size_t>(site) < kCpWaitSiteNames.size() ? static_cast<size_t>(site) : 0;
+  g_stageCpSiteWaitNs[i].fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
+  g_stageCpSiteWaits[i].fetch_add(1, std::memory_order_relaxed);
+}
+
+void stage_time_add_cpsync(AuroraGxWaitSite site) noexcept {
+  const size_t i = static_cast<size_t>(site) < kCpWaitSiteNames.size() ? static_cast<size_t>(site) : 0;
+  g_stageCpSiteCalls[i].fetch_add(1, std::memory_order_relaxed);
 }
 
 void stage_time_add_cpbatch(std::chrono::nanoseconds decode, std::chrono::nanoseconds sealedWait,

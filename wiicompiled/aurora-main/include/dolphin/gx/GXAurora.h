@@ -188,8 +188,45 @@ void GXApplyBPReg(u8 reg, u32 value);
  */
 void AuroraGxSync(void);
 
+/**
+ * Where the game thread waited on the decode thread, for the perftimer's [cpwait] line. Waits
+ * outside every named site count as AURORA_GX_WAIT_OTHER.
+ */
+typedef enum AuroraGxWaitSite {
+  AURORA_GX_WAIT_OTHER,
+  AURORA_GX_WAIT_QUEUE,      /* recording, with the decode thread a full queue behind */
+  AURORA_GX_WAIT_END_FRAME,  /* aurora's end of frame */
+  AURORA_GX_WAIT_COPY_DISP,  /* the copy to the XFB */
+  AURORA_GX_WAIT_COPY_TEX,   /* EFB copies to textures */
+  AURORA_GX_WAIT_COPY_SETUP, /* the copy source, destination, scale, clamp, filter and gamma setters */
+  AURORA_GX_WAIT_DRAW_DONE,  /* GXDrawDone and GXSetDrawDone */
+  AURORA_GX_WAIT_DRAW_SYNC,  /* draw sync tokens */
+  AURORA_GX_WAIT_BBOX,       /* bounding box reads and clears */
+  AURORA_GX_WAIT_SITE_COUNT
+} AuroraGxWaitSite;
+
+/**
+ * Names the site the decode thread waits that follow are counted under, until AuroraGxEndWaitSite
+ * puts back what this returned. A site already named wins over one named inside it, so a host
+ * function's site covers the GX functions it calls. Game thread only.
+ */
+AuroraGxWaitSite AuroraGxBeginWaitSite(AuroraGxWaitSite site);
+void AuroraGxEndWaitSite(AuroraGxWaitSite previous);
+
 #if __cplusplus
 }
+
+/** AuroraGxBeginWaitSite for one C++ scope. */
+class AuroraGxWaitSiteScope {
+public:
+  explicit AuroraGxWaitSiteScope(AuroraGxWaitSite site) : m_previous(AuroraGxBeginWaitSite(site)) {}
+  ~AuroraGxWaitSiteScope() { AuroraGxEndWaitSite(m_previous); }
+  AuroraGxWaitSiteScope(const AuroraGxWaitSiteScope&) = delete;
+  AuroraGxWaitSiteScope& operator=(const AuroraGxWaitSiteScope&) = delete;
+
+private:
+  AuroraGxWaitSite m_previous;
+};
 #endif
 
 #endif
