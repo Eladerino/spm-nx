@@ -1906,8 +1906,21 @@ void record_frame_telemetry() {
   FrameMarkNamed("Aurora frame");
 }
 
+// Whether the scene encode leaves the renderer mutex on every frame, not only when interpolation
+// inserts slots. On Switch it does: on the Lite the encode takes 4 to 6 ms a frame in heavy rooms, and
+// the producer's first drain of the next frame waited for all of it (the perftimer's sealedwait tracked
+// encode one for one), so the game thread lost that time every frame. Overlapped, the producer waits
+// only for the seal and the next frame's preparation, and the encode runs on the worker's core while
+// the guest computes. The other platforms keep upstream's behaviour.
+#if defined(__SWITCH__)
+constexpr bool kOverlapEncodeEveryFrame = true;
+#else
+constexpr bool kOverlapEncodeEveryFrame = false;
+#endif
+
 // One complete frame-worker cycle. The scene encode only leaves the renderer mutex when
-// interpolation actually inserts slots; otherwise both phases publish together.
+// interpolation actually inserts slots (or always, kOverlapEncodeEveryFrame); otherwise both
+// phases publish together.
 bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
   ZoneScopedN("Frame worker cycle");
   webgpu::fail_if_device_lost();
@@ -1922,7 +1935,7 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
     std::lock_guard gpuLock(g_rendererGpuMutex);
     seal_frame_locked(sealedFrame, ctx);
     sealed = WorkerClock::now();
-    overlapEncode = ctx.interpolationActive;
+    overlapEncode = ctx.interpolationActive || kOverlapEncodeEveryFrame;
     if (!overlapEncode) {
       presentationJobs = encode_sealed_frame(sealedFrame, ctx);
     }
