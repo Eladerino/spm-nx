@@ -16,7 +16,9 @@ The game boots and plays on Switch hardware, handheld and docked, and saves work
 top bar is not part of the Switch build, and neither is the PC launcher's update flow. It is
 a work in progress: performance is the standing problem (see "Known issues and performance"),
 and guest memory runs on its first phase, a checked-access path that is slower than the flat
-window planned for phase 2 (`docs/GUEST-MEMORY-PLAN.md`).
+window planned for phase 2 (`docs/GUEST-MEMORY-PLAN.md`). It is public now so others can
+follow along, try it, and offer a second pair of eyes while the performance work
+continues.
 
 ## Installing from a release
 
