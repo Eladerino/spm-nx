@@ -996,6 +996,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     } sequenceGuard;
     if (presentedXfb) {
         {
+            // The draw-dump and draw-limit counters below are Aurora's decoder's: with its decode
+            // thread on, let it finish the frame first (GXCopyDisp usually has already).
+            AuroraGxSync();
             const uint32_t pf = s_presentedXfbFrames.fetch_add(1, std::memory_order_relaxed) + 1;
             static const int32_t dumpTarget = [] { std::ifstream in("drawdump.txt"); int32_t f = -1; in >> f; return f; }();
             static const bool cullTest = std::ifstream("depth_test.txt").good();

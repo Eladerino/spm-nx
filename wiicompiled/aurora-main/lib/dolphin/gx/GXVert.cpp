@@ -569,8 +569,9 @@ void GXEnd() {
     sWriteAttr = GX_VA_NULL;
     sWriteAttrComps = 0;
   }
+  // drain() while GX decodes on this thread; with the decode thread on, a full batch is handed over.
   if (!aurora::gx::fifo::in_display_list()) {
-    aurora::gx::fifo::drain();
+    aurora::gx::fifo::flush();
   }
 }
 

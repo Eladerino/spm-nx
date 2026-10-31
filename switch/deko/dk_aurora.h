@@ -26,10 +26,10 @@ void aurora_switch_dk_shutdown(void);
 #endif
 
 #ifdef __cplusplus
-// The diag bridge, the other direction (dk.h, swdk::diag_set): Aurora's five diagnostic
-// switches, settable at runtime. Each flag still initialises from its NSMBW_* env var on first
-// use, exactly where the one-time getenv latches used to sit; these setters are what changes
-// it afterwards.
+// The diag bridge, the other direction (dk.h, swdk::diag_set): Aurora's six diagnostic
+// switches, settable at runtime. Each flag but the decode thread's still initialises from its
+// NSMBW_* env var on first use, exactly where the one-time getenv latches used to sit; these
+// setters are what changes it afterwards.
 namespace aurora::gx {
 void nsmbw_set_mtx_log(bool on);
 void nsmbw_set_uv_log(bool on);
@@ -38,6 +38,8 @@ void nsmbw_mtxlog_flush();
 namespace aurora::gx::fifo {
 void nsmbw_set_no_merge(int mode);
 void nsmbw_set_array_reupload(bool on);
+// The decode thread (lib/gx/fifo.hpp): the request is applied at the end of the frame.
+void set_decode_thread_requested(bool on) noexcept;
 } // namespace aurora::gx::fifo
 namespace aurora::gfx {
 void stage_timers_set_enabled(bool on) noexcept;

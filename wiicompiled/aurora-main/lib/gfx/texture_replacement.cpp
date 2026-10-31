@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <list>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string_view>
 
@@ -778,22 +779,7 @@ void register_tlut(const GXTlutObj* obj, const void* data, GXTlutFmt format, uin
   };
 }
 
-void load_tlut(const GXTlutObj* obj, uint32_t idx) noexcept {
-  if (!g_config.allowTextureReplacements) {
-    return;
-  }
-  if (idx >= s_loadedTluts.size()) {
-    return;
-  }
-
-  // Consume the pending registration. The map is keyed by a guest object address that can be freed
-  // or reused at any time, and entries used to live until shutdown.
-  if (const auto it = s_pendingTluts.find(obj); it != s_pendingTluts.end()) {
-    s_loadedTluts[idx] = std::move(it->second);
-    s_pendingTluts.erase(it);
-    return;
-  }
-
+static void load_recovered_tlut(const GXTlutObj* obj, uint32_t idx) noexcept {
   // The same object may legally be loaded into several hardware slots; only the first load finds the
   // pending entry, so recover the palette from whichever slot already holds it.
   for (const auto& loaded : s_loadedTluts) {
@@ -812,6 +798,50 @@ void load_tlut(const GXTlutObj* obj, uint32_t idx) noexcept {
   }
 
   s_loadedTluts[idx] = {};
+}
+
+void load_tlut(const GXTlutObj* obj, uint32_t idx) noexcept {
+  if (!g_config.allowTextureReplacements) {
+    return;
+  }
+  if (idx >= s_loadedTluts.size()) {
+    return;
+  }
+
+  // Consume the pending registration. The map is keyed by a guest object address that can be freed
+  // or reused at any time, and entries used to live until shutdown.
+  if (const auto it = s_pendingTluts.find(obj); it != s_pendingTluts.end()) {
+    s_loadedTluts[idx] = std::move(it->second);
+    s_pendingTluts.erase(it);
+    return;
+  }
+
+  load_recovered_tlut(obj, idx);
+}
+
+void* take_pending_tlut(const GXTlutObj* obj) noexcept {
+  if (!g_config.allowTextureReplacements) {
+    return nullptr;
+  }
+  const auto it = s_pendingTluts.find(obj);
+  if (it == s_pendingTluts.end()) {
+    return nullptr;
+  }
+  auto* taken = new (std::nothrow) TlutMetadata(std::move(it->second));
+  s_pendingTluts.erase(it);
+  return taken;
+}
+
+void load_taken_tlut(const GXTlutObj* obj, void* taken, uint32_t idx) noexcept {
+  std::unique_ptr<TlutMetadata> owned(static_cast<TlutMetadata*>(taken));
+  if (!g_config.allowTextureReplacements || idx >= s_loadedTluts.size()) {
+    return;
+  }
+  if (owned) {
+    s_loadedTluts[idx] = std::move(*owned);
+    return;
+  }
+  load_recovered_tlut(obj, idx);
 }
 
 std::optional<TextureHandle> find_replacement(const GXTexObj_& obj) noexcept {

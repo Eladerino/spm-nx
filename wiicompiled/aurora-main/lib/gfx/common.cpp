@@ -354,6 +354,12 @@ std::atomic<uint64_t> g_stageFrameTotalNs{0};
 std::atomic<uint64_t> g_stageFrameCount{0};
 std::atomic<uint64_t> g_stageDlProcessNs{0};
 std::atomic<uint64_t> g_stageGxCallNs{0};
+std::atomic<uint64_t> g_stageCpWaitNs{0};
+std::atomic<uint64_t> g_stageCpWaits{0};
+std::atomic<uint64_t> g_stageCpDecodeNs{0};
+std::atomic<uint64_t> g_stageCpSealedWaitNs{0};
+std::atomic<uint64_t> g_stageCpBatches{0};
+std::atomic<uint64_t> g_stageCpBytes{0};
 
 // The [frametime] print's baselines: each print reports the deltas since the previous one
 // and re-baselines, so an on-demand print (stage_time_print_now) gives the segment just
@@ -367,6 +373,12 @@ uint64_t s_printedSealedWaitNs = 0;
 uint64_t s_printedFrameTotalNs = 0;
 uint64_t s_printedDlProcessNs = 0;
 uint64_t s_printedGxCallNs = 0;
+uint64_t s_printedCpWaitNs = 0;
+uint64_t s_printedCpWaits = 0;
+uint64_t s_printedCpDecodeNs = 0;
+uint64_t s_printedCpSealedWaitNs = 0;
+uint64_t s_printedCpBatches = 0;
+uint64_t s_printedCpBytes = 0;
 std::mutex g_stagePrintMutex;
 
 void stage_time_print_window(uint64_t frame) {
@@ -390,6 +402,28 @@ void stage_time_print_window(uint64_t frame) {
                ms(encodeNs - s_printedEncodeNs), ms(sealedWaitNs - s_printedSealedWaitNs),
                ms(frameTotalNs - s_printedFrameTotalNs), ms(dlProcessNs - s_printedDlProcessNs),
                ms(gxCallNs - s_printedGxCallNs));
+  const uint64_t cpBatches = g_stageCpBatches.load(std::memory_order_relaxed);
+  const uint64_t cpWaitNs = g_stageCpWaitNs.load(std::memory_order_relaxed);
+  const uint64_t cpWaits = g_stageCpWaits.load(std::memory_order_relaxed);
+  const uint64_t cpDecodeNs = g_stageCpDecodeNs.load(std::memory_order_relaxed);
+  const uint64_t cpSealedWaitNs = g_stageCpSealedWaitNs.load(std::memory_order_relaxed);
+  const uint64_t cpBytes = g_stageCpBytes.load(std::memory_order_relaxed);
+  if (cpBatches != s_printedCpBatches) {
+    std::fprintf(stderr,
+                 "[cpthread] frames %llu-%llu: game waited %.1f ms (%llu waits), decode %.1f ms, sealedwait %.1f "
+                 "ms, %llu batches, %llu KB\n",
+                 static_cast<unsigned long long>(s_printedFrame + 1), static_cast<unsigned long long>(frame),
+                 ms(cpWaitNs - s_printedCpWaitNs), static_cast<unsigned long long>(cpWaits - s_printedCpWaits),
+                 ms(cpDecodeNs - s_printedCpDecodeNs), ms(cpSealedWaitNs - s_printedCpSealedWaitNs),
+                 static_cast<unsigned long long>(cpBatches - s_printedCpBatches),
+                 static_cast<unsigned long long>((cpBytes - s_printedCpBytes) / 1024));
+  }
+  s_printedCpWaitNs = cpWaitNs;
+  s_printedCpWaits = cpWaits;
+  s_printedCpDecodeNs = cpDecodeNs;
+  s_printedCpSealedWaitNs = cpSealedWaitNs;
+  s_printedCpBatches = cpBatches;
+  s_printedCpBytes = cpBytes;
   s_printedFrame = frame;
   s_printedDlProcessNs = dlProcessNs;
   s_printedGxCallNs = gxCallNs;
@@ -419,6 +453,19 @@ void stage_time_add_dlprocess(std::chrono::nanoseconds duration) noexcept {
 
 void stage_time_add_gxcall(std::chrono::nanoseconds duration) noexcept {
   g_stageGxCallNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
+}
+
+void stage_time_add_cpwait(std::chrono::nanoseconds duration) noexcept {
+  g_stageCpWaitNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
+  g_stageCpWaits.fetch_add(1, std::memory_order_relaxed);
+}
+
+void stage_time_add_cpbatch(std::chrono::nanoseconds decode, std::chrono::nanoseconds sealedWait,
+                            uint32_t bytes) noexcept {
+  g_stageCpDecodeNs.fetch_add(static_cast<uint64_t>(decode.count()), std::memory_order_relaxed);
+  g_stageCpSealedWaitNs.fetch_add(static_cast<uint64_t>(sealedWait.count()), std::memory_order_relaxed);
+  g_stageCpBatches.fetch_add(1, std::memory_order_relaxed);
+  g_stageCpBytes.fetch_add(bytes, std::memory_order_relaxed);
 }
 
 void stage_time_add_frametotal(std::chrono::nanoseconds duration) noexcept {

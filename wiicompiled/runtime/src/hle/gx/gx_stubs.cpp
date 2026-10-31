@@ -2,6 +2,8 @@
 #include "gx_internal.h"
 #include "runtime_log.h"
 
+#include <dolphin/gx/GXAurora.h>
+
 extern "C" void __GXSetSUTexRegs();
 
 // ============================================================================
@@ -32,6 +34,9 @@ extern "C" void GX__SetDrawSync_8016e9fc(uint32_t token) { GX__SetDrawSync_8016e
 // offscreen NPCs draw, ta2_02). Draws are consumed in order here, so the token is reached at once: point
 // __peReg at a RAM block and store the token in its token register (+0xE).
 extern "C" void SPM_GXSetDrawSync(uint32_t token) {
+    // With Aurora's decode thread on, the draws before the token are only decoded once this
+    // returns: the game reuses their memory when it sees the token.
+    AuroraGxSync();
     constexpr uint32_t kSpmPeRegPtrAddr = 0x8056DF70u;  // __peReg (SPM: r13-0x6FB0 in sysWaitDrawSync)
     constexpr uint32_t kSpmPeRegBlock = 0x80002F00u;    // low-memory debugger area; no exception vectors are installed
     try {
