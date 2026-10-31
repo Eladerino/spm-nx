@@ -49,53 +49,74 @@ expects both a host view and guest views of the same bytes, so the "just
 `aligned_alloc`" option only works in checked-access mode. The new plan has
 two phases.
 
-### Phase 1: bring-up (checked access, no SVCs). Implemented
+### Phase 1: bring-up (checked access, no SVCs). Kept as a build option
 
-`switch/runtime/guest_flat_memory_horizon.cpp`, tested off-device by
-`switch/tests/guest_flat_memory_horizon_tests.cpp` (real region layout, ASan
-and UBSan clean, 155 MiB across 4 stores).
+Configure with `-DSPM_SWITCH_CHECKED_GUEST_MEMORY=ON` to get it back.
 
-- `guest_flat_memory_horizon.cpp`: one heap block per backing store
-  (`aligned_alloc(0x10000, size)`), `HostPointer()` returning into it,
-  `g_requiresCheckedAccess = true`, and every fault feature stubbed like
-  macOS.
-- Add a `#elif defined(__SWITCH__)` branch in `guest_flat_memory.h`, before
-  the generic `__aarch64__` one, so the header stops claiming a fixed base
-  that we can't guarantee (see below). Leave `MKW_GUEST_FLAT_FIXED_PAGE_SIZE`
-  undefined so `RequiresCheckedAccess()` stays a runtime check.
-- The cost is a branch plus a page-table lookup on every guest load and
-  store. That's slow, but it gets the game booting without depending on SVC
-  memory tricks, and it isolates memory bugs from graphics bugs.
+- One heap block per backing store, with `HostPointer()` returning into it
+  and every fault feature stubbed like macOS.
+- `RequiresCheckedAccess()` is a compile-time `true`, so every guest load
+  and store pays the checked path's page-table lookup.
+- It needs none of the SVCs below, and a bad guest access is reported with
+  the guest's CPU state instead of a data abort. That makes it the mode to
+  reach for when a memory bug needs chasing.
 
-### Phase 2: flat fast path (real aliasing)
+### Phase 2: flat fast path (real aliasing). Implemented, the default
 
-The macOS file's structure, with libnx calls in place of mmap:
+`switch/runtime/guest_flat_memory_horizon.cpp`. The PC test
+(`switch/tests/guest_flat_memory_horizon_tests.cpp`) runs the same layout
+code with mmap of a shared file in place of the SVCs. It checks that every
+mirror sees every other one's stores through the window, and that the window
+unmaps and maps again.
 
-| macOS/Linux | Horizon |
-|---|---|
-| reserve 4 GiB at fixed base | `svcQueryMemory` confirms the range is Free and outside the heap, alias and stack regions (`svcGetInfo` InfoType_*RegionAddress/Size), then `virtmemAddReservation` |
-| backing fd (memfd/mkstemp) | page-aligned heap block per store |
-| host view mmap | the code-memory window from the JSRF fork (`svcMapProcessCodeMemory` + permission to RW) |
-| guest view mmap per region | `svcMapProcessMemory(g_base + r.base, envGetOwnProcessHandle(), window + offset, size)` |
+The sequence (the flatmem-spike test proved it on hardware, 2026-10-31):
+
+1. `envIsSyscallHinted` for svcs 0x73, 0x74, 0x75, 0x77 and 0x78. If one is
+   missing, the error names it.
+2. `virtmemFindCodeMemory` finds 4 GiB plus 2 MiB of free code-region
+   space, and `virtmemAddReservation` reserves it. The window starts at the
+   first 2 MiB boundary inside it.
+3. Per store: a 2 MiB-aligned heap block, zeroed, then
+   `svcMapProcessCodeMemory` maps it at the window address of its primary
+   view (the first region that covers the whole store), and
+   `svcSetProcessMemoryPermission` makes that view read/write.
+4. Each other region of the store (a mirror) is
+   `svcMapProcessMemory(window + base, own process, primary view + offset, size)`.
+5. At exit, `userAppExit()` undoes it all in reverse:
+   `svcUnmapProcessMemory` for each mirror, then
+   `svcUnmapProcessCodeMemory`, then the reservation. hbloader runs the next
+   NRO in the same process, and heap pages still mapped as code memory would
+   break it.
 
 Why the detour through code memory: `svcMapProcessMemory` only accepts
 source pages whose kernel memory state allows "map process", and plain heap
 (`Normal`) doesn't. Remapping the heap as code memory gives it that state.
-That's the JSRF trick, so we lift its exact sequence instead of
-rediscovering it.
 
-Open items to verify on hardware:
-1. **Three guest views of one source.** MEM1 is mirrored at `0x00000000`,
-   `0x80000000` and `0xC0000000`. JSRF mapped one alias, so confirm the
-   kernel accepts several destination maps of the same source range.
-2. **Fixed base.** Horizon randomizes where heap, alias and stack land in
-   the 39-bit space, so `0x10'0000'0000` may be taken on some boots. If the
-   check above fails often, make the base a runtime global on `__SWITCH__`
-   only. That costs one extra load per access, which is still far cheaper
-   than Phase 1.
-3. **Process handle.** `envGetOwnProcessHandle()` needs hbloader to pass a
-   real handle, which it does under title takeover. Title takeover is
-   already the plan.
+Why 2 MiB alignment: each view then sits at the same offset in a 2 MiB
+block as the memory under it. That lets the kernel use 2 MiB blocks instead
+of 4 KiB pages wherever the heap's physical memory is contiguous, which
+means fewer TLB misses across 155 MiB of guest RAM.
+
+How the open items came out on hardware:
+
+1. **Several guest views of one source:** fine. The spike mapped two
+   mirrors per store, and every view saw every other one's writes.
+2. **Fixed base:** dropped. The window lands wherever free code-region space
+   is (`0x4162368000` in the spike), so the base is a runtime value,
+   `mkw_flat_guest_base`. The C++ side declares it `const` (it's defined
+   non-const in `switch/runtime/horizon_flat_base.c`), so the compiler loads
+   it once per translated function instead of after every guest store. A
+   flat read is then `ldr w, [base, w, uxtw]` plus `rev`.
+3. **Process handle:** `envGetOwnProcessHandle()` gave a real handle.
+
+Spike timings, checked path against flat, per access:
+
+| Test | Checked | Flat |
+|---|---|---|
+| Pointer chase, 16 KiB | 6.62 ns | 2.55 ns |
+| Pointer chase, 1 MiB | 20.14 ns | 13.69 ns |
+| Loads | 2.17 ns | 1.36 ns |
+| Stores | 3.06 ns | 1.53 ns |
 
 ## Questions from the port review
 
@@ -110,9 +131,15 @@ Open items to verify on hardware:
   read blocked" error before that point.
 - **Known gap inherited from macOS:** with no page traps, deferred EFB-copy
   reads aren't intercepted. If SPM reads back an EFB copy on the CPU before
-  it's materialized, it sees stale bytes. Watch for this. If it shows up,
-  route those specific reads through the checked path instead of trying to
-  add fault handling.
+  it's materialized, it sees stale bytes. Nothing in this build calls
+  `Memory::RegisterDeferredRead` (checked 2026-10-31), so today there's
+  nothing to miss. If that changes, route those specific reads through the
+  checked path instead of trying to add fault handling.
+- **Wild guest pointers:** Windows and Linux commit a 64 KiB block on demand
+  and count it; macOS reads zeros. The Switch build has always treated
+  them as fatal (the checked path throws "no mapped region"), and with the
+  flat window they're a data abort that the crash report labels with the
+  guest address.
 
 ## Rotate builtin
 
