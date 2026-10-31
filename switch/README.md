@@ -14,9 +14,10 @@ own PC against your own disc image, and only its generated C++ is compiled here.
 The game boots and plays on Switch hardware, handheld and docked, and saves work. Output is
 1280x720 in both modes for now. Settings live in the game's Options menu (see "Settings" below); the PC version's settings
 top bar is not part of the Switch build, and neither is the PC launcher's update flow. It is
-a work in progress: performance is the standing problem (see "Known issues and performance"),
-and guest memory runs on its first phase, a checked-access path that is slower than the flat
-window planned for phase 2 (`docs/GUEST-MEMORY-PLAN.md`). It is public now so others can
+a work in progress: performance is the standing problem (see "Known issues and performance").
+Guest memory runs on the flat window (phase 2 in `docs/GUEST-MEMORY-PLAN.md`): guest RAM is
+mapped as one flat window the way the PC build does it, which replaced the slower
+checked-access path this port started on. It is public now so others can
 follow along, try it, and offer a second pair of eyes while the performance work
 continues.
 
@@ -268,10 +269,12 @@ handler is compiled out: Horizon reports faults through libnx's exception handle
 `spm_switch_init.cpp` uses to write a register dump.
 
 **Guest memory.** On the PC every guest load is one add and a byte swap into a 4 GiB window, with
-page protection catching the odd cases. Horizon can't do that page trickery the same way, so phase 1
-keeps guest RAM in plain heap blocks and turns on the runtime's checked access path, which does
-those checks in software. It's slower but has no kernel dependencies. Phase 2 brings the flat
-window back with `svcMapProcessMemory`. Details: `docs/GUEST-MEMORY-PLAN.md`.
+page protection catching the odd cases. The Switch build does the same now (phase 2): guest RAM
+sits in heap blocks remapped as code memory and mirrored into a flat window with the Horizon
+SVCs, so a flat read is one load and a byte swap. It started (phase 1) on the runtime's checked
+access path, plain heap blocks with the checks done in software: slower, with no kernel
+dependencies, and still the mode to reach for when a memory bug needs chasing. Details:
+`docs/GUEST-MEMORY-PLAN.md`.
 
 **Graphics.** Aurora records each frame against Dawn's Null device, exactly as on the other
 surfaceless builds; what differs on the Switch is that the frames are drawn. `deko/` is a link-time
