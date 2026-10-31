@@ -774,10 +774,8 @@ uint8_t* Memory::GetPointer(uint32_t addr, size_t length) {
     return region.storagePtr + offset;
 }
 
-bool Memory::Contains(uint32_t addr, size_t length) {
-    if (MemoryInline::GetPointerFast(addr, length)) {
-        return true;
-    }
+bool Memory::ContainsSlow(uint32_t addr, size_t length) {
+    // Contains (memory_access.h) has already missed the page-table fast path.
     // Contains is a membership predicate: callers probe arbitrary guest values
     // (e.g. gfx-node slots that may hold floats), so a miss must stay silent
     // rather than take ResolveRegion's crash-dump path.

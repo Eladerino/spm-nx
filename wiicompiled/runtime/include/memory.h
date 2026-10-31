@@ -100,7 +100,10 @@ public:
 
     static uint8_t* GetPointer(uint32_t addr);
     static uint8_t* GetPointer(uint32_t addr, size_t length);
+    // Inline (memory_access.h): the page-table hit is a load and a compare, and HLE code probes
+    // guest pointers with it thousands of times a frame.
     static bool Contains(uint32_t addr, size_t length = 1);
+    static bool ContainsSlow(uint32_t addr, size_t length);
 
     static uint64_t RegisterDeferredRead(uint32_t addr, size_t length,
                                          DeferredReadCallback callback, void* user);
