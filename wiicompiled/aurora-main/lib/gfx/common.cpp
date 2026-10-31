@@ -470,7 +470,7 @@ void stage_time_print_window(uint64_t frame) {
     const uint64_t hits = pipelineMemoHits - s_printedPipelineMemoHits;
     const uint64_t lookups = pipelineLookups - s_printedPipelineLookups;
     std::fprintf(stderr,
-                 "[pipeline] frames %llu-%llu: %llu draws reused the last pipeline, %llu full lookups (%.0f%%), "
+                 "[pipeline] frames %llu-%llu: %llu lookups reused the last pipeline, %llu full lookups (%.0f%%), "
                  "%llu new cache entries\n",
                  static_cast<unsigned long long>(s_printedFrame + 1), static_cast<unsigned long long>(frame),
                  static_cast<unsigned long long>(hits), static_cast<unsigned long long>(lookups),
