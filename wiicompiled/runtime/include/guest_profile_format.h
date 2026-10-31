@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -212,6 +213,102 @@ inline std::vector<std::string> InclusiveNativeLines(const std::vector<std::vect
         std::snprintf(text, sizeof(text), "[profile] inclusive: %5.1f%%  %s", 100.0 * sorted[i].second / total,
                       sorted[i].first.c_str());
         lines.emplace_back(text);
+    }
+    return lines;
+}
+
+// The raw capture of one thread, for switch/scripts/profile-report.py: every sampled stack as module
+// offsets, so the build's symbol table names everything, including code the translated-function
+// registry does not know (aurora, the runtime's GX path, libraries). A stack is its leaf address
+// plus a caller path (the rest of it, innermost first); each distinct path is printed once with a
+// number, then each distinct leaf and path pair with its samples, hottest first:
+//   [profile] raw <thread> path <n>: nro+A nro+B ...   ("-" for a stack that is only its leaf)
+//   [profile] raw <thread> leaf <samples> nro+X <n>
+//   [profile] raw <thread> other <samples> samples in <pairs> stacks   (past `limit` leaf lines)
+// Addresses below the module base print as abs+HEX. Path numbers follow the paths' sample counts.
+inline std::string RawAddress(uintptr_t pc, uintptr_t moduleBase) {
+    char text[40];
+    if (moduleBase != 0 && pc >= moduleBase) {
+        std::snprintf(text, sizeof(text), "nro+%llX", static_cast<unsigned long long>(pc - moduleBase));
+    } else {
+        std::snprintf(text, sizeof(text), "abs+%llX", static_cast<unsigned long long>(pc));
+    }
+    return text;
+}
+
+inline std::vector<std::string> RawLines(const char* thread, const std::vector<std::vector<uintptr_t>>& stacks,
+                                         uintptr_t moduleBase, size_t limit) {
+    std::map<std::vector<uintptr_t>, uint32_t> pathIndex;  // caller path -> first-seen index
+    std::vector<uint64_t> pathSamples;
+    std::map<std::pair<uintptr_t, uint32_t>, uint32_t> pairs;  // (leaf, path index) -> samples
+    for (const auto& stack : stacks) {
+        if (stack.empty()) {
+            continue;
+        }
+        std::vector<uintptr_t> path(stack.begin() + 1, stack.end());
+        const auto [it, added] = pathIndex.emplace(std::move(path), static_cast<uint32_t>(pathSamples.size()));
+        if (added) {
+            pathSamples.push_back(0);
+        }
+        ++pathSamples[it->second];
+        ++pairs[{stack.front(), it->second}];
+    }
+    // Number the paths hottest first.
+    std::vector<uint32_t> order(pathSamples.size());
+    for (uint32_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+    }
+    std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+        return pathSamples[a] != pathSamples[b] ? pathSamples[a] > pathSamples[b] : a < b;
+    });
+    std::vector<uint32_t> number(pathSamples.size());
+    for (uint32_t n = 0; n < order.size(); ++n) {
+        number[order[n]] = n;
+    }
+    std::vector<std::pair<std::pair<uintptr_t, uint32_t>, uint32_t>> sorted;
+    sorted.reserve(pairs.size());
+    for (const auto& [key, count] : pairs) {
+        sorted.push_back({{key.first, number[key.second]}, count});
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+        return a.second != b.second ? a.second > b.second : a.first < b.first;
+    });
+    const size_t shown = sorted.size() < limit ? sorted.size() : limit;
+    std::vector<bool> used(pathSamples.size(), false);
+    for (size_t i = 0; i < shown; ++i) {
+        used[sorted[i].first.second] = true;
+    }
+    std::vector<const std::vector<uintptr_t>*> byNumber(pathSamples.size(), nullptr);
+    for (const auto& [path, index] : pathIndex) {
+        byNumber[number[index]] = &path;
+    }
+    std::vector<std::string> lines;
+    for (uint32_t n = 0; n < byNumber.size(); ++n) {
+        if (!used[n]) {
+            continue;
+        }
+        std::string line = std::string("[profile] raw ") + thread + " path " + std::to_string(n) + ":";
+        if (byNumber[n]->empty()) {
+            line += " -";
+        }
+        for (const uintptr_t pc : *byNumber[n]) {
+            line += ' ';
+            line += RawAddress(pc, moduleBase);
+        }
+        lines.emplace_back(std::move(line));
+    }
+    uint64_t otherSamples = 0;
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        if (i >= shown) {
+            otherSamples += sorted[i].second;
+            continue;
+        }
+        lines.emplace_back(std::string("[profile] raw ") + thread + " leaf " + std::to_string(sorted[i].second) + " " +
+                           RawAddress(sorted[i].first.first, moduleBase) + " " + std::to_string(sorted[i].first.second));
+    }
+    if (shown < sorted.size()) {
+        lines.emplace_back(std::string("[profile] raw ") + thread + " other " + std::to_string(otherSamples) +
+                           " samples in " + std::to_string(sorted.size() - shown) + " stacks");
     }
     return lines;
 }

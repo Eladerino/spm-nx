@@ -251,6 +251,8 @@ std::atomic<bool> g_requested{false};
 std::atomic<bool> g_stopping{false};
 // What the game thread's waits on the decode thread count under (AuroraGxBeginWaitSite).
 AuroraGxWaitSite sWaitSite = AURORA_GX_WAIT_OTHER;
+// The decode thread's kernel handle while it runs (Switch), for the guest profiler's sampler.
+std::atomic<uint32_t> g_threadHandle{0};
 
 void note_decode_error(const char* what) noexcept {
   static uint32_t s_count = 0; // decode thread only
@@ -322,6 +324,7 @@ void decode_thread_main() noexcept {
   // Core 1: the game thread runs on core 0 and the frame worker is pinned to core 2. Same
   // priority as both, so the yield below is what lets other threads on core 1 run.
   svcSetThreadCoreMask(CUR_THREAD_HANDLE, 1, 1u << 1);
+  g_threadHandle.store(threadGetCurHandle(), std::memory_order_release);
 #endif
   // The frame worker waits inside process() service the guest's timing, which only the game
   // thread may do; it does so itself while it waits for this thread.
@@ -370,6 +373,9 @@ void decode_thread_main() noexcept {
 #endif
     decode_batch(batch);
   }
+  // Cleared before the thread ends: its handle is closed by the join, and the sampler must not
+  // pick it up after that. A sample already in flight fails on the closed handle and is counted.
+  g_threadHandle.store(0, std::memory_order_release);
 }
 
 bool start_decode_thread() {
@@ -619,6 +625,8 @@ AuroraGxWaitSite begin_wait_site(AuroraGxWaitSite site) noexcept {
 }
 
 void end_wait_site(AuroraGxWaitSite previous) noexcept { sWaitSite = previous; }
+
+uint32_t decode_thread_handle() noexcept { return g_threadHandle.load(std::memory_order_acquire); }
 
 void stop_decode_thread() noexcept {
   auto& d = decoder();

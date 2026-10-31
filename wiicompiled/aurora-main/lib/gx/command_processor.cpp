@@ -319,6 +319,24 @@ static inline void mark_pipeline_state_dirty() noexcept {
   g_gxState.pipelineStateGeneration = next_gx_state_epoch();
 }
 
+// Matrix index A (CP 0x30, XF 0x18): texgens 0-3's matrices from bits 6-29. The current position
+// matrix in bits 0-5 is per-draw uniform state that the pipeline config never reads, and games change
+// it between draws, so only a texgen matrix change invalidates the resolved pipeline.
+static inline void set_texgen_matrices_0_3(u32 value) noexcept {
+  bool changed = false;
+  for (u32 i = 0; i < 4 && i < MaxTexCoord; i++) {
+    auto texMtx = static_cast<GXTexMtx>(bp_get(value, 6, 6 + i * 6));
+    assert(texMtx >= 0 && texMtx <= GXTexMtx::GX_IDENTITY);
+    changed |= g_gxState.tcgs[i].mtx != texMtx;
+    g_gxState.tcgs[i].mtx = texMtx;
+  }
+  if (changed) {
+    mark_pipeline_state_dirty();
+  } else {
+    g_gxState.stateDirty = true;
+  }
+}
+
 // Rejects a malformed XF write in release builds.
 #define XF_REQUIRE(cond, msg, ...)                                                                                     \
   do {                                                                                                                 \
@@ -1671,14 +1689,9 @@ static void handle_cp(u8 addr, u32 value, bool bigEndian) {
   // Matrix index A (0x30)
   case 0x30: {
     g_gxState.currentPnMtx = bp_get(value, 6, 0) / 3;
-    for (u32 i = 0; i < 4 && i < MaxTexCoord; i++) {
-      auto texMtx = static_cast<GXTexMtx>(bp_get(value, 6, 6 + i * 6));
-      assert(texMtx >= 0 && texMtx <= GXTexMtx::GX_IDENTITY);
-      g_gxState.tcgs[i].mtx = texMtx;
-    }
     // Same matrix indices as XF 0x18, written from a different bank.
     g_gxState.invalidateXfReg(0x18);
-    mark_pipeline_state_dirty();
+    set_texgen_matrices_0_3(value);
     break;
   }
 
@@ -1896,12 +1909,7 @@ static void handle_xf(const u8* data, u32& pos, u32 size, bool bigEndian) {
       case 0x18: {
         // Matrix index A: PnMtx + TexCoord0-3 matrix indices
         g_gxState.currentPnMtx = bp_get(val, 6, 0) / 3;
-        for (u32 i = 0; i < 4 && i < MaxTexCoord; i++) {
-          auto texMtx = static_cast<GXTexMtx>(bp_get(val, 6, 6 + i * 6));
-          assert(texMtx >= 0 && texMtx <= GXTexMtx::GX_IDENTITY);
-          g_gxState.tcgs[i].mtx = texMtx;
-        }
-        mark_pipeline_state_dirty();
+        set_texgen_matrices_0_3(val);
         break;
       }
       case 0x19: {
@@ -2283,7 +2291,7 @@ static bool same_pipeline_config(const PipelineConfig& lhs, const PipelineConfig
   return same;
 }
 
-static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& config) {
+static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& config, bool& created) {
   constexpr size_t CacheSize = 1024;
   struct Entry {
     bool valid = false;
@@ -2295,9 +2303,11 @@ static const CachedPipelineState& cached_pipeline_state(const PipelineConfig& co
   const HashType hash = pipeline_config_hash(config);
   auto& entry = cache[hash & (CacheSize - 1)];
   if (entry.valid && entry.state.configHash == hash && same_pipeline_config(entry.config, config)) LIKELY {
+    created = false;
     return entry.state;
   }
 
+  created = true;
   entry.valid = true;
   entry.config = config;
   entry.state = {
@@ -2319,18 +2329,24 @@ static const CachedPipelineState& resolve_pipeline_state(GXPrimitive prim, GXVtx
     GXVtxFmt fmt = static_cast<GXVtxFmt>(0);
   };
   static Memo memo{};
+  // Lookups the memo answered since the last full one, handed to the perftimer's [pipeline] line with it.
+  static u32 memoHits = 0;
 
   const u32 sampleCount = gfx::get_sample_count();
   const u32 generation = g_gxState.pipelineStateGeneration;
   if (memo.state != nullptr && memo.generation == generation && memo.sampleCount == sampleCount &&
       memo.prim == prim && memo.fmt == fmt) LIKELY {
+    ++memoHits;
     return *memo.state;
   }
 
   PipelineConfig config{};
   populate_pipeline_config(config, prim, fmt);
   // cached_pipeline_state hands back a reference into a fixed direct-mapped table, so the address stays valid; the entry it points at can only be rewritten by another call to that function, and every such call goes through this miss path and replaces the memo in the same breath.
-  const CachedPipelineState& state = cached_pipeline_state(config);
+  bool created = false;
+  const CachedPipelineState& state = cached_pipeline_state(config, created);
+  gfx::stage_time_add_pipeline_lookup(memoHits, created);
+  memoHits = 0;
   memo = Memo{
       .state = &state,
       .generation = generation,
@@ -3289,12 +3305,19 @@ bool handle_aurora(const u8* data, u32& pos, u32 size, bool bigEndian) {
     auto& array = g_gxState.arrays[attrIdx];
     const auto newData = reinterpret_cast<void*>(arrayAddr);
     if (array.data != newData || array.size != arraySize || array.le != le) {
+      // The pipeline config reads only the array's stride and byte order, so a new address or size (a
+      // model pointing its draws at its own arrays) leaves the resolved pipeline as it is.
+      const bool pipelineChanged = array.le != le;
       array.data = newData;
       array.size = arraySize;
       array.le = le;
       // Only drop the cached upload when the backing array actually changes.
       array.cachedRange = {};
-      mark_pipeline_state_dirty();
+      if (pipelineChanged) {
+        mark_pipeline_state_dirty();
+      } else {
+        g_gxState.stateDirty = true;
+      }
     }
   } else if (subCmd == GX_LOAD_AURORA_TEXOBJ) {
     CHECK(pos + 34 <= size, "GX_LOAD_AURORA_TEXOBJ read overrun");
