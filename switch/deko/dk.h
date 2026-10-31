@@ -172,7 +172,8 @@ bool env_flag(const char* name, bool def);
 // ---- diagnostics (device.cpp): switches from UserData/dk_diag.txt, read at renderer init ------
 // Runtime diagnostics for the renderer. Each switch disables or exposes one piece of the replay
 // so a single boot can clear a whole suspect, or read state back (the picture, the most-sampled
-// textures) for inspection. No file = every switch off = normal build. The fields are atomic:
+// textures) for inspection. No file = every switch at its default below, which is off for all
+// but cpthread (a "cpthread=0" line turns that one off too) = normal build. The fields are atomic:
 // diag_set below flips them at runtime (the settings menu and the dk_cmd.txt channel are the
 // callers), so a switch takes effect from its next use without a reboot.
 struct Diag {
@@ -190,7 +191,7 @@ struct Diag {
     std::atomic<bool> perfTimer = false;   // Aurora stage timers: producer, map wait and encode totals every 600 frames (sets NSMBW_STAGE_TIMERS=1 before the first draw)
     std::atomic<bool> arrayUp = false;   // Aurora re-uploads every draw's vertex arrays (sets NSMBW_ARRAY_REUPLOAD=1 before the first draw)
     std::atomic<bool> profile = false;   // the runtime's guest sampling profiler captures the game thread while on; turning it off prints the hot list
-    std::atomic<bool> cpThread = false;   // Aurora decodes GX commands on a thread of its own on core 1, from the end of the frame it is set in (lib/gx/fifo.cpp)
+    std::atomic<bool> cpThread = true;   // Aurora decodes GX commands on a thread of its own on core 1, from the end of the frame it is set in (lib/gx/fifo.cpp); on unless dk_diag.txt says cpthread=0
 };
 extern Diag g_diag;
 void diag_init();

@@ -249,6 +249,8 @@ Decoder& decoder() {
 
 std::atomic<bool> g_requested{false};
 std::atomic<bool> g_stopping{false};
+// What the game thread's waits on the decode thread count under (AuroraGxBeginWaitSite).
+AuroraGxWaitSite sWaitSite = AURORA_GX_WAIT_OTHER;
 
 void note_decode_error(const char* what) noexcept {
   static uint32_t s_count = 0; // decode thread only
@@ -389,9 +391,10 @@ bool start_decode_thread() {
 }
 
 // Game thread: waits on the decode thread until `done`, servicing the guest's timing every
-// millisecond as the frame worker waits do. `lock` holds the decoder's mutex.
+// millisecond as the frame worker waits do, and counts the wait under `site`. `lock` holds the
+// decoder's mutex.
 template <typename Done>
-void wait_for_decoder(std::unique_lock<std::mutex>& lock, Done done) {
+void wait_for_decoder(std::unique_lock<std::mutex>& lock, AuroraGxWaitSite site, Done done) {
   if (done()) {
     return;
   }
@@ -411,7 +414,7 @@ void wait_for_decoder(std::unique_lock<std::mutex>& lock, Done done) {
     lock.lock();
   }
   if (timed) {
-    gfx::stage_time_add_cpwait(std::chrono::steady_clock::now() - start);
+    gfx::stage_time_add_cpwait(std::chrono::steady_clock::now() - start, site);
   }
 }
 
@@ -435,8 +438,9 @@ void append_recorded(const void* data, uint32_t length) {
 
 // Hands what is recorded up to the drain point over to the decode thread (everything, with
 // `all`), and starts on a fresh buffer. What was recorded after the drain point is not decoded
-// yet in sync mode either, so it moves to the front of the fresh buffer.
-void hand_off(bool all) {
+// yet in sync mode either, so it moves to the front of the fresh buffer. A wait for room in the
+// queue counts under `site`.
+void hand_off(bool all, AuroraGxWaitSite site) {
   if (all) {
     sDrainMark = detail::sBufferSize;
   }
@@ -449,7 +453,7 @@ void hand_off(bool all) {
   bool wake = false;
   {
     std::unique_lock lock(d.mutex);
-    wait_for_decoder(lock, [&d] { return d.queue.size() < kMaxQueuedBatches; });
+    wait_for_decoder(lock, site, [&d] { return d.queue.size() < kMaxQueuedBatches; });
     if (all) { // in case the guest timing serviced during the wait recorded something
       sDrainMark = detail::sBufferSize;
       close_fifo_item(sDrainMark);
@@ -488,16 +492,22 @@ void hand_off(bool all) {
 
 // Hands over everything recorded and waits until the decode thread has decoded it.
 void finish() {
-  hand_off(true);
+  if (gfx::stage_timers_enabled()) {
+    gfx::stage_time_add_cpsync(sWaitSite);
+  }
+  hand_off(true, sWaitSite);
   auto& d = decoder();
   std::unique_lock lock(d.mutex);
-  wait_for_decoder(lock, [&d] { return d.queue.empty() && !d.busy; });
+  wait_for_decoder(lock, sWaitSite, [&d] { return d.queue.empty() && !d.busy; });
 }
 
 // Called at a draw, display list or raw draw, so the drain point is the end of the buffer.
 void hand_off_if_full() {
   if (detail::sBufferSize >= kHandoffBytes || sItems.size() >= kHandoffItems) {
-    hand_off(false);
+    if (gfx::stage_timers_enabled()) {
+      gfx::stage_time_add_cpsync(AURORA_GX_WAIT_QUEUE);
+    }
+    hand_off(false, AURORA_GX_WAIT_QUEUE);
   }
 }
 } // namespace
@@ -532,10 +542,13 @@ void sync() {
   if (!detail::sAsyncDecode) {
     return;
   }
-  hand_off(false);
+  if (gfx::stage_timers_enabled()) {
+    gfx::stage_time_add_cpsync(sWaitSite);
+  }
+  hand_off(false, sWaitSite);
   auto& d = decoder();
   std::unique_lock lock(d.mutex);
-  wait_for_decoder(lock, [&d] { return d.queue.empty() && !d.busy; });
+  wait_for_decoder(lock, sWaitSite, [&d] { return d.queue.empty() && !d.busy; });
 }
 
 void drain_if_pending() {
@@ -596,6 +609,16 @@ void queue_bp_write(uint32_t value) {
   cmd.put32(value);
   insert_at_drain_point(cmd);
 }
+
+AuroraGxWaitSite begin_wait_site(AuroraGxWaitSite site) noexcept {
+  const AuroraGxWaitSite previous = sWaitSite;
+  if (previous == AURORA_GX_WAIT_OTHER) {
+    sWaitSite = site;
+  }
+  return previous;
+}
+
+void end_wait_site(AuroraGxWaitSite previous) noexcept { sWaitSite = previous; }
 
 void stop_decode_thread() noexcept {
   auto& d = decoder();

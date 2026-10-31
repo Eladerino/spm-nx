@@ -45,7 +45,9 @@ serial), barriers and serials.
 - Upstream files keep their original commentary; only this folder's own files carry the project's
   comments, and they are written as maintained documentation, not session notes.
 - Diagnostics follow one pattern: a switch in `UserData/dk_diag.txt`, read once at renderer init
-  (see `dk.h`). No file, or a switch off, means behaviour identical to a normal build.
+  (see `dk.h`). No file means a normal build. Every switch is off by default except `cpthread`
+  (Aurora's GX decode thread), which is on, so `cpthread=0` is the one line that moves a build
+  away from normal.
 - Changes land as direct pushes to main, with the commit message stating what was actually
   compiled and tested.
 

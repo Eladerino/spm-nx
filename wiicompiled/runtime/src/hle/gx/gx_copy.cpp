@@ -144,10 +144,14 @@ std::atomic<uint64_t> g_copyDispWorkerWaitNanos{0};
 
 extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
     EnsureAuroraFrameActive();
-    // GX copies are FIFO-ordered on hardware. Drain submitted draws before
-    // resolving the EFB so high-level copies see the same contents.
-    GXDrawDone();
-    GXCopyDisp(GuestToHostPtr(da), (GXBool)c);
+    {
+        // Perftimer: a wait on Aurora's decode thread in here is the XFB copy's, not a draw done's.
+        const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_DISP);
+        // GX copies are FIFO-ordered on hardware. Drain submitted draws before
+        // resolving the EFB so high-level copies see the same contents.
+        GXDrawDone();
+        GXCopyDisp(GuestToHostPtr(da), (GXBool)c);
+    }
     // No second GXDrawDone here: the frame-worker wait below is for the DONE
     // phase, which strictly subsumes the drain this call would perform.
     ++g_gxFrameCount;
@@ -171,6 +175,8 @@ PPC_NATIVE_OVERRIDE_VOID(8028dfa0, GX__CopyDisp_8016fc38, (uint32_t da, uint32_t
 
 extern "C" void GX__CopyTex_8016fd74(uint32_t da, uint32_t c) {
     EnsureAuroraFrameActive();
+    // Perftimer: a wait on Aurora's decode thread in here is the texture copy's, not a draw done's.
+    const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_TEX);
     // Match GX FIFO ordering: texture copies observe all prior draws.
     GXDrawDone();
     const uint16_t rawSrcLeft = g_texCopyState.srcLeft;
