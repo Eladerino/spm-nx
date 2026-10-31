@@ -190,11 +190,12 @@ struct Diag {
     std::atomic<bool> perfTimer = false;   // Aurora stage timers: producer, map wait and encode totals every 600 frames (sets NSMBW_STAGE_TIMERS=1 before the first draw)
     std::atomic<bool> arrayUp = false;   // Aurora re-uploads every draw's vertex arrays (sets NSMBW_ARRAY_REUPLOAD=1 before the first draw)
     std::atomic<bool> profile = false;   // the runtime's guest sampling profiler captures the game thread while on; turning it off prints the hot list
+    std::atomic<bool> cpThread = false;   // Aurora decodes GX commands on a thread of its own on core 1, from the end of the frame it is set in (lib/gx/fifo.cpp)
 };
 extern Diag g_diag;
 void diag_init();
 // Sets one switch by its dk_diag.txt name ("depth_off", "nomerge", ...), at runtime: the
-// interposer switches flip here, the five Aurora switches are forwarded to Aurora's own flags
+// interposer switches flip here, the six Aurora switches are forwarded to Aurora's own flags
 // (dk_aurora.h), and the profile switch to the runtime's guest profiler. False for an unknown
 // name. Any thread.
 bool diag_set(const char* key, bool on);

@@ -57,6 +57,7 @@ void diag_init() {
         if (std::strstr(line, "perftimer")) g_diag.perfTimer = !off;
         if (std::strstr(line, "arrayup")) g_diag.arrayUp = !off;
         if (std::strstr(line, "profile")) g_diag.profile = !off;
+        if (std::strstr(line, "cpthread")) g_diag.cpThread = !off;
     }
     std::fclose(f);
     // Aurora's switches initialise from these env vars on their first use; diag_init runs from
@@ -78,11 +79,14 @@ void diag_init() {
     // Switch sampler is toggle-driven (one session, reported when the switch turns off), so it
     // has no window to read. diag_set and the end of this function drive it directly instead.
     if (g_diag.profile) setenv("NSMBW_PROFILE", "1", 1);
-    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d nomerge=%d uvlog=%d mtxlog=%d perftimer=%d arrayup=%d profile=%d",
+    // No env var for the decode thread: Aurora reads the request at each frame's end, so setting
+    // it now has it take over from the first frame's end.
+    if (g_diag.cpThread) aurora::gx::fifo::set_decode_thread_requested(true);
+    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d nomerge=%d uvlog=%d mtxlog=%d perftimer=%d arrayup=%d profile=%d cpthread=%d",
           g_diag.depthOff ? 1 : 0, g_diag.cullOff ? 1 : 0, g_diag.magenta ? 1 : 0, g_diag.picDump ? 1 : 0,
           g_diag.efbClear ? 1 : 0, g_diag.bufDump ? 1 : 0, g_diag.texDump ? 1 : 0, g_diag.shaderDump ? 1 : 0,
           g_diag.noMerge ? 1 : 0, g_diag.uvLog ? 1 : 0, g_diag.mtxLog ? 1 : 0, g_diag.perfTimer ? 1 : 0,
-          g_diag.arrayUp ? 1 : 0, g_diag.profile ? 1 : 0);
+          g_diag.arrayUp ? 1 : 0, g_diag.profile ? 1 : 0, g_diag.cpThread ? 1 : 0);
     // A profile=1 in dk_diag.txt starts the sampler now. Renderer init runs before the guest
     // starts, so the session covers the boot too; samples resolve at report time, so nothing
     // about the early start hurts attribution. The clean session is still the menu toggle:
@@ -91,11 +95,12 @@ void diag_init() {
 }
 
 // diag_set (dk.h): the runtime path for the same switches. The eight interposer switches are
-// plain field flips (their use sites read g_diag per bind, per present, per compile); the five
-// Aurora switches also forward to Aurora's flags, which initialise from the env vars above and
-// are settable ever since; the profile switch forwards to the runtime's guest profiler, whose
-// hot list prints when the switch turns off. A flip lands from the switch's next use onward,
-// not at a frame boundary.
+// plain field flips (their use sites read g_diag per bind, per present, per compile); the six
+// Aurora switches also forward to Aurora's flags, which initialise from the env vars above (the
+// decode thread's from diag_init itself) and are settable ever since; the profile switch forwards
+// to the runtime's guest profiler, whose hot list prints when the switch turns off. A flip lands
+// from the switch's next use onward, not at a frame boundary, except cpthread, which Aurora
+// applies at the end of the frame.
 bool diag_set(const char* key, bool on) {
     if (!key) return false;
     if (!std::strcmp(key, "depth_off")) g_diag.depthOff = on;
@@ -124,6 +129,9 @@ bool diag_set(const char* key, bool on) {
     } else if (!std::strcmp(key, "profile")) {
         g_diag.profile = on;
         GuestProfiler::SetSwitchProfileEnabled(on);
+    } else if (!std::strcmp(key, "cpthread")) {
+        g_diag.cpThread = on;
+        aurora::gx::fifo::set_decode_thread_requested(on);
     } else {
         return false;
     }
@@ -132,7 +140,7 @@ bool diag_set(const char* key, bool on) {
 
 // diag_get (dk.h): the read side of diag_set, for the Switch settings menu's
 // Developer rows. g_diag is authoritative for every key: diag_set stores the
-// field for all fourteen keys and additionally forwards the five Aurora ones
+// field for all fifteen keys and additionally forwards the six Aurora ones
 // (and the profile switch to the guest profiler).
 bool diag_get(const char* key) {
     if (!key) return false;
@@ -150,6 +158,7 @@ bool diag_get(const char* key) {
     else if (!std::strcmp(key, "perftimer")) return g_diag.perfTimer;
     else if (!std::strcmp(key, "arrayup")) return g_diag.arrayUp;
     else if (!std::strcmp(key, "profile")) return g_diag.profile;
+    else if (!std::strcmp(key, "cpthread")) return g_diag.cpThread;
     return false;
 }
 
