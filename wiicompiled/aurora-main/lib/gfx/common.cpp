@@ -393,6 +393,14 @@ std::array<uint64_t, AURORA_GX_WAIT_SITE_COUNT> s_printedCpSiteWaits{};
 std::array<uint64_t, AURORA_GX_WAIT_SITE_COUNT> s_printedCpSiteCalls{};
 std::mutex g_stagePrintMutex;
 
+// GX decoder pipeline resolution (stage_time_add_pipeline_lookup).
+std::atomic<uint64_t> g_stagePipelineMemoHits{0};
+std::atomic<uint64_t> g_stagePipelineLookups{0};
+std::atomic<uint64_t> g_stagePipelineCreates{0};
+uint64_t s_printedPipelineMemoHits = 0;
+uint64_t s_printedPipelineLookups = 0;
+uint64_t s_printedPipelineCreates = 0;
+
 // The places the game was in during the current perftimer window, in order (AuroraSetPerfPlace).
 constexpr size_t kMaxStagePlaces = 6;
 std::mutex g_stagePlaceMutex;
@@ -455,6 +463,23 @@ void stage_time_print_window(uint64_t frame) {
     s_printedCpSiteWaits[i] = g_stageCpSiteWaits[i].load(std::memory_order_relaxed);
     s_printedCpSiteCalls[i] = g_stageCpSiteCalls[i].load(std::memory_order_relaxed);
   }
+  const uint64_t pipelineMemoHits = g_stagePipelineMemoHits.load(std::memory_order_relaxed);
+  const uint64_t pipelineLookups = g_stagePipelineLookups.load(std::memory_order_relaxed);
+  const uint64_t pipelineCreates = g_stagePipelineCreates.load(std::memory_order_relaxed);
+  if (pipelineLookups != s_printedPipelineLookups) {
+    const uint64_t hits = pipelineMemoHits - s_printedPipelineMemoHits;
+    const uint64_t lookups = pipelineLookups - s_printedPipelineLookups;
+    std::fprintf(stderr,
+                 "[pipeline] frames %llu-%llu: %llu draws reused the last pipeline, %llu full lookups (%.0f%%), "
+                 "%llu new cache entries\n",
+                 static_cast<unsigned long long>(s_printedFrame + 1), static_cast<unsigned long long>(frame),
+                 static_cast<unsigned long long>(hits), static_cast<unsigned long long>(lookups),
+                 100.0 * static_cast<double>(lookups) / static_cast<double>(hits + lookups),
+                 static_cast<unsigned long long>(pipelineCreates - s_printedPipelineCreates));
+  }
+  s_printedPipelineMemoHits = pipelineMemoHits;
+  s_printedPipelineLookups = pipelineLookups;
+  s_printedPipelineCreates = pipelineCreates;
   {
     std::lock_guard<std::mutex> placeLock(g_stagePlaceMutex);
     if (!g_stagePlaces.empty()) {
@@ -494,6 +519,17 @@ void stage_time_add_map_wait(std::chrono::nanoseconds duration) noexcept {
   g_stageMapWaitNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
 }
 } // namespace
+
+void stage_time_add_pipeline_lookup(uint32_t memoHits, bool created) noexcept {
+  // One decoding thread at a time calls this, so plain load-and-store keeps the per-draw cost off an atomic add.
+  g_stagePipelineMemoHits.store(g_stagePipelineMemoHits.load(std::memory_order_relaxed) + memoHits,
+                                std::memory_order_relaxed);
+  g_stagePipelineLookups.store(g_stagePipelineLookups.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+  if (created) {
+    g_stagePipelineCreates.store(g_stagePipelineCreates.load(std::memory_order_relaxed) + 1,
+                                 std::memory_order_relaxed);
+  }
+}
 
 void stage_time_set_place(const char* place) noexcept {
   try {
