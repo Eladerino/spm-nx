@@ -256,7 +256,7 @@ void Run(HANDLE thread, double startSeconds, double lengthSeconds) {
 
 constexpr int kProfilePeriodMs = 5;              // 200 samples a second
 constexpr uint32_t kProfileMaxSamples = 120000;  // 10 minutes at that rate, then sampling stops
-constexpr int kProfileMaxDepth = 12;             // PC, LR, then frame-pointer return addresses
+constexpr int kProfileMaxDepth = 20;             // PC, LR, then frame-pointer return addresses
 constexpr int kProfileMaxFailures = 20;          // consecutive failed samples before giving up
 
 std::atomic<bool> g_profileRunning{false};
@@ -450,6 +450,9 @@ void ProfileReport() {
         RT_LOGF(RT_TAG_RUNTIME, "%s\n", line.c_str());
     }
     for (const auto& line : GuestProfileFormat::ChainLines(stacks, entries, base, total, 25)) {
+        RT_LOGF(RT_TAG_RUNTIME, "%s\n", line.c_str());
+    }
+    for (const auto& line : GuestProfileFormat::InclusiveNativeLines(stacks, entries, base, total, 25)) {
         RT_LOGF(RT_TAG_RUNTIME, "%s\n", line.c_str());
     }
     RT_LOGF(RT_TAG_RUNTIME, "[profile] end\n");
