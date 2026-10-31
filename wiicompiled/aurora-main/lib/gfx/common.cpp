@@ -400,6 +400,7 @@ std::atomic<uint64_t> g_stagePipelineCreates{0};
 uint64_t s_printedPipelineMemoHits = 0;
 uint64_t s_printedPipelineLookups = 0;
 uint64_t s_printedPipelineCreates = 0;
+std::atomic<void (*)(uint64_t, uint64_t)> g_stageWindowHook{nullptr};
 
 // The places the game was in during the current perftimer window, in order (AuroraSetPerfPlace).
 constexpr size_t kMaxStagePlaces = 6;
@@ -499,6 +500,9 @@ void stage_time_print_window(uint64_t frame) {
       g_stagePlaces.push_back(g_stagePlace);  // the next window starts where this one ended
     }
   }
+  if (const auto hook = g_stageWindowHook.load(std::memory_order_acquire)) {
+    hook(s_printedFrame + 1, frame);
+  }
   s_printedCpWaitNs = cpWaitNs;
   s_printedCpWaits = cpWaits;
   s_printedCpDecodeNs = cpDecodeNs;
@@ -519,6 +523,10 @@ void stage_time_add_map_wait(std::chrono::nanoseconds duration) noexcept {
   g_stageMapWaitNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
 }
 } // namespace
+
+void stage_time_set_window_hook(void (*hook)(uint64_t firstFrame, uint64_t lastFrame)) noexcept {
+  g_stageWindowHook.store(hook, std::memory_order_release);
+}
 
 void stage_time_add_pipeline_lookup(uint32_t memoHits, bool created) noexcept {
   // One decoding thread at a time calls this, so plain load-and-store keeps the per-draw cost off an atomic add.
