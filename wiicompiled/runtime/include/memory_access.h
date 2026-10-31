@@ -677,6 +677,13 @@ inline uint16_t Memory::Read16(uint32_t addr) {
     return value;
 }
 
+inline bool Memory::Contains(uint32_t addr, size_t length) {
+    uint8_t* pointer = nullptr;
+    if (MemoryInline::TryGetPointerFast(addr, length, pointer)) [[likely]]
+        return true;
+    return ContainsSlow(addr, length);
+}
+
 inline uint32_t Memory::Read32(uint32_t addr) {
     uint32_t value = 0;
     if (!MemoryInline::TryReadGuestScalar(addr, value)) [[unlikely]]

@@ -5,9 +5,10 @@ extern "C" void aurora_spm_vtx_state(uint8_t* desc26, uint8_t* fmt8x26x3);
 #include "gx_cp_decode.h"
 #include "isa/big_endian.h"
 
+#include <algorithm>
 #include <cstdlib>
+#include <deque>
 #include <optional>
-#include <unordered_map>
 
 // The display-list scan cache validates a cached scan against the live guest
 // bytes with a 64-bit XXH3 digest (see GxDisplayListScanCache::CanReuse).
@@ -490,9 +491,70 @@ struct DlScanCacheRecord {
     std::vector<uint8_t> flattened{};
 };
 
+// The records live in a deque (stable addresses, laid out in the order lists were first seen, which
+// is the order the next frame calls them in) behind an open-addressed index of {key, record}. It
+// replaced an unordered_map whose find walked bucket -> preceding node -> node, three dependent
+// cache misses per GXCallDisplayList that the Switch profile put at the top of the call's cost.
+// Records are only ever replaced in place or dropped all at once, so the index needs no tombstones.
 struct DlScanCacheState {
-    std::unordered_map<uint64_t, DlScanCacheRecord> entries{};
+    struct Slot {
+        uint64_t key = 0;
+        DlScanCacheRecord* record = nullptr; // null: empty slot
+    };
+    std::deque<DlScanCacheRecord> records{};
+    std::vector<Slot> index{};
     size_t storedCommandBytes = 0;
+
+    size_t size() const { return records.size(); }
+
+    Slot* Locate(uint64_t key) {
+        if (index.empty()) {
+            return nullptr;
+        }
+        const size_t mask = index.size() - 1;
+        size_t i = static_cast<size_t>((key * 0x9E3779B97F4A7C15ull) >> 32) & mask;
+        while (index[i].record != nullptr && index[i].key != key) {
+            i = (i + 1) & mask;
+        }
+        return &index[i];
+    }
+
+    DlScanCacheRecord* Find(uint64_t key) {
+        Slot* slot = Locate(key);
+        return slot != nullptr ? slot->record : nullptr;
+    }
+
+    // Replaces the record for key in place, or appends one; returns it.
+    DlScanCacheRecord& Assign(uint64_t key, DlScanCacheRecord&& record) {
+        if (DlScanCacheRecord* existing = Find(key)) {
+            *existing = std::move(record);
+            return *existing;
+        }
+        if ((records.size() + 1) * 2 > index.size()) {
+            Grow();
+        }
+        records.push_back(std::move(record));
+        Slot* slot = Locate(key);
+        slot->key = key;
+        slot->record = &records.back();
+        return records.back();
+    }
+
+    void Clear() {
+        records.clear();
+        std::fill(index.begin(), index.end(), Slot{});
+    }
+
+private:
+    void Grow() {
+        std::vector<Slot> old = std::move(index);
+        index.assign(old.empty() ? 4096 : old.size() * 2, Slot{});
+        for (const Slot& slot : old) {
+            if (slot.record != nullptr) {
+                *Locate(slot.key) = slot;
+            }
+        }
+    }
 };
 
 static uint64_t HashScanLayoutState() {
@@ -548,9 +610,8 @@ static DlScanCacheProbe ProbeDlScanCache(const uint8_t* list, uint32_t listAddr,
 
     auto& s_cache = DlScanCache();
     const uint64_t key = DlScanCacheKey(listAddr, nbytes, layoutHash);
-    const auto it = s_cache.entries.find(key);
-    if (it != s_cache.entries.end()) {
-        auto& record = it->second;
+    if (DlScanCacheRecord* found = s_cache.Find(key)) {
+        auto& record = *found;
         const auto& entry = record.result;
         const bool identityMatches = entry.listAddr == CanonicalizeGxMainRamAddress(listAddr) &&
                                      entry.nbytes == nbytes && entry.layoutHash == layoutHash;
@@ -588,14 +649,14 @@ static void StoreDlScanCache(uint32_t listAddr, uint32_t nbytes, uint64_t layout
                              uint32_t flattenedBytes) {
     auto& s_cache = DlScanCache();
     const uint64_t key = DlScanCacheKey(listAddr, nbytes, layoutHash);
-    auto old = s_cache.entries.find(key);
-    bool replacing = old != s_cache.entries.end();
-    size_t replacedBytes = replacing ? DlScanCacheRecordBytes(old->second) : 0;
+    const DlScanCacheRecord* old = s_cache.Find(key);
+    bool replacing = old != nullptr;
+    size_t replacedBytes = replacing ? DlScanCacheRecordBytes(*old) : 0;
     const size_t incomingBytes = static_cast<size_t>(flattenedBytes) +
                                  cpWrites.size() * sizeof(DlCpWrite);
-    if ((!replacing && s_cache.entries.size() >= kDlScanCacheMaxEntries) ||
+    if ((!replacing && s_cache.size() >= kDlScanCacheMaxEntries) ||
         s_cache.storedCommandBytes - replacedBytes + incomingBytes > kDlScanCacheMaxStoredBytes) {
-        s_cache.entries.clear();
+        s_cache.Clear();
         s_cache.storedCommandBytes = 0;
         replacing = false;
         replacedBytes = 0;
@@ -614,9 +675,8 @@ static void StoreDlScanCache(uint32_t listAddr, uint32_t nbytes, uint64_t layout
     if (flattened != nullptr && flattenedBytes != 0) {
         record.flattened.assign(flattened, flattened + flattenedBytes);
     }
-    auto [it, inserted] = s_cache.entries.insert_or_assign(key, std::move(record));
-    (void)inserted;
-    s_cache.storedCommandBytes += DlScanCacheRecordBytes(it->second);
+    const DlScanCacheRecord& stored = s_cache.Assign(key, std::move(record));
+    s_cache.storedCommandBytes += DlScanCacheRecordBytes(stored);
     if (replacing) {
         s_cache.storedCommandBytes -= replacedBytes;
     }
