@@ -15,6 +15,7 @@
 
 #include <aurora/gfx.h>
 #include <aurora/math.hpp>
+#include <dolphin/gx/GXAurora.h>
 #include <dolphin/gx/GXEnum.h>
 #include <webgpu/webgpu_cpp.h>
 #define XXH_STATIC_LINKING_ONLY
@@ -336,7 +337,13 @@ void stage_time_add_gxcall(std::chrono::nanoseconds duration) noexcept;
 // window it ran in. cpwait is the game thread waiting for it (syncs, and a full queue); cpbatch is
 // one batch decoded: its decode time, the sealed wait before it and its size. With the thread on,
 // producer and dlprocess above are its time, not the game thread's.
-void stage_time_add_cpwait(std::chrono::nanoseconds duration) noexcept;
+// A [cpwait] line follows, splitting the waits by site (AuroraGxWaitSite): for each, the time
+// waited, then waits/calls. cpsync is one call that may wait: a sync or a drain, or for the
+// queue site a handover while recording. A call can wait twice (for room in the queue, then for
+// the decode), and calls that did not wait show where the game thread would stop if the decode
+// thread ran further behind.
+void stage_time_add_cpwait(std::chrono::nanoseconds duration, AuroraGxWaitSite site) noexcept;
+void stage_time_add_cpsync(AuroraGxWaitSite site) noexcept;
 void stage_time_add_cpbatch(std::chrono::nanoseconds decode, std::chrono::nanoseconds sealedWait,
                             uint32_t bytes) noexcept;
 // Prints the current, partial [frametime] window now and re-baselines, so a test segment

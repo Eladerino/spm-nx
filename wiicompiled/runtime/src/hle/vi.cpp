@@ -974,6 +974,9 @@ static bool LogFpsEnabled() {
 uint64_t DvdReadNanosTotal();
 extern std::atomic<uint64_t> g_copyDispWorkerWaitNanos;  // gx_copy.cpp
 uint32_t DvdReadCount();
+// The game thread's time in VIWaitForRetrace since start: what a frame had to spare before the
+// retrace it waited for (the slow frame log). Other guest threads can run during the wait.
+static std::atomic<uint64_t> g_retraceWaitNanos{0};
 
 void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     if (s_presentSequenceActive.exchange(true, std::memory_order_acq_rel)) {
@@ -1114,7 +1117,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     if (presentedXfb) {
         static Clock::time_point s_lastEnd{}, s_windowStart{};
         static int s_logged = 0;
-        static uint64_t s_lastGx = 0, s_lastDvd = 0, s_lastWorker = 0;
+        static uint64_t s_lastGx = 0, s_lastDvd = 0, s_lastWorker = 0, s_lastRetrace = 0;
         static uint32_t s_lastDvdReads = 0;
         const uint64_t gxTotal = AuroraGxProcessNanosTotal();
         const double gxMs = (gxTotal - s_lastGx) / 1e6;
@@ -1128,6 +1131,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         const uint32_t frameReads = dvdReads - s_lastDvdReads;
         s_lastDvd = dvdTotal;
         s_lastDvdReads = dvdReads;
+        const uint64_t retraceTotal = g_retraceWaitNanos.load(std::memory_order_relaxed);
+        const double retraceMs = (retraceTotal - s_lastRetrace) / 1e6;
+        s_lastRetrace = retraceTotal;
         const Clock::time_point now = Clock::now();
         if (s_lastEnd != Clock::time_point{}) {
             const double frame = ms(now - s_lastEnd);
@@ -1139,9 +1145,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
                 uint32_t sceneWord = 0;
                 Memory::TryRead32(0x80428730u, sceneWord);
                 RT_LOGF(RT_TAG_VI,
-                        "slow frame %.1f ms (scene 0x%03X): game %.2f (gx %.2f, worker wait %.2f, disc %.2f in %u reads), present %.2f, "
-                        "end_frame %.2f, pace %.2f\n",
-                        frame, sceneWord & 0xFFFFu, ms(presentStart - s_lastEnd), gxMs, workerMs, dvdMs, frameReads,
+                        "slow frame %.1f ms (scene 0x%03X): game %.2f (gx %.2f, worker wait %.2f, disc %.2f in %u reads, "
+                        "retrace wait %.2f), present %.2f, end_frame %.2f, pace %.2f\n",
+                        frame, sceneWord & 0xFFFFu, ms(presentStart - s_lastEnd), gxMs, workerMs, dvdMs, frameReads, retraceMs,
                         ms(endFrameStart - presentStart),
                         ms(paceStart - endFrameStart), ms(now - paceStart));
             }
@@ -1529,6 +1535,14 @@ PPC_NATIVE_OVERRIDE_VOID(8028202C, VIGetCurrentLine_HLE_801bac48, (CpuContext* c
 extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
 {
     CpuContext* cpu = ctx ? ctx : &GetPersistentCpuContext();
+    struct WaitTimer {
+        Clock::time_point start = Clock::now();
+        ~WaitTimer() {
+            g_retraceWaitNanos.fetch_add(
+                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count()),
+                std::memory_order_relaxed);
+        }
+    } waitTimer;
     
     if (Fiber::GuestFiberManager::IsInitialized()) {
         bool resumedRunning = false;

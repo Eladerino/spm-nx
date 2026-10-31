@@ -262,13 +262,19 @@ GXFifoObj* GXInit(void* base, u32 size) {
 }
 
 void GXDrawDone() {
-  aurora::gx::fifo::drain();
+  {
+    const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_DRAW_DONE);
+    aurora::gx::fifo::drain();
+  }
   if (DrawDoneCB != nullptr)
     DrawDoneCB();
 }
 
 void GXSetDrawDone() {
-  aurora::gx::fifo::drain();
+  {
+    const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_DRAW_DONE);
+    aurora::gx::fifo::drain();
+  }
   if (DrawDoneCB != nullptr)
     DrawDoneCB();
 }

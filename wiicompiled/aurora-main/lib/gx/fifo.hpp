@@ -2,6 +2,8 @@
 
 #include "../internal.hpp"
 
+#include <dolphin/gx/GXAurora.h>
+
 #include <cstring>
 
 namespace aurora::gx::fifo {
@@ -147,6 +149,9 @@ struct DirectCommand {
 inline void insert_at_drain_point(const DirectCommand& cmd) { insert_at_drain_point(cmd.bytes, cmd.size); }
 // GXApplyBPReg with the decode thread on: the BP write, at the drain point.
 void queue_bp_write(uint32_t value);
+// AuroraGxBeginWaitSite and AuroraGxEndWaitSite (GXAurora.h). Game thread only.
+AuroraGxWaitSite begin_wait_site(AuroraGxWaitSite site) noexcept;
+void end_wait_site(AuroraGxWaitSite previous) noexcept;
 // Stops the decode thread (aurora's shutdown).
 void stop_decode_thread() noexcept;
 
