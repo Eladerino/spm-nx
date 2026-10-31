@@ -6,6 +6,7 @@ extern "C" void aurora_spm_vtx_state(uint8_t* desc26, uint8_t* fmt8x26x3);
 #include "isa/big_endian.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <deque>
 #include <optional>
@@ -1382,8 +1383,22 @@ extern "C" void GxNotifyDisplayListMemoryWrite(uint32_t addr, uint32_t size) {
     return false;
 }
 
+namespace aurora::gfx {
+bool stage_timers_enabled() noexcept;
+void stage_time_add_gxcall(std::chrono::nanoseconds duration) noexcept;
+} // namespace aurora::gfx
+
 extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes) {
     if (nbytes == 0 || listAddr == 0) return;
+    // The perftimer's gxcall column: this whole call, aurora's display list decode included.
+    struct TimeScope {
+        const bool on = aurora::gfx::stage_timers_enabled();
+        const std::chrono::steady_clock::time_point start =
+            on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        ~TimeScope() {
+            if (on) aurora::gfx::stage_time_add_gxcall(std::chrono::steady_clock::now() - start);
+        }
+    } timeScope;
     static const int s_skipId = std::getenv("SPM_SKIP_MATDL") ? std::atoi(std::getenv("SPM_SKIP_MATDL")) : -1;  // diagnostic: drop the geometry list drawn after material list <id>
     static bool s_skipNext = false;
     try {

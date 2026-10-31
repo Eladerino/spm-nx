@@ -327,6 +327,11 @@ void stage_time_add_producer(std::chrono::nanoseconds duration) noexcept;
 void stage_time_add_encode(std::chrono::nanoseconds duration) noexcept;
 void stage_time_add_sealedwait(std::chrono::nanoseconds duration) noexcept;
 void stage_time_add_frametotal(std::chrono::nanoseconds duration) noexcept;
+// Where the game thread's GX time goes, for deciding what could move to another core:
+// dlprocess is aurora decoding display lists (GXCallDisplayList's process_display_list, which
+// "producer" does not cover), gxcall is the runtime's whole GX__CallDisplayList HLE including it.
+void stage_time_add_dlprocess(std::chrono::nanoseconds duration) noexcept;
+void stage_time_add_gxcall(std::chrono::nanoseconds duration) noexcept;
 // Prints the current, partial [frametime] window now and re-baselines, so a test segment
 // gets its own numbers instead of whatever window it happened to land in; a no-op while
 // the timers are off.

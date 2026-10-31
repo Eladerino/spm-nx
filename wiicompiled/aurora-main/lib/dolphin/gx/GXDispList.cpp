@@ -5,6 +5,7 @@
 #include "../../gx/fifo.hpp"
 #include "../../gfx/common.hpp"
 
+#include <chrono>
 #include <cstring>
 
 static __GXData_struct sSavedGXData;
@@ -18,6 +19,14 @@ static void process_display_list(const u8* data, u32 nbytes, bool bigEndian) {
     ReplayScope() { aurora::gx::fifo::g_replayingDisplayList = true; }
     ~ReplayScope() { aurora::gx::fifo::g_replayingDisplayList = prev; }
   } replayScope;
+  struct TimeScope {
+    const bool on = aurora::gfx::stage_timers_enabled();
+    const std::chrono::steady_clock::time_point start =
+        on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    ~TimeScope() {
+      if (on) aurora::gfx::stage_time_add_dlprocess(std::chrono::steady_clock::now() - start);
+    }
+  } timeScope;
   u32 consumed = 0;
   bool retried = false;
   while (consumed < nbytes) {
