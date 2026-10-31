@@ -42,6 +42,7 @@ constexpr const char* kCrashLog = "/switch/spm-nx/UserData/Logs/crash.txt";
 bool g_sockets = false;
 u64 g_mainThreadId = 0;
 std::atomic<bool> g_crashing{false};
+std::atomic<u64> g_exitingThread{0};  // the thread in userAppExit(), which unmaps guest memory
 int g_crashFd = -1;
 char g_crashLine[512];
 
@@ -140,6 +141,8 @@ extern "C" {
 // runtime/horizon_tls.c: the thread pointer clang's thread_locals use (TPIDR_EL0) for this thread.
 void spm_switch_tls_init_main_thread(void);
 void spm_switch_tls_check_main_thread(void);
+// runtime/guest_flat_memory_horizon.cpp: unmaps the flat guest window, which hbloader needs gone.
+void spm_switch_guest_memory_release(void);
 
 // The exception handler runs on its own stack: the faulting thread's may be the problem.
 alignas(16) u8 __nx_exception_stack[0x4000];
@@ -172,6 +175,12 @@ void userAppInit(void) {
 }
 
 void userAppExit(void) {
+    // After main() and the static destructors. A thread still running (the fatal exit leaves
+    // Aurora's alive) may touch guest memory once it is unmapped; the crash handler parks it.
+    u64 self = 0;
+    svcGetThreadId(&self, CUR_THREAD_HANDLE);
+    g_exitingThread = self;
+    spm_switch_guest_memory_release();
     std::fflush(stderr);
     if (g_sockets) {
         socketExit();
@@ -179,23 +188,27 @@ void userAppExit(void) {
 }
 
 void __libnx_exception_handler(ThreadExceptionDump* ctx) {
+    u64 threadId = 0;
+    svcGetThreadId(&threadId, CUR_THREAD_HANDLE);
+    // During exit, another thread's fault is one that outlived the unmapped guest memory, not a
+    // crash worth a report over the one that may have caused the exit: it waits, like a second
+    // crash does. The exiting thread's own fault is still reported.
+    const u64 exiting = g_exitingThread;
     bool expected = false;
-    if (!g_crashing.compare_exchange_strong(expected, true)) {
+    if ((exiting != 0 && exiting != threadId) || !g_crashing.compare_exchange_strong(expected, true)) {
         for (;;) {  // a second thread's exception waits for the first report to end the process
             svcSleepThread(1000000000ULL);
         }
     }
     g_crashFd = open(kCrashLog, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 
-    u64 threadId = 0;
-    svcGetThreadId(&threadId, CUR_THREAD_HANDLE);
     Say("[switch] CRASH: %s (0x%" PRIx32 ") esr=0x%" PRIx32 " far=0x%016" PRIx64 " on thread %" PRIu64 "%s\n",
         ExceptionName(ctx->error_desc), ctx->error_desc, ctx->esr, ctx->far.x, threadId,
         threadId == g_mainThreadId ? " (the main thread: guest scheduler)" : " (not the main thread)");
-    const uint64_t flatBase = GuestFlat::kFixedFlatGuestBase;
-    if (ctx->far.x >= flatBase && ctx->far.x - flatBase < GuestFlat::kGuestSpaceSize) {
-        Say("  -> guest address 0x%08" PRIx64 " through the flat view, which the Switch build does not map "
-            "yet: some code bypassed RequiresCheckedAccess()\n",
+    const uint64_t flatBase = reinterpret_cast<uint64_t>(MKW_FLAT_GUEST_BASE);
+    if (flatBase != 0 && ctx->far.x >= flatBase && ctx->far.x - flatBase < GuestFlat::kGuestSpaceSize) {
+        Say("  -> guest address 0x%08" PRIx64 " through the flat window, where nothing is mapped: a wild "
+            "guest pointer or an MMIO read (the window has no page traps)\n",
             ctx->far.x - flatBase);
     }
     SayAddress("  pc=", ctx->pc.x);

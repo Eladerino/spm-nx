@@ -429,7 +429,7 @@ void ProfileReport() {
                 return;
             }
             const char* name = info->name != nullptr && info->name[0] != '\0' ? info->name : GuestName(info->address);
-            entries.push_back({host, info->address, name});
+            entries.push_back({host, info->address, name, info->kind == FunctionKind::Native});
         };
         for (const auto& sample : samples) {
             resolve(sample.first);
