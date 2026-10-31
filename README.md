@@ -12,6 +12,33 @@ Installing and building the Switch version are documented in [`switch/README.md`
 
 The easy path is the release: download it, copy it to the SD card, add the files from your own disc, and launch. There is no launcher on the Switch; the NRO boots by title takeover to a startup screen. Fresh installs start from Switch defaults: 1.5x rendering (the 720p screen's native size), 16:9 and frame interpolation off. The European disc (R8PP01) is PC-only for now, because only the USA game has been translated for the Switch.
 
+**Adding the game files.** The NRO reads the game's files extracted; it will not read a
+disc image directly. Your image can be `.iso`, `.wbfs` or `.ciso`. The easy way to extract
+it is Dolphin (a free emulator, which also opens `.rvz`, `.wia` and `.gcz` images):
+
+- Open Dolphin. If the game is not in its game list yet, open **Config**, go to the
+  **Paths** tab and **Add** the folder your image is in.
+- Right-click **Super Paper Mario** in the game list, choose **Properties**, then open
+  the **Filesystem** tab.
+- Right-click the top entry, **Disc**, choose **Extract Entire Disc...**, and pick an
+  empty folder.
+- When it finishes, open the `DATA` folder inside the folder you picked, and copy
+  everything in `DATA` (the `files` and `sys` folders) into `/switch/spm-nx/game/` on
+  the SD card.
+
+Done right, that corner of the card looks like this:
+
+```
+sdmc:/switch/spm-nx/
+    spm-nx.nro
+    game/
+        files/
+        sys/
+```
+
+The full install (everything else the release puts on the card, launching, settings and
+troubleshooting) is in [`switch/README.md`](switch/README.md).
+
 ## Upstream PC version
 
 The folded sections below are the upstream PC project's own documentation (New Super Paper Bros by JosiahG), kept on this page for reference. The Switch port itself is covered above and in [`switch/README.md`](switch/README.md).
