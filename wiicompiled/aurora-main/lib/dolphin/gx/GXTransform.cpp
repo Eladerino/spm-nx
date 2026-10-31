@@ -1,6 +1,8 @@
 #include "gx.hpp"
 #include "__gx.h"
 #include "dolphin/mtx/GeoTypes.h"
+#include "dolphin/gx/GXAurora.h"
+#include "../../gx/fifo.hpp"
 
 static inline void CacheProjectionVector(const f32* ptr, GXProjectionType type) {
   __gx->projType = type;
@@ -205,8 +207,17 @@ void GXSetZScaleOffset(f32 scale, f32 offset) {
 }
 
 void GXSetScissorBoxOffset(s32 x_off, s32 y_off) {
-  g_gxState.scissorOffsetX = x_off;
-  g_gxState.scissorOffsetY = y_off;
+  if (aurora::gx::fifo::decode_thread_active()) {
+    aurora::gx::fifo::DirectCommand cmd;
+    cmd.put8(GX_LOAD_AURORA);
+    cmd.put16(GX_LOAD_AURORA_SCISSOR_OFFSET);
+    cmd.put32(static_cast<u32>(x_off));
+    cmd.put32(static_cast<u32>(y_off));
+    aurora::gx::fifo::insert_at_drain_point(cmd);
+  } else {
+    g_gxState.scissorOffsetX = x_off;
+    g_gxState.scissorOffsetY = y_off;
+  }
 
   const u32 reg = 0x59000000u | (((static_cast<u32>(y_off + 0x156) * 0x200u) & 0x000ffc00u)) |
                   ((static_cast<u32>(x_off + 0x156) >> 1) & 0x000003ffu);

@@ -127,6 +127,8 @@ void WriteMappedRenderState(const aurora::gx::MappedRenderState& mapped) {
 } // namespace
 
 void GXSetViewportScissorRenderSafeArea(f32 aspect) {
+  // The render target size is the decoder's.
+  aurora::gx::fifo::sync();
   const auto [targetWidth, targetHeight] = aurora::gfx::get_render_target_size();
   if (targetWidth == 0 || targetHeight == 0 || !std::isfinite(aspect) || aspect <= 0.0f) {
     return;
@@ -174,6 +176,8 @@ void GXSetViewportScissorRenderSafeArea(f32 aspect) {
 
   WriteMappedRenderState(mapped);
 }
+
+void AuroraGxSync() { aurora::gx::fifo::sync(); }
 
 void GXRestoreViewportScissorRender() {
   // Run queued GX draws before leaving the direct layout safe area.

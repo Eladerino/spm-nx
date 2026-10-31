@@ -5,6 +5,8 @@ extern "C" void aurora_spm_vtx_state(uint8_t* desc26, uint8_t* fmt8x26x3);
 #include "gx_cp_decode.h"
 #include "isa/big_endian.h"
 
+#include <dolphin/gx/GXAurora.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -1309,6 +1311,8 @@ static bool ApplyAuroraArraysForDisplayList(const std::array<uint32_t, GX_VA_MAX
             ApplyAuroraArrayIfChanged(gxAttr, hostPtr, span, static_cast<uint8_t>(arr.stride));
             continue;
         }
+        // Aurora's decode thread may still read the copy two calls back from this slot.
+        AuroraGxSync();
         auto& packed = s_packedArrays[attr][++s_packedArrayCursor[attr] & 1u];
         if (!PackIndexedAttrData(hostPtr, arr.stride, count, elemSize, packed)) {
             ok = false;

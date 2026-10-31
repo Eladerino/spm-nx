@@ -330,13 +330,18 @@ GXRenderModeObj GXMpal480IntDf = {
 
 void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor, u16 ver) {
   *rmout = *rmin;
+  // The render target size is the decoder's.
+  aurora::gx::fifo::sync();
   const auto renderSize = aurora::gfx::get_render_target_size();
   rmout->fbWidth = static_cast<u16>(std::min<uint32_t>(renderSize.x, UINT16_MAX));
   rmout->efbHeight = static_cast<u16>(std::min<uint32_t>(renderSize.y, UINT16_MAX));
   rmout->xfbHeight = static_cast<u16>(std::min<uint32_t>(renderSize.y, UINT16_MAX));
 }
 
+// The copy setters write fields the decoder also writes from the copy registers, so with the
+// decode thread on they wait for it first (sync() does nothing otherwise).
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+  aurora::gx::fifo::sync();
   g_gxState.dispCopySrc = {left, top, wd, ht};
   GX_WRITE_RAS_REG(0x49000000u | ((static_cast<u32>(top) & 0x3ffu) << 10) | (static_cast<u32>(left) & 0x3ffu));
   GX_WRITE_RAS_REG(0x4a000000u | (((static_cast<u32>(ht) - 1u) * 0x400u) & 0x000ffc00u) |
@@ -349,12 +354,14 @@ void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
 }
 
 void GXSetDispCopyDst(u16 wd, u16 ht) {
+  aurora::gx::fifo::sync();
   g_gxState.dispCopyDstWidth = wd;
   g_gxState.dispCopyDstHeight = ht;
   GX_WRITE_RAS_REG(0x4d000000u | ((((static_cast<u32>(wd) & 0x7fffu) << 1) >> 5) & 0x3ffu));
 }
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
+  aurora::gx::fifo::sync();
   g_gxState.texCopyFmt = fmt;
   g_gxState.texCopyDstWidth = wd;
   g_gxState.texCopyDstHeight = ht;
@@ -362,14 +369,17 @@ void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
 }
 
 void GXSetDispCopyFrame2Field(u32 mode) {
+  aurora::gx::fifo::sync();
   g_gxState.dispCopyFrame2Field = mode & 3;
 }
 
 void GXSetCopyClamp(GXFBClamp clamp) {
+  aurora::gx::fifo::sync();
   g_gxState.copyClamp = static_cast<GXFBClamp>(static_cast<u32>(clamp) & 3);
 }
 
 u32 GXSetDispCopyYScale(f32 vscale) {
+  aurora::gx::fifo::sync();
   const u32 iScale = y_scale_to_integer(vscale);
   g_gxState.dispCopyYScale = vscale;
   GX_WRITE_RAS_REG(0x4e000000u | iScale);
@@ -401,6 +411,7 @@ void GXSetCopyClear(GXColor color, u32 depth) {
 }
 
 void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
+  aurora::gx::fifo::sync();
   g_gxState.copyFilterAa = aa;
   g_gxState.copyFilterVf = vf;
   if (sample_pattern) {
@@ -434,18 +445,20 @@ void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[
 }
 
 void GXSetDispCopyGamma(GXGamma gamma) {
+  aurora::gx::fifo::sync();
   g_gxState.dispCopyGamma = static_cast<GXGamma>(static_cast<u32>(gamma) & 3u);
   g_gxState.bpRegCache[0x52] = (g_gxState.bpRegCache[0x52] & ~(3u << 7)) |
                                ((static_cast<u32>(g_gxState.dispCopyGamma) & 3u) << 7);
 }
 
 void GXCopyDisp(void* dest, GXBool clear) {
+  // Draws the decode thread has yet to decode were already decoded here in sync mode, so they
+  // still add to an armed box.
+  aurora::gx::fifo::sync();
   g_spmBBoxArmed = 0;  // a box cleared but never read this frame stops costing CPU projection
   (void)dest;
   // Finish queued commands before this copy reads live EFB state.
-  if (aurora::gx::fifo::get_buffer_size() != 0) {
-    aurora::gx::fifo::drain();
-  }
+  aurora::gx::fifo::drain_if_pending();
   // Round the edges to the nearest render row, as texture copies do. Rounding outward like a scissor
   // pulls the row below the picture into its last line at fractional render scales.
   const auto rect = map_texture_copy_source(g_gxState.dispCopySrc, false).clearRect;
@@ -483,15 +496,13 @@ extern "C" int g_spmDrawDump;
 void GXCopyTex(void* dest, GXBool clear) {
   g_statCopies.fetch_add(1, std::memory_order_relaxed);
   if (g_spmDrawDump) {  // SPM diagnostic: copies in draw order during the dump frame
-    if (aurora::gx::fifo::get_buffer_size() != 0) aurora::gx::fifo::drain();
+    aurora::gx::fifo::drain_if_pending();
     std::fprintf(stderr, "[aurora] [2] [aurora::gx::fifo] [spmdraw] COPYTEX src %d,%d %dx%d dst %ux%u clear %d\n",
                  g_gxState.texCopySrc.x, g_gxState.texCopySrc.y, g_gxState.texCopySrc.width, g_gxState.texCopySrc.height,
                  g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight, (int)clear);
   }
   // Texture copies must see all earlier draws and state changes.
-  if (aurora::gx::fifo::get_buffer_size() != 0) {
-    aurora::gx::fifo::drain();
-  }
+  aurora::gx::fifo::drain_if_pending();
   auto sourceRect = map_texture_copy_source(g_gxState.texCopySrc, g_gxState.texCopySrcRenderSpace);
   // SPM: with the view widened past 16:9 (Hor+), the game's screen coordinates squeeze toward the centre. A copy
   // of part of the screen (the door-opening effect copies the door) must take the same squeeze to find it;
@@ -644,6 +655,8 @@ void GXCopyTex(void* dest, GXBool clear) {
 }
 
 void GXClearBoundingBox() {
+  // The box is the decoder's: draws recorded before this must not add to the cleared one.
+  aurora::gx::fifo::sync();
   g_gxState.boundingBox = {1023, 0, 1023, 0};
   g_spmBBoxArmed = 1;
   GX_WRITE_RAS_REG(0x550003FFu);
@@ -652,6 +665,7 @@ void GXClearBoundingBox() {
 }
 
 void GXReadBoundingBox(u16* left, u16* right, u16* top, u16* bottom) {
+  aurora::gx::fifo::sync();
   g_spmBBoxArmed = 0;
   if (left) {
     *left = g_gxState.boundingBox[0];
