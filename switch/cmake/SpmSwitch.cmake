@@ -220,6 +220,11 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_pthread.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_tls.c"
         PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
+    # The guest-memory layer needs <switch.h> for its SVCs, which declares Thread, Mutex, Event and
+    # the like at global scope; on its own it can't collide with the guest_system unity batch
+    # (memory.cpp, the OS HLE) that its file name would otherwise put it in.
+    set_source_files_properties("${SPM_SWITCH_DIR}/runtime/guest_flat_memory_horizon.cpp"
+        PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
     set(${list_var} ${_sources} PARENT_SCOPE)
 endfunction()
 
