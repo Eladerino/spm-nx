@@ -117,6 +117,10 @@ promised above: set Resolution and Aspect here once and it stays.
 
 - **Doors.** The open animation of the game's large doors renders bigger than the door itself
   and off centre. It is visual only; the door still works. The cause is under investigation.
+- **Button icons.** Not every button prompt has a replacement picture yet, so some prompts
+  still show the original icons.
+- **The pointer during flips.** The Wii Remote pointer (Tippi) is blocked out during the
+  flip transition between 2D and 3D; it comes back once the flip finishes.
 - **Performance.** The port is CPU-bound on the guest side: the translated game code, not the
   renderer, sets the frame rate. Set expectations by area, not by a single number. At a high
   overclock (CPU 1963 MHz, GPU 1152 MHz, memory 2366 MHz, the clocks the port is
