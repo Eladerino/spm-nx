@@ -166,4 +166,54 @@ inline std::vector<std::string> ChainLines(const std::vector<std::vector<uintptr
     return lines;
 }
 
+// Inclusive shares of the native (HLE) entries: for each one, the samples whose stack passes
+// through it anywhere, counted once per stack. The leaf list splits host work into the many small
+// helpers it ends in; this says how much of the game thread sits under each host entry point the
+// guest calls, which is the work that could move to another core. The first line is the share of
+// samples under any native entry at all. Frames past the capture depth are not seen, so these are
+// lower bounds.
+inline std::vector<std::string> InclusiveNativeLines(const std::vector<std::vector<uintptr_t>>& stacks,
+                                                     const std::vector<Entry>& entries, uintptr_t moduleBase,
+                                                     uint32_t total, size_t limit) {
+    std::vector<std::string> lines;
+    if (total == 0) {
+        return lines;
+    }
+    std::unordered_map<std::string, uint32_t> byName;
+    uint32_t underAny = 0;
+    std::vector<std::string> seen;
+    for (const auto& stack : stacks) {
+        seen.clear();
+        for (const uintptr_t pc : stack) {
+            const Entry* entry = FindEntry(entries, pc);
+            if (entry == nullptr || !entry->native) {
+                continue;
+            }
+            std::string name = DescribeAddress(entries, pc, moduleBase);
+            if (std::find(seen.begin(), seen.end(), name) == seen.end()) {
+                seen.emplace_back(std::move(name));
+            }
+        }
+        if (!seen.empty()) {
+            ++underAny;
+        }
+        for (const auto& name : seen) {
+            byName[name]++;
+        }
+    }
+    char text[320];
+    std::snprintf(text, sizeof(text), "[profile] inclusive: %5.1f%%  under any native entry", 100.0 * underAny / total);
+    lines.emplace_back(text);
+    std::vector<std::pair<std::string, uint32_t>> sorted(byName.begin(), byName.end());
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+        return a.second != b.second ? a.second > b.second : a.first < b.first;
+    });
+    for (size_t i = 0; i < sorted.size() && i < limit; ++i) {
+        std::snprintf(text, sizeof(text), "[profile] inclusive: %5.1f%%  %s", 100.0 * sorted[i].second / total,
+                      sorted[i].first.c_str());
+        lines.emplace_back(text);
+    }
+    return lines;
+}
+
 } // namespace GuestProfileFormat
