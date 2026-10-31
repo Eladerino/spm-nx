@@ -90,10 +90,25 @@ struct View {
     bool mapped = false;
 };
 
-std::mutex g_mutex;
-std::vector<Store> g_stores;
-std::vector<View> g_views;
-std::vector<RegionRequest> g_layout;
+// Never destroyed, unlike memory.cpp's function-local statics: userAppExit() unmaps the window after
+// exit() has run the static destructors, so the bookkeeping it walks has to outlive them.
+struct State {
+    std::mutex mutex;
+    std::vector<Store> stores;
+    std::vector<View> views;
+    std::vector<RegionRequest> layout;
+};
+
+State& GetState() {
+    static State* const state = new State();
+    return *state;
+}
+
+std::mutex& Mutex() { return GetState().mutex; }
+std::vector<Store>& Stores() { return GetState().stores; }
+std::vector<View>& Views() { return GetState().views; }
+std::vector<RegionRequest>& Layout() { return GetState().layout; }
+
 uint8_t* g_window = nullptr;
 bool g_active = false;
 
@@ -120,10 +135,10 @@ uint32_t OwnedBase(const RegionRequest& region) {
 
 size_t FindStore(const RegionRequest& region) {
     const uint32_t owned = OwnedBase(region);
-    for (size_t i = 0; i < g_stores.size(); ++i) {
-        if (g_stores[i].backing == region.backing && g_stores[i].ownedBase == owned) return i;
+    for (size_t i = 0; i < Stores().size(); ++i) {
+        if (Stores()[i].backing == region.backing && Stores()[i].ownedBase == owned) return i;
     }
-    return g_stores.size();
+    return Stores().size();
 }
 
 bool SameLayout(const std::vector<RegionRequest>& lhs, const std::vector<RegionRequest>& rhs) {
@@ -287,17 +302,17 @@ void ReleaseWindow() {
 void ReleaseLocked() {
     spm_switch_set_flat_guest_base(nullptr);
     g_active = false;
-    for (auto view = g_views.rbegin(); view != g_views.rend(); ++view) {
-        if (view->mapped) UnmapMirror(*view, g_stores[view->store]);
+    for (auto view = Views().rbegin(); view != Views().rend(); ++view) {
+        if (view->mapped) UnmapMirror(*view, Stores()[view->store]);
     }
-    for (auto store = g_stores.rbegin(); store != g_stores.rend(); ++store) {
+    for (auto store = Stores().rbegin(); store != Stores().rend(); ++store) {
         if (store->codeMapped && !UnmapPrimary(*store)) continue;
         std::free(store->heap);
     }
     ReleaseWindow();
-    g_stores.clear();
-    g_views.clear();
-    g_layout.clear();
+    Stores().clear();
+    Views().clear();
+    Layout().clear();
 }
 
 void InitializeLocked(const std::vector<RegionRequest>& regions) {
@@ -311,17 +326,17 @@ void InitializeLocked(const std::vector<RegionRequest>& regions) {
         }
         const uint64_t end = StoreOffset(region) + region.size;
         const size_t index = FindStore(region);
-        if (index < g_stores.size()) {
-            g_stores[index].size = std::max(g_stores[index].size, end);
+        if (index < Stores().size()) {
+            Stores()[index].size = std::max(Stores()[index].size, end);
         } else {
             Store store;
             store.backing = region.backing;
             store.ownedBase = OwnedBase(region);
             store.size = end;
-            g_stores.push_back(store);
+            Stores().push_back(store);
         }
     }
-    for (auto& store : g_stores) store.size = RoundUp(store.size, kAllocationGranularity);
+    for (auto& store : Stores()) store.size = RoundUp(store.size, kAllocationGranularity);
 
     // Each store's primary view is the first region that covers all of it; the rest alias it.
     for (const auto& region : regions) {
@@ -332,7 +347,7 @@ void InitializeLocked(const std::vector<RegionRequest>& regions) {
         view.mapSize = RoundUp(region.size, kGuestPageSize);
         view.offset = StoreOffset(region);
         view.store = FindStore(region);
-        Store& store = g_stores[view.store];
+        Store& store = Stores()[view.store];
         if (!store.hasPrimary && view.offset == 0 &&
             RoundUp(region.size, kAllocationGranularity) == store.size) {
             store.primary = region.base;
@@ -340,10 +355,10 @@ void InitializeLocked(const std::vector<RegionRequest>& regions) {
         } else {
             view.mirror = true;
         }
-        g_views.push_back(view);
+        Views().push_back(view);
     }
-    for (const auto& view : g_views) {
-        if (!g_stores[view.store].hasPrimary) {
+    for (const auto& view : Views()) {
+        if (!Stores()[view.store].hasPrimary) {
             std::ostringstream oss;
             oss << "no region covers all of the backing store behind guest address 0x" << std::hex
                 << view.guestBase << ", so nothing can be its primary view.";
@@ -351,7 +366,7 @@ void InitializeLocked(const std::vector<RegionRequest>& regions) {
         }
     }
 
-    for (auto& store : g_stores) {
+    for (auto& store : Stores()) {
         store.heap = static_cast<uint8_t*>(
             std::aligned_alloc(kLargePage, static_cast<size_t>(RoundUp(store.size, kLargePage))));
         if (store.heap == nullptr) {
@@ -369,12 +384,12 @@ void InitializeLocked(const std::vector<RegionRequest>& regions) {
 
     if (!RequiresCheckedAccess()) {
         ReserveWindow();
-        for (auto& store : g_stores) {
+        for (auto& store : Stores()) {
             MapPrimary(store);
             store.host = g_window + store.primary;
         }
-        for (auto& view : g_views) {
-            if (view.mirror) MapMirror(view, g_stores[view.store]);
+        for (auto& view : Views()) {
+            if (view.mirror) MapMirror(view, Stores()[view.store]);
         }
         spm_switch_set_flat_guest_base(g_window);
     }
@@ -387,16 +402,16 @@ bool IsActive() {
 }
 
 void Initialize(const std::vector<RegionRequest>& regions) {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    std::lock_guard<std::mutex> lock(Mutex());
 
     if (g_active) {
-        if (!SameLayout(g_layout, regions)) {
+        if (!SameLayout(Layout(), regions)) {
             throw std::runtime_error(
                 "The guest memory layout is fixed once per process; a second Memory::Init asked "
                 "for a different one.");
         }
         // Re-init keeps the stores and clears them, like the desktop build.
-        for (auto& store : g_stores) std::memset(store.host, 0, static_cast<size_t>(store.size));
+        for (auto& store : Stores()) std::memset(store.host, 0, static_cast<size_t>(store.size));
         return;
     }
 
@@ -410,30 +425,30 @@ void Initialize(const std::vector<RegionRequest>& regions) {
     const double ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 
-    g_layout = regions;
+    Layout() = regions;
     g_active = true;
 
     uint64_t total = 0;
-    for (const auto& store : g_stores) total += store.size;
+    for (const auto& store : Stores()) total += store.size;
     if (RequiresCheckedAccess()) {
         RT_LOG(RT_TAG_MEMORY) << "guest RAM on the heap (checked access, no flat view): "
-                              << g_views.size() << " regions, " << g_stores.size()
+                              << Views().size() << " regions, " << Stores().size()
                               << " backing stores, " << (total >> 20) << " MiB" << std::endl;
     } else {
         RT_LOG(RT_TAG_MEMORY) << "guest RAM in a flat 4 GiB window at "
-                              << static_cast<const void*>(g_window) << ": " << g_views.size()
-                              << " views of " << g_stores.size() << " backing stores, "
+                              << static_cast<const void*>(g_window) << ": " << Views().size()
+                              << " views of " << Stores().size() << " backing stores, "
                               << (total >> 20) << " MiB, mapped in " << ms << " ms" << std::endl;
     }
 }
 
 uint8_t* HostPointer(uint32_t guestAddress) {
     if (!g_active) return nullptr;
-    for (const auto& view : g_views) {
+    for (const auto& view : Views()) {
         if (guestAddress < view.guestBase) continue;
         const uint64_t delta = static_cast<uint64_t>(guestAddress) - view.guestBase;
         if (delta >= view.guestSize) continue;
-        return g_stores[view.store].host + view.offset + delta;
+        return Stores()[view.store].host + view.offset + delta;
     }
     return nullptr;
 }
@@ -456,8 +471,9 @@ bool HandleAccessViolation(void*, bool) noexcept {
 } // namespace GuestFlat
 
 // userAppExit() (switch/source/spm_switch_init.cpp): unmaps the window so hbloader gets its heap back.
-// Every pointer into guest RAM dies with it, so nothing may touch guest memory afterwards.
+// Every pointer into guest RAM dies with it, so nothing may touch guest memory afterwards. The crash
+// handler's exit comes through here too, possibly on the thread that holds the lock, so it doesn't wait.
 extern "C" void spm_switch_guest_memory_release(void) {
-    std::lock_guard<std::mutex> lock(GuestFlat::g_mutex);
-    GuestFlat::ReleaseLocked();
+    std::unique_lock<std::mutex> lock(GuestFlat::Mutex(), std::try_to_lock);
+    if (lock.owns_lock()) GuestFlat::ReleaseLocked();
 }
