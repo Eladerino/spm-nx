@@ -344,6 +344,8 @@ void stage_time_add_gxcall(std::chrono::nanoseconds duration) noexcept;
 // thread ran further behind.
 void stage_time_add_cpwait(std::chrono::nanoseconds duration, AuroraGxWaitSite site) noexcept;
 void stage_time_add_cpsync(AuroraGxWaitSite site) noexcept;
+// Where the game is (AuroraSetPerfPlace): the perftimer's [place] line lists the places of each window.
+void stage_time_set_place(const char* place) noexcept;
 void stage_time_add_cpbatch(std::chrono::nanoseconds decode, std::chrono::nanoseconds sealedWait,
                             uint32_t bytes) noexcept;
 // Prints the current, partial [frametime] window now and re-baselines, so a test segment

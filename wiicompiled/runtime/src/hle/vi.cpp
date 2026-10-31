@@ -1141,12 +1141,12 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
                 s_logged = 0;
             }
             if (frame > 20.0 && frame < 2000.0 && s_logged++ < 30) {
-                uint32_t sceneWord = 0;
-                Memory::TryRead32(0x80428730u, sceneWord);
+                char place[48];
+                SpmMapSweep::CurrentPlace(place, sizeof place);
                 RT_LOGF(RT_TAG_VI,
-                        "slow frame %.1f ms (scene 0x%03X): game %.2f (gx %.2f, worker wait %.2f, disc %.2f in %u reads, "
+                        "slow frame %.1f ms (%s): game %.2f (gx %.2f, worker wait %.2f, disc %.2f in %u reads, "
                         "guest idle %.2f), present %.2f, end_frame %.2f, pace %.2f\n",
-                        frame, sceneWord & 0xFFFFu, ms(presentStart - s_lastEnd), gxMs, workerMs, dvdMs, frameReads, idleMs,
+                        frame, place, ms(presentStart - s_lastEnd), gxMs, workerMs, dvdMs, frameReads, idleMs,
                         ms(endFrameStart - presentStart),
                         ms(paceStart - endFrameStart), ms(now - paceStart));
             }

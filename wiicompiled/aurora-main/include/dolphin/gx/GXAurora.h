@@ -219,6 +219,12 @@ void AuroraGxEndWaitSite(AuroraGxWaitSite previous);
  */
 uint32_t AuroraGxDecodeThreadHandle(void);
 
+/**
+ * Where the game is ("he3_08 3D", "title"), for the perftimer: each window's [place] line lists the
+ * places it covered, in order. Any thread; cheap to call with an unchanged place.
+ */
+void AuroraSetPerfPlace(const char* place);
+
 #if __cplusplus
 }
 
