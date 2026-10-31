@@ -341,6 +341,7 @@ void GXAdjustForOverscan(GXRenderModeObj* rmin, GXRenderModeObj* rmout, u16 hor,
 // The copy setters write fields the decoder also writes from the copy registers, so with the
 // decode thread on they wait for it first (sync() does nothing otherwise).
 void GXSetDispCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_SETUP);
   aurora::gx::fifo::sync();
   g_gxState.dispCopySrc = {left, top, wd, ht};
   GX_WRITE_RAS_REG(0x49000000u | ((static_cast<u32>(top) & 0x3ffu) << 10) | (static_cast<u32>(left) & 0x3ffu));
@@ -354,6 +355,7 @@ void GXSetTexCopySrc(u16 left, u16 top, u16 wd, u16 ht) {
 }
 
 void GXSetDispCopyDst(u16 wd, u16 ht) {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_SETUP);
   aurora::gx::fifo::sync();
   g_gxState.dispCopyDstWidth = wd;
   g_gxState.dispCopyDstHeight = ht;
@@ -361,6 +363,7 @@ void GXSetDispCopyDst(u16 wd, u16 ht) {
 }
 
 void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_SETUP);
   aurora::gx::fifo::sync();
   g_gxState.texCopyFmt = fmt;
   g_gxState.texCopyDstWidth = wd;
@@ -369,16 +372,19 @@ void GXSetTexCopyDst(u16 wd, u16 ht, GXTexFmt fmt, GXBool mipmap) {
 }
 
 void GXSetDispCopyFrame2Field(u32 mode) {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_SETUP);
   aurora::gx::fifo::sync();
   g_gxState.dispCopyFrame2Field = mode & 3;
 }
 
 void GXSetCopyClamp(GXFBClamp clamp) {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_SETUP);
   aurora::gx::fifo::sync();
   g_gxState.copyClamp = static_cast<GXFBClamp>(static_cast<u32>(clamp) & 3);
 }
 
 u32 GXSetDispCopyYScale(f32 vscale) {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_SETUP);
   aurora::gx::fifo::sync();
   const u32 iScale = y_scale_to_integer(vscale);
   g_gxState.dispCopyYScale = vscale;
@@ -411,6 +417,7 @@ void GXSetCopyClear(GXColor color, u32 depth) {
 }
 
 void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[7]) {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_SETUP);
   aurora::gx::fifo::sync();
   g_gxState.copyFilterAa = aa;
   g_gxState.copyFilterVf = vf;
@@ -445,6 +452,7 @@ void GXSetCopyFilter(GXBool aa, u8 sample_pattern[12][2], GXBool vf, u8 vfilter[
 }
 
 void GXSetDispCopyGamma(GXGamma gamma) {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_SETUP);
   aurora::gx::fifo::sync();
   g_gxState.dispCopyGamma = static_cast<GXGamma>(static_cast<u32>(gamma) & 3u);
   g_gxState.bpRegCache[0x52] = (g_gxState.bpRegCache[0x52] & ~(3u << 7)) |
@@ -452,6 +460,7 @@ void GXSetDispCopyGamma(GXGamma gamma) {
 }
 
 void GXCopyDisp(void* dest, GXBool clear) {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_DISP);
   // Draws the decode thread has yet to decode were already decoded here in sync mode, so they
   // still add to an armed box.
   aurora::gx::fifo::sync();
@@ -494,6 +503,7 @@ extern "C" void AuroraSetTexturePatches(bool enabled) { g_texturePatches.store(e
 
 extern "C" int g_spmDrawDump;
 void GXCopyTex(void* dest, GXBool clear) {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_TEX);
   g_statCopies.fetch_add(1, std::memory_order_relaxed);
   if (g_spmDrawDump) {  // SPM diagnostic: copies in draw order during the dump frame
     aurora::gx::fifo::drain_if_pending();
@@ -655,6 +665,7 @@ void GXCopyTex(void* dest, GXBool clear) {
 }
 
 void GXClearBoundingBox() {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_BBOX);
   // The box is the decoder's: draws recorded before this must not add to the cleared one.
   aurora::gx::fifo::sync();
   g_gxState.boundingBox = {1023, 0, 1023, 0};
@@ -665,6 +676,7 @@ void GXClearBoundingBox() {
 }
 
 void GXReadBoundingBox(u16* left, u16* right, u16* top, u16* bottom) {
+  const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_BBOX);
   aurora::gx::fifo::sync();
   g_spmBBoxArmed = 0;
   if (left) {

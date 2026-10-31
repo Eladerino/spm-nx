@@ -36,7 +36,10 @@ extern "C" void GX__SetDrawSync_8016e9fc(uint32_t token) { GX__SetDrawSync_8016e
 extern "C" void SPM_GXSetDrawSync(uint32_t token) {
     // With Aurora's decode thread on, the draws before the token are only decoded once this
     // returns: the game reuses their memory when it sees the token.
-    AuroraGxSync();
+    {
+        const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_DRAW_SYNC);
+        AuroraGxSync();
+    }
     constexpr uint32_t kSpmPeRegPtrAddr = 0x8056DF70u;  // __peReg (SPM: r13-0x6FB0 in sysWaitDrawSync)
     constexpr uint32_t kSpmPeRegBlock = 0x80002F00u;    // low-memory debugger area; no exception vectors are installed
     try {

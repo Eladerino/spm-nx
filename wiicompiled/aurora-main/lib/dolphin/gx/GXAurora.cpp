@@ -179,6 +179,10 @@ void GXSetViewportScissorRenderSafeArea(f32 aspect) {
 
 void AuroraGxSync() { aurora::gx::fifo::sync(); }
 
+AuroraGxWaitSite AuroraGxBeginWaitSite(AuroraGxWaitSite site) { return aurora::gx::fifo::begin_wait_site(site); }
+
+void AuroraGxEndWaitSite(AuroraGxWaitSite previous) { aurora::gx::fifo::end_wait_site(previous); }
+
 void GXRestoreViewportScissorRender() {
   // Run queued GX draws before leaving the direct layout safe area.
   aurora::gx::fifo::drain();

@@ -2036,7 +2036,10 @@ void end_frame_impl(bool pumpEvents, bool drainFifo) {
   gfx::SealedFrame sealedFrame;
   SealedFrameContext ctx;
   std::vector<PresentationJob> presentationJobs;
-  if (drainFifo) gx::fifo::drain();
+  if (drainFifo) {
+    const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_END_FRAME);
+    gx::fifo::drain();
+  }
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
     seal_frame_locked(sealedFrame, ctx);
@@ -2156,9 +2159,12 @@ void end_frame() {
 
   // Seal all current GX work on the CPU while the renderer is known ready.
   // Later FIFO writes belong exclusively to the next frame.
-  gx::fifo::drain();
-  // Everything recorded is decoded now, so the decode thread toggle switches here.
-  gx::fifo::apply_decode_thread_request();
+  {
+    const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_END_FRAME);
+    gx::fifo::drain();
+    // Everything recorded is decoded now, so the decode thread toggle switches here.
+    gx::fifo::apply_decode_thread_request();
+  }
   {
     std::lock_guard lock(g_frameWorker.mutex);
     g_frameWorker.framePrepared = false;

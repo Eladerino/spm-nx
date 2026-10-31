@@ -3465,10 +3465,10 @@ constexpr const char* kDiagHelp[] = {
     "Stops Aurora from merging compatible draws into one. This can slow rendering, but isolates bugs caused by merging.",
     "Logs staged textures whose texture-coordinate scale and size disagree. For tracing textures that sample the wrong place.",
     "Logs the texture matrices Aurora stages for each draw. For tracing draws that transform or sample textures incorrectly; output can be large.",
-    "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log. Use it to measure where frame time goes.",
+    "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log, plus the decode thread's time and what the game waited on it for. Use it to measure where frame time goes.",
     "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data.",
     "Samples the guest thread 200 times a second while on. Turning it off prints the most-sampled guest functions to the log.",
-    "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. Switches at the end of the frame. Turn it off if anything draws wrong.",
+    "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong.",
 };
 constexpr int kDiagCount = int(std::size(kDiagKeys));
 
