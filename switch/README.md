@@ -128,9 +128,10 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   dumps switch (writes every unmatched texture to `Cache/texture_dumps` under the name a
   replacement would use, for making new replacement pictures; takes effect after a restart),
   and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
-  recovery step for a cache that has gone wrong). Diagnostics holds the renderer's fourteen
+  recovery step for a cache that has gone wrong). Diagnostics holds the renderer's fifteen
   diagnostic switches (each one also writes back to `UserData/dk_diag.txt`, the file the
-  same switches are read from at boot) and Flush logs and Mark log rows for test runs.
+  same switches are read from at boot) and Flush logs and Mark log rows for test runs. All
+  of them start off except the GX decode thread, which is on unless turned off there.
   Diagnostics can hurt performance or distort the picture; they are for bug reports, not
   for play.
 

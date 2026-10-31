@@ -31,15 +31,9 @@ namespace swdk {
 Renderer R;
 Diag g_diag;
 
-// The diagnostic switches (dk.h): one "key=1" per line in UserData/dk_diag.txt, read once here.
-// A line naming a key without "=0" turns it on. The active set is logged so a test log always
-// says which switches the run used.
-void diag_init() {
-    FILE* f = std::fopen("/switch/spm-nx/UserData/dk_diag.txt", "r");
-    if (!f) {
-        dklog("diag: no UserData/dk_diag.txt; all diagnostic switches off");
-        return;
-    }
+namespace {
+// One "key=1" line per switch; see diag_init.
+void diag_read_file(FILE* f) {
     char line[128];
     while (std::fgets(line, sizeof(line), f)) {
         const bool off = std::strstr(line, "=0") != nullptr;
@@ -59,7 +53,20 @@ void diag_init() {
         if (std::strstr(line, "profile")) g_diag.profile = !off;
         if (std::strstr(line, "cpthread")) g_diag.cpThread = !off;
     }
-    std::fclose(f);
+}
+} // namespace
+
+// The diagnostic switches (dk.h): one "key=1" per line in UserData/dk_diag.txt, read once here.
+// A line naming a key without "=0" turns it on, and one with "=0" turns it off; a key the file
+// does not name keeps its default (dk.h). The active set is logged so a test log always says
+// which switches the run used.
+void diag_init() {
+    if (FILE* f = std::fopen("/switch/spm-nx/UserData/dk_diag.txt", "r")) {
+        diag_read_file(f);
+        std::fclose(f);
+    } else {
+        dklog("diag: no UserData/dk_diag.txt; every switch at its default");
+    }
     // Aurora's switches initialise from these env vars on their first use; diag_init runs from
     // webgpu::initialize, before any texture, buffer or draw exists, so setting them here lands
     // in time. In-process libc env: Aurora's getenv sees what this setenv wrote. After init the
