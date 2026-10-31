@@ -115,8 +115,6 @@ promised above: set Resolution and Aspect here once and it stays.
 
 ## Known issues and performance
 
-- **Doors.** The open animation of the game's large doors renders bigger than the door itself
-  and off centre. It is visual only; the door still works. The cause is under investigation.
 - **Button icons.** Not every button prompt has a replacement picture yet, so some prompts
   still show the original icons.
 - **The pointer during flips.** The Wii Remote pointer (Tippi) is blocked out during the
