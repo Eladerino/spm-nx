@@ -120,9 +120,8 @@ promised above: set Resolution and Aspect here once and it stays.
 - **Performance.** The port is CPU-bound on the guest side: the translated game code, not the
   renderer, sets the frame rate. Set expectations by area, not by a single number. At a high
   overclock (CPU 1963 MHz, GPU 1152 MHz, memory 2366 MHz, the clocks the port is
-  developed and measured at) 2D areas run at or near full speed. The heavy 3D side is
-  much slower for now: in Flipside, around the doors, it currently runs at
-  about 20 fps. The game steps its physics once
+  developed and measured at) 2D areas run at or near full speed; the heavy 3D side is
+  much slower, so keep expectations low there for now. The game steps its physics once
   per frame, so a lower frame rate is a slower game, not just a less smooth one, and at stock
   clocks everything runs slower still. Overclocking is the single biggest lever if you want
   more speed; the numbers above come from a machine overclocked with Horizon-OC
