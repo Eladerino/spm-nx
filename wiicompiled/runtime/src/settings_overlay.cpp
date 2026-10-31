@@ -3467,7 +3467,7 @@ constexpr const char* kDiagHelp[] = {
     "Logs the texture matrices Aurora stages for each draw. For tracing draws that transform or sample textures incorrectly; output can be large.",
     "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log, plus the decode thread's time and what the game waited on it for. Use it to measure where frame time goes.",
     "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data.",
-    "Samples the guest thread 200 times a second while on. Turning it off prints the most-sampled guest functions to the log.",
+    "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them).",
     "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong.",
 };
 constexpr int kDiagCount = int(std::size(kDiagKeys));

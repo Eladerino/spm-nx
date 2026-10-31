@@ -152,6 +152,9 @@ void queue_bp_write(uint32_t value);
 // AuroraGxBeginWaitSite and AuroraGxEndWaitSite (GXAurora.h). Game thread only.
 AuroraGxWaitSite begin_wait_site(AuroraGxWaitSite site) noexcept;
 void end_wait_site(AuroraGxWaitSite previous) noexcept;
+// The decode thread's kernel handle while it runs, on Switch (AuroraGxDecodeThreadHandle); 0
+// elsewhere and while no decode thread runs. Any thread.
+uint32_t decode_thread_handle() noexcept;
 // Stops the decode thread (aurora's shutdown).
 void stop_decode_thread() noexcept;
 

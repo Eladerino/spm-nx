@@ -249,7 +249,8 @@ aurora/                      Horizon shims for Aurora: the ImGui SDL backends an
 deko/                        the WebGPU-to-deko3d interposer that draws Aurora's frames (see "Graphics")
 deko3d/, uam/                vendored: the GPU API itself, and the GLSL-to-DKSH shader compiler
 licenses/                    license texts for the code adapted from SwitchWaker (THIRD_PARTY.md)
-scripts/                     build container and build-switch.sh
+scripts/                     build container, build-switch.sh, symbolize.sh (names the code offsets in a
+                             crash log) and profile-report.py (names and ranks a guest profiler capture)
 tests/                       host-side tests for the Horizon pieces
 docs/GUEST-MEMORY-PLAN.md    how guest RAM works on Horizon, phase 1 and phase 2
 ```

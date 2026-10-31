@@ -51,6 +51,10 @@ void Audio_HLE_PollDeferred();
 // DetClock::kNever while audio DMA is stopped.
 uint64_t Audio_HLE_DetNextEventTicks();
 bool OS_HLE_InterruptsEnabled() noexcept;
+// Time the guest scheduler has spent in its idle loop since start, with no guest thread to run:
+// what a frame had to spare, for the slow frame log line. It includes the interrupt work the
+// loop does while it waits (retrace callbacks, audio DMA, alarms), which is small.
+uint64_t OS_HLE_IdleNanosTotal() noexcept;
 extern "C" void OS_HLE_ProcessAlarmsDeferred(int maxToProcess);
 extern "C" void OS_HLE_BeginDeferredGuestCallbacks();
 extern "C" void OS_HLE_EndDeferredGuestCallbacks();
