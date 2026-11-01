@@ -84,6 +84,21 @@ PPC_NATIVE_OVERRIDE_VOID(8028ffc4, GX__SetTevAlphaOp_80171db8, (uint32_t s, uint
 // TEV Color Registers
 // ============================================================================
 
+// The GX part of the colour setters, on the colour's guest bytes (or the GX worker's copy of them).
+static void SetTevColorFrom(const uint8_t* p, uint32_t id) {
+    GXColor c; c.r=p[0]; c.g=p[1]; c.b=p[2]; c.a=p[3];
+    GXSetTevColor((GXTevRegID)id, c);
+}
+static void SetTevColorS10From(const uint8_t* p, uint32_t id) {
+    GXColorS10 c;
+    c.r=(p[0]<<8)|p[1]; c.g=(p[2]<<8)|p[3]; c.b=(p[4]<<8)|p[5]; c.a=(p[6]<<8)|p[7];
+    GXSetTevColorS10((GXTevRegID)id, c);
+}
+static void SetTevKColorFrom(const uint8_t* p, uint32_t id) {
+    GXColor c; c.r=p[0]; c.g=p[1]; c.b=p[2]; c.a=p[3];
+    GXSetTevKColor((GXTevKColorID)id, c);
+}
+
 extern "C" void GX__SetTevColor_80171e10(uint32_t id, uint32_t cp) {
     if (!TevRegOk(id)) return;
     const uint8_t* p=Memory::GetPointer(cp, 4); GXColor c; c.r=p[0]; c.g=p[1]; c.b=p[2]; c.a=p[3];
@@ -99,7 +114,7 @@ extern "C" void GX__SetTevColor_80171e10(uint32_t id, uint32_t cp) {
             Memory::TryRead32(x->gpr[1] + 20, s20); Memory::TryRead32(x->gpr[1] + 24, s24);
             RT_LOGF(RT_TAG_GX, "[drawdump] bgconst %08X %08X stack20 %08X stack24 %08X sp %08X\n", k0, k1, s20, s24, x->gpr[1]);
         } }
-    GXSetTevColor((GXTevRegID)id, c);
+    GxWorker::DeferOrRun<&SetTevColorFrom>(p, 4, id);
 }
 PPC_NATIVE_OVERRIDE_VOID(8029001c, GX__SetTevColor_80171e10, (uint32_t id, uint32_t cp), (id, cp));
 
@@ -108,7 +123,7 @@ extern "C" void GX__SetTevColorS10_80171e70(uint32_t id, uint32_t cp) {
     const uint8_t* p=Memory::GetPointer(cp, 8); GXColorS10 c;
     c.r=(p[0]<<8)|p[1]; c.g=(p[2]<<8)|p[3]; c.b=(p[4]<<8)|p[5]; c.a=(p[6]<<8)|p[7];
     if (SpmDumpFrame()) { const CpuContext* x = TryGetCpuContext(); RT_LOGF(RT_TAG_GX, "[drawdump] tevcolorS10 %u %d %d %d %d lr %08X\n", id, (int16_t)c.r, (int16_t)c.g, (int16_t)c.b, (int16_t)c.a, x ? x->lr : 0); }
-    GXSetTevColorS10((GXTevRegID)id, c);
+    GxWorker::DeferOrRun<&SetTevColorS10From>(p, 8, id);
 }
 PPC_NATIVE_OVERRIDE_VOID(8029007c, GX__SetTevColorS10_80171e70, (uint32_t id, uint32_t cp), (id, cp));
 
@@ -117,7 +132,7 @@ extern "C" void GX__SetTevKColor_80171ed4(uint32_t id, uint32_t cp) {
     const uint8_t* p=Memory::GetPointer(cp, 4); GXColor c; c.r=p[0]; c.g=p[1]; c.b=p[2]; c.a=p[3];
     { static int n = 0; const CpuContext* x = TryGetCpuContext();
       if (n++ < 150) RT_LOGF(RT_TAG_GX, "[spmkcol] kcolor %u %02X%02X%02X%02X lr %08X\n", id, c.r, c.g, c.b, c.a, x ? x->lr : 0); }
-    GXSetTevKColor((GXTevKColorID)id, c);
+    GxWorker::DeferOrRun<&SetTevKColorFrom>(p, 4, id);
 }
 PPC_NATIVE_OVERRIDE_VOID(802900e0, GX__SetTevKColor_80171ed4, (uint32_t id, uint32_t cp), (id, cp));
 

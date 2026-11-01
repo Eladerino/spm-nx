@@ -178,6 +178,10 @@ static bool g_spmAuroraDlActive = false;
 static std::mutex g_auroraDlMutex;
 static std::unordered_map<uint32_t, uint32_t> g_auroraDls;
 bool SpmAuroraDlRecording() { return g_spmAuroraDlActive; }
+// GX worker (gx_worker.h): while a display list is being built, calls write it into guest memory
+// in place, so they run inline. GXBeginDisplayList and GXEndDisplayList are sync points, so nothing
+// recorded before the list is still pending inside it.
+bool GxWorkerRecordingBlocked() noexcept { return IsDisplayListActive() || g_spmAuroraDlActive; }
 void RegisterAuroraDisplayList(uint32_t addr, uint32_t size) {
     std::lock_guard<std::mutex> lock(g_auroraDlMutex);
     if (size) g_auroraDls[addr] = size; else g_auroraDls.erase(addr);

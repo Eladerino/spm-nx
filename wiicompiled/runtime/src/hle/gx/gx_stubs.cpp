@@ -1,5 +1,7 @@
 #include <algorithm>
+#include <new>
 #include "gx_internal.h"
+#include "gx_worker.h"
 #include "runtime_log.h"
 
 #include <dolphin/gx/GXAurora.h>
@@ -10,14 +12,77 @@ extern "C" void __GXSetSUTexRegs();
 // FIFO Write Helpers
 // ============================================================================
 
-extern "C" void GX_HLE_FIFO_WriteFloat(float val) {
-    u32 raw; std::memcpy(&raw, &val, 4);
-    try { HleFifoWrite(raw, 4); } catch (...) { RT_LOGF(RT_TAG_GX, "FIFO write float failed\n"); }
+// Guest stores to the gather pipe, under the GX worker (gx_worker.h): consecutive stores share one
+// record (a FifoRun header and one FifoStore each), so a vertex stream costs eight bytes a store.
+namespace {
+
+constexpr uint32_t kFifoFloat = 0x80000000u;  // a WriteFloat store: its failure is logged, not thrown
+
+struct FifoRun {
+    uint32_t count;
+    uint32_t pad;
+};
+struct FifoStore {
+    uint32_t value;
+    uint32_t size;  // 1, 2 or 4, with kFifoFloat for a float
+};
+
+void RunFifoStore(uint32_t value, uint32_t size) {
+    if (size & kFifoFloat) {
+        try { HleFifoWrite(value, 4); } catch (...) { RT_LOGF(RT_TAG_GX, "FIFO write float failed\n"); }
+        return;
+    }
+    HleFifoWrite(value, size);
 }
 
-extern "C" void GX_HLE_FIFO_Write32(uint32_t val) { HleFifoWrite(val, 4); }
-extern "C" void GX_HLE_FIFO_Write16(uint16_t val) { HleFifoWrite(static_cast<u32>(val), 2); }
-extern "C" void GX_HLE_FIFO_Write8(uint8_t val) { HleFifoWrite(static_cast<u32>(val), 1); }
+void ReplayFifoRun(void* payload) {
+    const FifoRun* run = static_cast<const FifoRun*>(payload);
+    const FifoStore* stores = reinterpret_cast<const FifoStore*>(run + 1);
+    for (uint32_t i = 0; i < run->count; ++i) {
+        RunFifoStore(stores[i].value, stores[i].size);
+    }
+}
+
+// True when the store was recorded; false when it should run now (pending records have run).
+bool RecordFifoStore(uint32_t value, uint32_t size) {
+    if (!GxWorker::CanRecord()) {
+        GxWorker::Drain();
+        return false;
+    }
+    void* extra = nullptr;
+    if (void* payload = GxWorker::ExtendLast(&ReplayFifoRun, sizeof(FifoStore), &extra)) {
+        new (extra) FifoStore{value, size};
+        ++static_cast<FifoRun*>(payload)->count;
+        return true;
+    }
+    void* payload = GxWorker::Reserve(&ReplayFifoRun, sizeof(FifoRun) + sizeof(FifoStore), alignof(FifoRun));
+    if (payload == nullptr) {
+        GxWorker::Drain();
+        return false;
+    }
+    FifoRun* run = new (payload) FifoRun{1, 0};
+    new (run + 1) FifoStore{value, size};
+    GxWorker::Commit();
+    return true;
+}
+
+void FifoStoreEntry(uint32_t value, uint32_t size) {
+    if (GxWorker::Engaged() && RecordFifoStore(value, size)) {
+        return;
+    }
+    RunFifoStore(value, size);
+}
+
+} // namespace
+
+extern "C" void GX_HLE_FIFO_WriteFloat(float val) {
+    u32 raw; std::memcpy(&raw, &val, 4);
+    FifoStoreEntry(raw, 4u | kFifoFloat);
+}
+
+extern "C" void GX_HLE_FIFO_Write32(uint32_t val) { FifoStoreEntry(val, 4); }
+extern "C" void GX_HLE_FIFO_Write16(uint16_t val) { FifoStoreEntry(static_cast<u32>(val), 2); }
+extern "C" void GX_HLE_FIFO_Write8(uint8_t val) { FifoStoreEntry(static_cast<u32>(val), 1); }
 
 extern "C" void GX__SetDrawSync_8016ed08(uint32_t token) {
     (void)token;
