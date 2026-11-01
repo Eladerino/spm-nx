@@ -1,16 +1,22 @@
 // Host tests for the GX worker's record ring (include/gx_worker.h, src/hle/gx/gx_worker.cpp): the
 // order records replay in, that a self-deferred call replays the bytes it saw at the call, what
 // each mode does, that a drain reached from inside a replay does nothing, that a full ring drains
-// rather than drops, that small records coalesce, and that a Deferred failure is contained.
+// rather than drops, that small records coalesce, and that a Deferred failure is contained. The
+// Threaded tests run the same checks with the worker thread replaying, plus a randomized stress run;
+// build them once with -fsanitize=thread as well.
 
 #include "gx_worker.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <new>
+#include <random>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Two test addresses with kinds of their own, as gx_call_kinds.inc gives the real ones.
@@ -257,6 +263,178 @@ void TestDrainCausesPrint() {
     GxWorker::PrintPerfWindow(1, 1, &TestName);
 }
 
+// ---- Threaded mode ---------------------------------------------------------------------------
+
+void TestThreadedOrder() {
+    SetMode(GxWorker::Mode::Threaded);
+    g_log.clear();
+    Check(GxWorker::RecordCall<&Setter>(1u, 2u), "threaded: record 1");
+    uint8_t guest[4] = {10, 20, 30, 40};
+    SetColor(guest, 7);
+    Check(GxWorker::RecordCall<&Setter>(3u, 4u), "threaded: record 2");
+    guest[0] = 99;
+    Getter();
+    Check(Same({"set 1 2", "color 7 10,20,30,40", "set 3 4", "get"}), "threaded: order and captured bytes");
+}
+
+void TestThreadedContainsThrowAndNestedDrain() {
+    SetMode(GxWorker::Mode::Threaded);
+    g_log.clear();
+    GxWorker::RecordCall<&Setter>(1u, 0u);
+    GxWorker::RecordCall<&Thrower>(2u);
+    GxWorker::RecordCall<&NestedDrainer>(3u);
+    GxWorker::RecordCall<&Setter>(4u, 0u);
+    GxWorker::Drain();
+    Check(Same({"set 1 0", "throw 2", "outer 3", "outer done 3", "set 4 0"}),
+          "threaded: a throw is contained and a drain inside a replay does nothing");
+}
+
+void TestThreadedRingFull() {
+    SetMode(GxWorker::Mode::Threaded);
+    g_log.clear();
+    const uint32_t count = 200000;  // about three ring's worth
+    for (uint32_t i = 0; i < count; ++i) {
+        if (!GxWorker::RecordCall<&Setter>(i, 1u)) {
+            Check(false, "threaded ring full: a record was refused");
+            break;
+        }
+    }
+    GxWorker::Drain();
+    bool ordered = g_log.size() == count;
+    for (uint32_t i = 0; ordered && i < count; ++i) {
+        ordered = g_log[i] == "set " + std::to_string(i) + " 1";
+    }
+    Check(ordered, "threaded ring full: every record replayed once, in order");
+}
+
+void TestThreadedExtendLast() {
+    // Enough runs that the game thread publishes between extensions: a published run must not grow.
+    SetMode(GxWorker::Mode::Threaded);
+    g_log.clear();
+    std::vector<uint32_t> want;
+    for (uint32_t i = 0; i < 40000; ++i) {
+        RecordRunValue(i);
+        want.push_back(i);
+        if (i % 997 == 0) {
+            GxWorker::RecordCall<&Setter>(i, 7u);
+        }
+    }
+    GxWorker::Drain();
+    std::vector<uint32_t> got;
+    for (const std::string& line : g_log) {
+        if (line.rfind("run", 0) != 0) {
+            continue;
+        }
+        size_t pos = 3;
+        while (pos < line.size()) {
+            got.push_back(static_cast<uint32_t>(std::stoul(line.substr(pos + 1))));
+            pos = line.find(' ', pos + 1);
+            if (pos == std::string::npos) {
+                break;
+            }
+        }
+    }
+    Check(got == want, "threaded extend: every value replayed once, in order, across publishes");
+}
+
+std::atomic<int> g_serviced{0};
+void Service() { g_serviced.fetch_add(1); }
+void SlowSetter(uint32_t a) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    g_log.push_back("slow " + std::to_string(a));
+}
+
+void TestThreadedWaitServices() {
+    SetMode(GxWorker::Mode::Threaded);
+    g_log.clear();
+    GxWorker::SetWaitService(&Service);
+    g_serviced = 0;
+    GxWorker::RecordCall<&SlowSetter>(1u);
+    GxWorker::Drain();
+    GxWorker::SetWaitService(nullptr);
+    Check(Same({"slow 1"}), "threaded wait: the slow record ran");
+    Check(g_serviced.load() > 0, "threaded wait: the drain serviced guest timing while it waited");
+    Check(!GxWorker::OnWorkerThread(), "threaded wait: the test thread is not the worker");
+}
+
+bool g_onWorker = false;
+void NoteThread() { g_onWorker = GxWorker::OnWorkerThread(); }
+
+void TestThreadedRunsOnWorker() {
+    SetMode(GxWorker::Mode::Threaded);
+    g_onWorker = false;
+    GxWorker::RecordCall<&NoteThread>();
+    GxWorker::Drain();
+    Check(g_onWorker, "threaded: records replay on the worker thread");
+}
+
+// Random records, coalesced runs, self-deferred bytes the guest overwrites, drains and frame
+// boundaries, compared against the order the game thread made them in.
+void TestThreadedStress(uint32_t seed) {
+    SetMode(GxWorker::Mode::Threaded);
+    g_log.clear();
+    std::mt19937 rng(seed);
+    std::vector<std::string> want;
+    std::vector<uint32_t> pendingRun;  // values in the run currently being extended, for `want`
+    auto flushRun = [&] {
+        if (pendingRun.empty()) return;
+        std::string line = "run";
+        for (uint32_t v : pendingRun) line += " " + std::to_string(v);
+        want.push_back(line);
+        pendingRun.clear();
+    };
+    uint8_t guest[4] = {};
+    for (uint32_t i = 0; i < 60000; ++i) {
+        const uint32_t op = rng() % 100;
+        if (op < 50) {
+            flushRun();
+            GxWorker::RecordCall<&Setter>(i, op);
+            want.push_back("set " + std::to_string(i) + " " + std::to_string(op));
+        } else if (op < 80) {
+            // A run grows only while it is the newest record and unpublished; otherwise a new one
+            // starts. Either way the values come out in order, so compare the flattened values.
+            RecordRunValue(i);
+            pendingRun.push_back(i);
+        } else if (op < 92) {
+            flushRun();
+            for (auto& b : guest) b = static_cast<uint8_t>(rng());
+            SetColor(guest, i);
+            want.push_back("color " + std::to_string(i) + " " + std::to_string(guest[0]) + "," + std::to_string(guest[1]) +
+                           "," + std::to_string(guest[2]) + "," + std::to_string(guest[3]));
+            guest[0] ^= 0xFF;  // the guest changes it before the replay
+        } else if (op < 98) {
+            flushRun();
+            Getter();
+            want.push_back("get");
+        } else {
+            flushRun();
+            GxWorker::FrameBoundary();
+        }
+    }
+    flushRun();
+    GxWorker::Drain();
+    // Runs may have been split at publish points: compare with run lines flattened to values.
+    auto flatten = [](const std::vector<std::string>& lines) {
+        std::vector<std::string> out;
+        for (const std::string& line : lines) {
+            if (line.rfind("run", 0) == 0) {
+                size_t pos = 3;
+                while (pos != std::string::npos && pos < line.size()) {
+                    const size_t next = line.find(' ', pos + 1);
+                    out.push_back("v" + line.substr(pos + 1, next == std::string::npos ? std::string::npos : next - pos - 1));
+                    pos = next;
+                }
+            } else {
+                out.push_back(line);
+            }
+        }
+        return out;
+    };
+    const bool same = flatten(g_log) == flatten(want);
+    if (!same) std::fprintf(stderr, "  stress seed %u: %zu lines replayed, %zu expected\n", seed, g_log.size(), want.size());
+    Check(same, "threaded stress: every record replayed once, in order, with the bytes it saw");
+}
+
 } // namespace
 
 bool GxWorkerRecordingBlocked() noexcept { return g_blocked; }
@@ -274,6 +452,16 @@ int main() {
     TestFrameBoundaryDrains();
     TestDrainCausesPrint();
     TestNoSyncAndDeferCall();
+    TestThreadedOrder();
+    TestThreadedContainsThrowAndNestedDrain();
+    TestThreadedRingFull();
+    TestThreadedExtendLast();
+    TestThreadedWaitServices();
+    TestThreadedRunsOnWorker();
+    for (uint32_t seed = 1; seed <= 8; ++seed) {
+        TestThreadedStress(seed);
+    }
+    SetMode(GxWorker::Mode::Off);
     if (g_failures != 0) {
         std::fprintf(stderr, "%d failures\n", g_failures);
         return 1;

@@ -3,16 +3,35 @@
 // One ring, owned by the game thread. Records are packed back to back, each a 16-byte header (the
 // replay function and the payload size) followed by its payload, every record starting on a 16-byte
 // boundary. Drain replays them oldest first and empties the ring; nothing is ever replayed twice or
-// out of order. Stage 3 hands the ring to a thread on core 2; until then every replay runs here.
+// out of order.
+//
+// Threaded mode (stage 3): the game thread still writes every record, and the worker thread (core
+// 2) replays them. The game thread publishes what it has written in batches (Publish); the worker
+// replays up to the published end and reports how far it got. A record is only ever touched by one
+// thread at a time: the game thread writes and extends records past the published end, the worker
+// reads records before it. The ring is linear, never wrapped: Drain waits until the worker has run
+// everything, and only then rewinds both ends to the start. Every exchange goes through one mutex,
+// a few dozen times a frame, so each thread's writes are visible to the other when it takes over.
 
 #include "gx_worker.h"
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <exception>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#if defined(__SWITCH__)
+// libnx's svc wrappers (switch/kernel/svc.h), declared here so this file need not include <switch.h>
+// (its global Thread and Mutex types collide with the runtime's in a unity build).
+extern "C" uint32_t svcSetThreadCoreMask(uint32_t handle, int32_t coreId, uint32_t affinityMask);
+extern "C" void svcSleepThread(int64_t nanoseconds);
+#endif
 
 namespace GxWorker {
 
@@ -41,6 +60,23 @@ std::atomic<uint8_t> g_mode{static_cast<uint8_t>(Mode::Off)};
 std::atomic<uint8_t> g_requestedMode{static_cast<uint8_t>(Mode::Off)};
 thread_local bool t_owner = false;
 bool g_hasOwner = false;
+thread_local bool t_worker = false;
+void (*g_waitService)() = nullptr;
+
+// Threaded mode: the hand-off to the worker thread. Heap-allocated and never freed, so nothing
+// destroys a joinable thread at exit (libnx runs static destructors before its own exit hooks).
+constexpr size_t kPublishBytes = 32u << 10;  // the game thread hands over at least this much at once
+struct Worker {
+    std::mutex mutex;
+    std::condition_variable workCv;  // the game thread published more
+    std::condition_variable idleCv;  // the worker caught up with what was published
+    size_t published = 0;            // end of what the worker may replay
+    size_t consumed = 0;             // end of what it has replayed
+    bool started = false;
+    std::thread thread;
+};
+Worker* g_worker = nullptr;
+size_t g_publishedLocal = 0;  // the owner's copy of Worker::published
 
 // Totals for the [gxworker] line. The owner is the only writer (a relaxed load and store, as in
 // NativeOverrideCounter); the printing thread reads them and keeps what it last printed.
@@ -59,6 +95,8 @@ Stat g_records;
 Stat g_drains;
 Stat g_ringFull;
 Stat g_replayErrors;
+Stat g_waitMs;           // Threaded: milliseconds the game thread waited on the worker, rounded up per drain
+Stat g_unsafeDrains;     // Threaded: a drain reached while one was already waiting; the call ran unsynchronised
 std::atomic<uint64_t> g_peakBytes{0};  // since the last print; the printer swaps it back to zero
 
 // Drains that had work, by cause (DrainCause or a guest address): an open-addressed table the owner
@@ -126,38 +164,20 @@ bool CanRecord() noexcept {
 
 bool Pending() noexcept { return t_owner && g_write != 0; }
 
-void Drain(uint32_t cause) {
-    if (!t_owner || g_draining || g_write == 0) {
-        return;
-    }
-    g_draining = true;
-    g_drains.Add();
-    CountCause(cause);
-    if (g_write > g_peakBytes.load(std::memory_order_relaxed)) {
-        g_peakBytes.store(g_write, std::memory_order_relaxed);
-    }
-    const bool immediate = CurrentMode() == Mode::Immediate;
-    struct Done {
-        ~Done() {
-            g_write = 0;
-            g_lastRecord = kRingBytes;
-            g_draining = false;
-        }
-    } done;
-    size_t read = 0;
-    const size_t end = g_write;
-    while (read < end) {
+namespace {
+
+// Replays the records in [from, to). Immediate: an exception reaches the caller, as the inline
+// call's would have; the rest log it and go on, since the game has already run past the call.
+void ReplayRange(size_t from, size_t to, bool immediate) {
+    size_t read = AlignUp(from);  // `from` is a payload end (a published end); the next record is aligned
+    while (read < to) {
         RecordHeader* header = HeaderAt(read);
         void* payload = g_ring + read + sizeof(RecordHeader);
         read = AlignUp(read + sizeof(RecordHeader) + header->size);
         if (immediate) {
-            // The call it stands for is still on the stack: an exception unwinds into the game
-            // exactly where the inline call's would have.
             header->replay(payload);
             continue;
         }
-        // Deferred: the game has already run past this call and every later one, so a failure is
-        // logged and the rest still replay, as they would have inline.
         try {
             header->replay(payload);
         } catch (const std::exception& e) {
@@ -168,6 +188,143 @@ void Drain(uint32_t cause) {
             std::fprintf(stderr, "[gxworker] a deferred GX call threw\n");
         }
     }
+}
+
+void WorkerMain() {
+    t_worker = true;
+#if defined(__SWITCH__)
+    // Core 2, beside Aurora's frame worker: the game thread has core 0 and the GX decode thread core
+    // 1. Horizon does not time-slice threads of one priority, so a long replay yields (below).
+    svcSetThreadCoreMask(0xFFFF8000u, 2, 1u << 2);
+#endif
+    Worker& w = *g_worker;
+    auto lastBlocked = std::chrono::steady_clock::now();
+    for (;;) {
+        size_t from = 0;
+        size_t to = 0;
+        {
+            std::unique_lock lock(w.mutex);
+            if (w.consumed == w.published) {
+                w.idleCv.notify_all();
+                w.workCv.wait(lock, [&w] { return w.published != w.consumed; });
+                lastBlocked = std::chrono::steady_clock::now();
+            }
+            from = w.consumed;
+            to = w.published;
+        }
+#if defined(__SWITCH__)
+        if (std::chrono::steady_clock::now() - lastBlocked > std::chrono::milliseconds(1)) {
+            svcSleepThread(-1);  // YieldType_WithoutCoreMigration: let core 2's other threads run
+            lastBlocked = std::chrono::steady_clock::now();
+        }
+#endif
+        ReplayRange(from, to, false);
+        {
+            std::lock_guard lock(w.mutex);
+            w.consumed = to;
+            if (w.consumed == w.published) {
+                w.idleCv.notify_all();
+            }
+        }
+    }
+}
+
+void StartWorker() {
+    if (g_worker == nullptr) {
+        g_worker = new Worker;
+    }
+    if (g_worker->started) {
+        return;
+    }
+    try {
+        g_worker->thread = std::thread(WorkerMain);
+        g_worker->started = true;
+    } catch (const std::system_error& e) {
+        std::fprintf(stderr, "[gxworker] worker thread could not start (%s); records replay on the game thread\n",
+                     e.what());
+    }
+}
+
+bool Threaded() noexcept { return CurrentMode() == Mode::Threaded && g_worker != nullptr && g_worker->started; }
+
+// Hands everything written so far to the worker.
+void Publish() {
+    if (g_write == g_publishedLocal) {
+        return;
+    }
+    {
+        std::lock_guard lock(g_worker->mutex);
+        g_worker->published = g_write;
+    }
+    g_publishedLocal = g_write;
+    g_worker->workCv.notify_one();
+}
+
+// Waits until the worker has replayed everything published, servicing the guest's timing about once
+// a millisecond as Aurora's own waits do, then rewinds the ring.
+void WaitForWorker() {
+    Worker& w = *g_worker;
+    const auto start = std::chrono::steady_clock::now();
+    bool waited = false;
+    std::unique_lock lock(w.mutex);
+    while (w.consumed != w.published) {
+        waited = true;
+        if (w.idleCv.wait_for(lock, std::chrono::milliseconds(1), [&w] { return w.consumed == w.published; })) {
+            break;
+        }
+        if (g_waitService != nullptr) {
+            lock.unlock();
+            g_waitService();
+            lock.lock();
+        }
+    }
+    w.consumed = 0;
+    w.published = 0;
+    lock.unlock();
+    g_publishedLocal = 0;
+    if (waited) {
+        const auto ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+        g_waitMs.Add(static_cast<uint64_t>(ms.count()));
+    }
+}
+
+} // namespace
+
+bool OnWorkerThread() noexcept { return t_worker; }
+
+void SetWaitService(void (*service)()) noexcept { g_waitService = service; }
+
+void Drain(uint32_t cause) {
+    if (!t_owner || g_write == 0) {
+        return;
+    }
+    if (g_draining) {
+        // A sync point reached while the game thread waits on the worker (from the timing service):
+        // it cannot wait twice, so the call runs alongside the worker. Counted so a log shows it.
+        if (Threaded()) {
+            g_unsafeDrains.Add();
+        }
+        return;
+    }
+    g_draining = true;
+    g_drains.Add();
+    CountCause(cause);
+    if (g_write > g_peakBytes.load(std::memory_order_relaxed)) {
+        g_peakBytes.store(g_write, std::memory_order_relaxed);
+    }
+    struct Done {
+        ~Done() {
+            g_write = 0;
+            g_lastRecord = kRingBytes;
+            g_draining = false;
+        }
+    } done;
+    if (Threaded()) {
+        Publish();
+        WaitForWorker();
+        return;
+    }
+    ReplayRange(0, g_write, CurrentMode() == Mode::Immediate);
 }
 
 void* Reserve(ReplayFn replay, size_t size, size_t align) {
@@ -198,11 +355,14 @@ void Commit() {
     g_reserved = false;
     if (CurrentMode() == Mode::Immediate) {
         Drain(DrainCause::kCommit);
+    } else if (Threaded() && g_write - g_publishedLocal >= kPublishBytes) {
+        Publish();
     }
 }
 
 void* ExtendLast(ReplayFn replay, size_t extra, void** extraOut) {
-    if (g_lastRecord == kRingBytes || g_reserved) {
+    // A published record may be replaying on the worker right now: only an unpublished one grows.
+    if (g_lastRecord == kRingBytes || g_reserved || g_lastRecord < g_publishedLocal) {
         return nullptr;
     }
     RecordHeader* header = HeaderAt(g_lastRecord);
@@ -227,6 +387,9 @@ void FrameBoundary() {
     const Mode requested = RequestedMode();
     const Mode current = CurrentMode();
     if (requested != current) {
+        if (requested == Mode::Threaded) {
+            StartWorker();  // the ring is empty and the worker idle until the first publish
+        }
         std::fprintf(stderr, "[gxworker] mode %u -> %u\n", static_cast<unsigned>(current), static_cast<unsigned>(requested));
         g_mode.store(static_cast<uint8_t>(requested), std::memory_order_relaxed);
         g_engaged.store(requested != Mode::Off ? 1 : 0, std::memory_order_relaxed);
@@ -242,6 +405,8 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t full = g_ringFull.TakeDelta();
     const uint64_t errors = g_replayErrors.TakeDelta();
     const uint64_t peak = g_peakBytes.exchange(0, std::memory_order_relaxed);
+    const uint64_t waitMicros = g_waitMs.TakeDelta();
+    const uint64_t unsafeDrains = g_unsafeDrains.TakeDelta();
     const Mode mode = CurrentMode();
     if (mode == Mode::Off && records == 0) {
         return;
@@ -254,6 +419,13 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                  static_cast<unsigned>(mode), static_cast<double>(records) / frames,
                  static_cast<double>(drains) / frames, static_cast<unsigned long long>(peak / 1024),
                  static_cast<unsigned long long>(full), static_cast<unsigned long long>(errors));
+    if (mode == Mode::Threaded || waitMicros != 0 || unsafeDrains != 0) {
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: game thread waited on the worker %.2f ms a frame, %llu unsynchronised "
+                     "drains\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(waitMicros) / 1000.0 / frames, static_cast<unsigned long long>(unsafeDrains));
+    }
 
     // What made pending records run, busiest first, as drains a frame. Immediate mode's per-record
     // drains are left out: they say nothing about what the worker will have to wait for.

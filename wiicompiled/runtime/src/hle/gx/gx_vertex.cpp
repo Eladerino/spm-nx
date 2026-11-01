@@ -3,6 +3,7 @@
 #include "det_clock.h"
 #include "gx_internal.h"
 #include "gx_stream_common.h"
+#include "gx_worker.h"
 #include "fiber_manager.h"
 #include "guest_interrupt_context.h"
 #include "runtime_log.h"
@@ -247,7 +248,9 @@ thread_local std::chrono::steady_clock::time_point g_nextDeferredTimingPoll{};
 void ServiceDeferredTimingDuringGxWork() {
     // Wall-clock driven, so where it lands in the guest's execution depends on host speed; the
     // deterministic mode (det_clock.h) delivers these events only at their virtual time.
-    if (g_inGxBeginOrFifo || DetClock::Enabled()) {
+    // On the GX worker thread (gx_worker.h, Threaded) the game thread is not stuck behind this call:
+    // it services its own timing, and VI and alarm state belong to it.
+    if (g_inGxBeginOrFifo || DetClock::Enabled() || GxWorker::OnWorkerThread()) {
         return;
     }
 

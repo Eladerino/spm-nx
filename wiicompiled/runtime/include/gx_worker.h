@@ -6,8 +6,9 @@
 // call that can wait becomes a record: the function to run and a copy of its arguments, plus a copy
 // of any small struct an argument points at. The records run back in the same order, either at once
 // (Immediate: proves a record carries everything the call needs) or at the next sync point
-// (Deferred: proves nothing between the call and its replay depends on it having run). Stage 3 moves
-// the replay onto a thread of its own; stage 2 replays on the game thread itself.
+// (Deferred: proves nothing between the call and its replay depends on it having run), or on a
+// thread of their own on core 2 (Threaded, stage 3): the game thread runs on while they replay, and a
+// sync point waits for that thread to catch up.
 //
 // A sync point is any native call that isn't queued (it may read or write state the records change),
 // the frame boundary (VI_HLE_PresentFrame), and a full ring. The dispatch layer (abi_bridge.h) asks
@@ -37,6 +38,7 @@ enum class Mode : uint8_t {
     Off = 0,
     Immediate = 1,  // each record replays as soon as it is written
     Deferred = 2,   // records wait for the next sync point
+    Threaded = 3,   // records replay on the worker thread; a sync point waits for it to finish
 };
 
 // Nonzero while records are on: the single load every native dispatch pays when the switch is off.
@@ -68,10 +70,20 @@ constexpr uint32_t kUnnamedNative = 5;   // a native reached without its guest a
 constexpr uint32_t kSelfDefer = 6;       // a self-deferring call that couldn't be recorded
 }
 
-// Runs every pending record, oldest first. A no-op off the owning thread, with nothing pending, and
-// during a replay: a sync point reached from inside a replayed call already has everything recorded
-// before that call applied, which is exactly what it would have seen inline.
+// Runs every pending record, oldest first (Threaded: hands them to the worker and waits until it has
+// run them all). A no-op off the owning thread, with nothing pending, and during a replay: a sync
+// point reached from inside a replayed call already has everything recorded before that call
+// applied, which is exactly what it would have seen inline.
 void Drain(uint32_t cause = DrainCause::kOther);
+
+// True on the worker thread. Code that must only run on the game thread (servicing the guest's
+// VI and alarm timing) checks it: replayed calls that service timing inline skip it there, since
+// the game thread is not stuck behind them.
+bool OnWorkerThread() noexcept;
+
+// What a Threaded drain calls about once a millisecond while it waits for the worker, on the game
+// thread: the same guest timing service Aurora's frame waits use (main.cpp).
+void SetWaitService(void (*service)()) noexcept;
 
 // True when records are waiting on this thread: what a NoSync getter checks before answering from
 // its game-side copy rather than from the state the records have yet to change.
