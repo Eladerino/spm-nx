@@ -3525,11 +3525,13 @@ void PatchMessageStrings() {
         {"Shake <icon PAD 0.65 1 1 8> up and down!", "Shake the controller, or hold R/ZR!"},
         {"Shake <icon PAD 0.65 1 1 8> with good timing!", "Shake, or hold R/ZR, with good timing!"},
         {"Tilt <icon PAD 0.65 1 1 8> as shown!", "Tilt the controller as shown!"},
-        {"Point the <icon PAD 0.65 1 1 8> at the screen!", "Point with the right stick at the screen!"},
+        {"Point the <icon PAD 0.65 1 1 8> at the screen!", "Aim with the right stick!"},
         // The star and shell action commands ("Aim with your cursor and fire / at <icon>!"):
-        // no cursor on the Switch, and the shot is WPAD A, the Flip button (physical Y).
-        // First line only, so the line break and the target icon keep their own bytes.
-        {"Aim with your cursor and fire", "Aim and press Y to fire"},
+        // no cursor on the Switch, and the shot is WPAD A, the Flip button. The line shows
+        // the game's own A-button icon tag (shortest attested form) instead of a typed
+        // letter; the texture sets swap that icon to the Flip button's disc. First line
+        // only, so the line break and the target icon keep their own bytes.
+        {"Aim with your cursor and fire", "Press <icon PAD_A 0.6 0 0 2>"},
         {"Shake <icon PAD 0.65 1 1 15> to wake up!", "Shake it, or hold R/ZR, to wake up!"},
         {"Shake <icon PAD 0.65 1 1 15> to recover!", "Shake it, or hold R/ZR, to recover!"},
         {"Shake <icon PAD 0.65 1 1 15> quickly to escape!", "Shake it fast, or hold R/ZR, to escape!"},
