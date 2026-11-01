@@ -51,9 +51,6 @@ if [[ $audit == 0 ]]; then
         grep -rlF "$win" "$work/wiicompiled/generated" --include='*.cmake' --include='*.S' --include='*.cpp' --include='*.h' |
             xargs -r sed -i "s|$win|/work/wiicompiled|g"
     fi
-    # Give the copied animPoseDrawMtx a hook into the runtime (spm_suppress_anim_pose in
-    # spm_map_sweep.cpp) so the demo's Wii Remote model can be skipped at draw time.
-    python3 "$root/switch/scripts/patch-anim-draw.py" "$work/wiicompiled/generated"
 fi
 
 # Separate build folders: CMake caches SPM_SWITCH_AUDIT, so a full build in the audit's folder would
