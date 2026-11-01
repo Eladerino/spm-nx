@@ -299,6 +299,7 @@ bool ReadSample(uint32_t chan, WiiRemoteInput::KpadSample& sample) {
     if (settings_overlay::StartupScreenVisible() && (sample.hold & (kWpadA | kWpadTwo)) != 0) {
         settings_overlay::NotifyStrapInputAccepted();
     }
+    sample.hold |= settings_overlay::StartupAutoPressBits();
     if (InputBindings::InputBlocked()) {
         sample.hold = 0;
         sample.clHold = 0;

@@ -14,6 +14,9 @@ void Draw() noexcept;
 void FilterMenuInput(uint32_t chan, WiiRemoteInput::KpadSample& sample) noexcept;
 bool StartupScreenVisible() noexcept;
 void NotifyStrapInputAccepted() noexcept;
+// WPAD bits to add to the game's input this read: after the cover's start press, A and 2
+// are tapped for the game until its logo sequence hands over to the title (see the .cpp).
+uint32_t StartupAutoPressBits() noexcept;
 void AdvancePresentedFrame() noexcept;
 // Put host controllers back to a neutral state before the process ends.
 void ReleaseControllers() noexcept;
