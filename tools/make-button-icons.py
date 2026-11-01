@@ -62,6 +62,9 @@ TEXTURES = [
     ("tex1_40x40_c4a6d5884f8e8519_5.png", "plaindisc", [("1", 0.5, 0.5, 0.5)]),
     ("tex1_40x40_341c9fd2189acc61_5.png", "plaindisc", [("2", 0.5, 0.5, 0.5)]),
     ("tex1_48x48_42bca1c8ab4b3dfb_5.png", "disc", [("A", 0.5, 0.5, 0.5)]),
+    # The title screen's own "Press 2" disc (its title TPL instance, not the menu discs):
+    # spot and radius measured from the title dump's art (opaque bbox 3,3 to 44,43 of 48).
+    ("tex1_48x48_169f2321518eafa5_5.png", "disc", [("2", 0.49, 0.48, 0.44)]),
     ("tex1_40x40_21ecf92a70736554_14.png", "glyph", [("1", 0.5, 0.5, 0.5)]),
     ("tex1_40x40_db14bc3d6c7b16a5_14.png", "glyph", [("2", 0.5, 0.5, 0.5)]),
     ("tex1_40x40_e73bd2aadadde9d9_14.png", "glyph", [("A", 0.5, 0.5, 0.5)]),
@@ -302,7 +305,19 @@ def render_overlay(kind, buttons, style, w, h):
             continue
         if kind == "disc":
             r = fr * max(w, h)
-            disc(img, (fx * w - r, fy * h - r, fx * w + r, fy * h + r), style, name)
+            # Drawn the plaindisc way (one ink ring, white face, the letter in ink) rather
+            # than disc(): Kenney's button brings a thick border of its own, which stacked
+            # with disc()'s ring to about 17-20% of the diameter against the plaindiscs'
+            # roughly 10, and the two kinds sit side by side in the game's menus.
+            box = (fx * w - r, fy * h - r, fx * w + r, fy * h + r)
+            d = ImageDraw.Draw(img)
+            bw = box[2] - box[0]
+            band = bw * 0.085
+            d.ellipse(box, fill="#141414")
+            d.ellipse([box[0] + band, box[1] + band, box[2] - band, box[3] - band], fill="#FFFFFF")
+            size = int(bw * 0.98)
+            img.alpha_composite(solid((20, 20, 20, 255), holes(render_svg(style, name, size))),
+                                (int(fx * w - size / 2), int(fy * h - size / 2)))
         elif kind == "face":
             size = int(3 * fr * max(w, h))
             sym = holes(render_svg(style, name, size))
