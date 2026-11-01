@@ -89,9 +89,26 @@ PPC_NATIVE_OVERRIDE_VOID(802902cc, GX__SetZTexture_801720c0, (uint32_t op, uint3
 // ============================================================================
 
 bool SpmAuroraDlRecording();
-extern "C" void GX__SetCullMode_8016f3b8(uint32_t m) {
+
+// The cull mode as the game last set it, for GXGetCullMode while GX records are pending (gx_worker.h):
+// Aurora's own copy only changes when the record replays. Unset until the game first sets one.
+static uint32_t s_gameCullMode = 0;
+static bool s_gameCullModeSet = false;
+
+bool GxGameCullMode(uint32_t& mode) noexcept {
+    mode = s_gameCullMode;
+    return s_gameCullModeSet;
+}
+
+static void SetCullModeGx(uint32_t m) {
     if (SpmDumpFrame()) RT_LOGF(RT_TAG_GX, "[drawdump] cull %u\n", m);
     GXSetCullMode(static_cast<GXCullMode>(m));
+}
+
+extern "C" void GX__SetCullMode_8016f3b8(uint32_t m) {
+    s_gameCullMode = m;
+    s_gameCullModeSet = true;
+    GxWorker::DeferCall<&SetCullModeGx>(m);
 }
 PPC_NATIVE_OVERRIDE_VOID(8028d67c, GX__SetCullMode_8016f3b8, (uint32_t m), (m));
 
