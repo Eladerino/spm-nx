@@ -3386,6 +3386,101 @@ void PatchBootStrings() {
     RT_LOGF(RT_TAG_RUNTIME, "boot screen: %d line(s) now read \"Enjoy New Super Paper Bros!\"\n", patched);
 }
 
+// The game's own instruction lines still talk about the Wii Remote: the Action Command prompts
+// ("Shake <icon PAD ...> up and down!"), the status-recovery prompts, and a couple of prose lines.
+// They live in the message files, which the game reads from the player's own game folder and keeps
+// as text in guest memory, so the lines are rewritten there, by content, the same way
+// PatchBootStrings does the boot screen. Each replacement is no longer than the line it replaces
+// and the rest of the span is padded with spaces, never NULs: a message's text runs on into the
+// file image behind it, so an early NUL could end the string for the game's parser, where
+// trailing spaces are inert. The <icon PAD> pictogram goes with the wording: on the Switch there
+// is no remote to shake or point, the controller is shaken (or R/ZR held, which the pad layer
+// turns into the same shake), and the pointer is aimed with the right stick. US lines only;
+// other languages keep the original wording (their button pictograms are still swapped by the
+// texture sets). PatchBootStrings claims the boot screen's own "Hold the Wii Remote sideways."
+// first (it runs earlier in Draw), so the copy in this table is the message file's, the one the
+// Flipside Arcade's instruction screens read.
+// Message files load per area, not with the dol, so this cannot be a one-shot: it runs again
+// whenever the game's sequence changes (a new area's file has been read by then) and, while
+// lines are still missing, every couple of seconds.
+void PatchMessageStrings() {
+    struct Line {
+        const char* from;
+        const char* to;
+        bool seen = false;
+    };
+    static Line kLines[] = {
+        {"Shake <icon PAD 0.65 1 1 8> up and down!", "Shake the controller, or hold R/ZR!"},
+        {"Shake <icon PAD 0.65 1 1 8> with good timing!", "Shake, or hold R/ZR, with good timing!"},
+        {"Tilt <icon PAD 0.65 1 1 8> as shown!", "Tilt the controller as shown!"},
+        {"Point the <icon PAD 0.65 1 1 8> at the screen!", "Point with the right stick at the screen!"},
+        {"Shake <icon PAD 0.65 1 1 15> to wake up!", "Shake it, or hold R/ZR, to wake up!"},
+        {"Shake <icon PAD 0.65 1 1 15> to recover!", "Shake it, or hold R/ZR, to recover!"},
+        {"Shake <icon PAD 0.65 1 1 15> quickly to escape!", "Shake it fast, or hold R/ZR, to escape!"},
+        {"Hold the Wii Remote sideways.", "Hold the controller sideways."},
+        {"Simply point your Wii Remote", "Simply point your controller"},
+    };
+    static int lastSeq = -2;
+    static int framesSincePass = 1 << 30;  // the first Draw() call passes
+    static int passes = 0;
+    static bool allSeen = false;
+    static bool gaveUp = false;  // some line never matched (see below): stop sweeping MEM2 for it
+    const int seq = SpmMapSweep::Seq();
+    const bool seqChanged = seq != lastSeq;
+    lastSeq = seq;
+    ++framesSincePass;
+    if (!seqChanged && (allSeen || gaveUp || framesSincePass < 120)) return;
+    framesSincePass = 0;
+    ++passes;
+    // MEM1 holds the dol and the game's heaps, message buffers included. MEM2 is swept only
+    // while lines are still missing, in case a build parks the buffers there: at 128 MB it is
+    // the expensive half of a pass, and sequence changes re-run the MEM1 pass on their own.
+    struct Range {
+        uint32_t base;
+        size_t size;
+    };
+    static constexpr Range kRanges[] = {{Memory::kMem1CachedBase, Memory::kMem1Size},
+                                        {Memory::kMem2CachedBase, Memory::kMem2Size}};
+    const size_t rangeCount = (allSeen || gaveUp) ? 1 : 2;
+    int patched = 0;
+    for (size_t r = 0; r < rangeCount; ++r) {
+        const Range range = kRanges[r];
+        uint8_t* const mem = Memory::Contains(range.base, range.size) ? Memory::GetPointer(range.base, range.size) : nullptr;
+        if (mem == nullptr) continue;
+        for (Line& line : kLines) {
+            const auto* from = reinterpret_cast<const uint8_t*>(line.from);  // bytes, as in PatchBootStrings
+            const size_t len = std::strlen(line.from);
+            const size_t toLen = std::strlen(line.to);
+            if (toLen > len) continue;  // the table is length-checked by hand; never write long
+            for (uint8_t* p = mem; (p = std::search(p, mem + range.size, from, from + len)) != mem + range.size; p += len) {
+                if (p + len >= mem + range.size) break;
+                // Whole lines only: the byte behind a match in the message file image is the
+                // line's end (a newline, the next tag, or the NUL of a dol-resident copy).
+                const uint8_t next = p[len];
+                if (next != '\n' && next != '\r' && next != '\0' && next != '<') continue;
+                std::copy(line.to, line.to + toLen, p);
+                std::fill(p + toLen, p + len, uint8_t{' '});
+                line.seen = true;
+                ++patched;
+            }
+        }
+    }
+    allSeen = true;
+    for (const Line& line : kLines) allSeen = allSeen && line.seen;
+    if (patched > 0)
+        RT_LOGF(RT_TAG_RUNTIME, "message strings: %d line(s) rewritten for the controller\n", patched);
+    // A line that never matches is not worth sweeping 128 MB for ever (the sideways line, for
+    // one, may exist only as the dol copy PatchBootStrings already claimed). After 40 passes
+    // the search settles for MEM1 on sequence changes and logs how many lines it gave up on,
+    // so a hardware log shows a line is missing rather than just not loaded yet.
+    if (!allSeen && !gaveUp && passes >= 40) {
+        gaveUp = true;
+        int missing = 0;
+        for (const Line& line : kLines) missing += line.seen ? 0 : 1;
+        RT_LOGF(RT_TAG_RUNTIME, "message strings: %d line(s) never found, MEM2 sweeps stopped\n", missing);
+    }
+}
+
 // ---- Options: the player's settings menu, drawn like the game's own menus (its font, a paper card) ----
 // Opened with HOME / F10 / a controller's Guide button; the game is frozen while it is up. The ImGui panel above is
 // for development only (Options > Game > Developer tools).
@@ -4277,6 +4372,7 @@ void FilterMenuInput(uint32_t chan, WiiRemoteInput::KpadSample& sample) noexcept
 void Draw() noexcept {
     if (RuntimeFrontend::Active()) return;
     PatchBootStrings();
+    PatchMessageStrings();
     // Wait for the frame worker's DONE phase: it has replayed the previous frame's ImGui draw lists
     // and started the next ImGui frame, so all overlay callers can now safely issue ImGui commands.
     aurora_wait_for_frame_worker();
