@@ -194,6 +194,7 @@ struct Diag {
     std::atomic<bool> cpThread = true;   // Aurora decodes GX commands on a thread of its own on core 1, from the end of the frame it is set in (lib/gx/fifo.cpp); on unless dk_diag.txt says cpthread=0
     std::atomic<bool> gxWorker = false;  // the runtime records guest GX calls and replays each one at once (gx_worker.h, Immediate), from the next frame
     std::atomic<bool> gxDefer = false;   // as gxworker, but the records wait for the next sync point (Deferred); implies gxworker
+    std::atomic<bool> gxThread = false;  // as gxdefer, but the records replay on a worker thread on core 2 (Threaded); implies both
 };
 extern Diag g_diag;
 void diag_init();

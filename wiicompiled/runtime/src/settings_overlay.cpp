@@ -3797,7 +3797,9 @@ constexpr DiagRow kDiagRows[] = {
     {"gxworker", "GX call records (gxworker)", nullptr,
      "Records the game's GX calls and replays each one straight away, from the next frame. The picture should look exactly the same; anything that differs is a call the records do not carry yet. Every 600 frames with perftimer on, a [gxworker] line counts them."},
     {"gxdefer", "Deferred GX records (gxdefer)", nullptr,
-     "As GX call records, but the records wait until the game next needs GX state back (a getter, a wait, the end of the frame). Turns records on by itself. An experiment ahead of moving GX work to core 2; turn it off if anything draws wrong."},
+     "As GX call records, but the records wait until the game next needs GX state back (a getter, a wait, the end of the frame). Turns records on by itself. Turn it off if anything draws wrong."},
+    {"gxthread", "GX worker thread (gxthread)", nullptr,
+     "As deferred GX records, but the records replay on a thread of their own on core 2 while the game thread runs on; anything that needs GX state back waits for it. Turns records on by itself. Experimental; turn it off if anything draws wrong or the game stalls."},
 };
 constexpr int kDiagCount = int(std::size(kDiagRows));
 
