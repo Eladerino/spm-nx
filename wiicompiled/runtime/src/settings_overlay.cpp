@@ -4598,22 +4598,32 @@ void DrawPrepareGraphicsNotice() {
     if (StartupScreenVisible()) return;
     const SpmPrepareGraphics::Status pg = SpmPrepareGraphics::GetStatus();
 
-    // F8: when run 1 finished, the last sweep room stayed drawn over the title screen, and
-    // input did not clear it: a stuck layer on top of the presented picture, not presenter
-    // lag. So when a sweep completes, the card stays up until the title has presented three
-    // clean frames of its own, and only then steps aside. There is no "warp still active"
-    // query to gate on, so the count runs on this function being called once per presented
-    // frame from Draw() (the same assumption g_presentedFrame's consumers make) and on the
-    // sequence having reached the title (SpmMapSweep::Seq() == 1) with the sweep no longer
-    // running; a frame on any other sequence restarts the count.
+    // F8: the sweep's last room must not be the picture the player comes back to. Run 1 left
+    // it drawn over the title, input not clearing it. Run 3 showed the subtler shape: the
+    // title presented clean, but the first interaction (which starts the load sequence)
+    // brought the black door room back on top, its door prompt later ghosting under a "Save
+    // complete." box, while the player's input advanced the real sequence underneath the
+    // whole time. So the room is a stale presented frame, not the game resuming in it, and
+    // the finish has to keep the opaque card up until the title has genuinely displaced that
+    // frame from the present chain. Counting a few presents at Seq() == 1 does not do it:
+    // Seq() reads the guest's sequence variable, and run 3's log shows it flipping to title
+    // 201 presented frames before the title sequence's first stage ran (frame 113424 against
+    // 113625), with the first interaction 19 frames after that, so the old count of 3
+    // released the card inside the transition. The hold below is counted in presented frames
+    // from the real counter (g_presentedFrame), starts at the same flip, and runs past the
+    // measured transition plus a settle of the title's own frames; leaving the title
+    // sequence restarts it. The startup cover's minimum hold on the title card is the port's
+    // precedent for settling on presented frames this way.
+    constexpr uint64_t kFinishSettleFrames = 240;
     static bool s_wasRunning = false;
     static bool s_holdFinishCard = false;
-    static int s_cleanPresents = 0;
+    static bool s_finishSeqSeen = false;
+    static uint64_t s_finishSeqFrame = 0;
     static double s_runStartTime = -1.0;  // ImGui time the current run was first seen (elapsed)
     if (pg.running) {
         s_wasRunning = true;
         s_holdFinishCard = false;
-        s_cleanPresents = 0;
+        s_finishSeqSeen = false;
         if (s_runStartTime < 0.0) s_runStartTime = ImGui::GetTime();
     } else {
         // pg.complete alone is not the trigger: it stays set after any earlier finished run,
@@ -4621,16 +4631,20 @@ void DrawPrepareGraphicsNotice() {
         // place count says this run itself reached the end.
         if (s_wasRunning && pg.complete && pg.total > 0 && pg.place >= pg.total) {
             s_holdFinishCard = true;
-            s_cleanPresents = 0;
+            s_finishSeqSeen = false;
         }
         s_wasRunning = false;
         s_runStartTime = -1.0;
     }
     if (s_holdFinishCard) {
         if (SpmMapSweep::Seq() == 1) {
-            if (++s_cleanPresents >= 3) s_holdFinishCard = false;
+            if (!s_finishSeqSeen) {
+                s_finishSeqSeen = true;
+                s_finishSeqFrame = g_presentedFrame;
+            }
+            if (g_presentedFrame - s_finishSeqFrame >= kFinishSettleFrames) s_holdFinishCard = false;
         } else {
-            s_cleanPresents = 0;
+            s_finishSeqSeen = false;
         }
     }
     const double elapsed = s_runStartTime >= 0.0 ? ImGui::GetTime() - s_runStartTime : 0.0;
@@ -4641,10 +4655,34 @@ void DrawPrepareGraphicsNotice() {
     }
     if (g_optOpen) return;
 
+    // The status message (above all the end-of-run "Graphics are ready") belongs to the title
+    // screen, but this branch used to draw it on the message alone: the offer line below and
+    // the update notice both gate on the title sequence, the message branch did not, and its
+    // only lifetime bound is PublishStatus's 15 second clear, which runs from EndRun, before
+    // the title is even reached. So whatever was left of those seconds landed on the next
+    // screens: in run 3 the banner drew over the file name entry and into the save flow,
+    // which run under the load sequence, not the title. Leaving the title therefore ends a
+    // message for good (the latch below), and returning to the title inside the timer does
+    // not revive it. A message is tracked by its text, so a new message starts unspent; a
+    // message first seen away from the title (the save-copy failure at BeginRun, read by a
+    // player standing in a map) is not spent and still draws.
+    static std::string s_bannerMessage;
+    static bool s_bannerSeenAtTitle = false;
+    static bool s_bannerSpent = false;
+    if (pg.message != s_bannerMessage) {
+        s_bannerMessage = pg.message;
+        s_bannerSeenAtTitle = false;
+        s_bannerSpent = false;
+    }
+    if (!pg.message.empty()) {
+        if (SpmMapSweep::Seq() == 1) s_bannerSeenAtTitle = true;
+        else if (s_bannerSeenAtTitle) s_bannerSpent = true;
+    }
+
     std::string line;
     if (pg.waiting) {
         line = "Prepare graphics starts once you load a save";
-    } else if (!pg.message.empty()) {
+    } else if (!pg.message.empty() && !s_bannerSpent) {
         line = pg.message;
     } else if (SpmMapSweep::Seq() == 1 && SpmPrepareGraphics::ShouldOffer()) {
         line = "First time here?  HOME > Options > Game > Prepare graphics builds the effects ahead of play";
