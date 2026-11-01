@@ -291,6 +291,9 @@ extern GxDisplayListState g_dlRecordState;
 
 inline bool IsDisplayListActive() noexcept { return g_dlRecordState.active; }
 
+// gx_pixel.cpp: the cull mode the game last set (true once it has set one), for GXGetCullMode.
+bool GxGameCullMode(uint32_t& mode) noexcept;
+
 // Mirrors GX__BeginDisplayList_80172e00's guest-side initialization.
 void BeginDisplayListRecording(uint32_t listAddr, uint32_t sizeBytes);
 void RegisterAuroraDisplayList(uint32_t addr, uint32_t size);

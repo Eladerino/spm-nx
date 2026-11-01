@@ -18,7 +18,15 @@ void LogOnce(bool& logged, const char* what)
 // NSMBW reads it while building its warning and message layouts.
 extern "C" void GX__GetCullMode_801c5890(uint32_t modePtr) {
     GXCullMode mode = GX_CULL_NONE;
-    GXGetCullMode(&mode);
+    // GX records (gx_worker.h): with a SetCullMode still pending, Aurora's mode is stale; the game's
+    // own copy is the answer. Without one (none set yet), the pending records run first.
+    uint32_t gameMode = 0;
+    if (GxWorker::Pending() && GxGameCullMode(gameMode)) {
+        mode = static_cast<GXCullMode>(gameMode);
+    } else {
+        GxWorker::Drain(0x8028D6A4u);
+        GXGetCullMode(&mode);
+    }
     if (modePtr != 0) {
         Memory::Write32(modePtr, static_cast<uint32_t>(mode));
     }
