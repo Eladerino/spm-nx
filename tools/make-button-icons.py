@@ -258,8 +258,7 @@ def render(src, kind, buttons, style, names=None):
 def panel_and_ui(out, style, icon_names=None, spots=None):
     """panel.txt (where each action's button sits on controller.png) and ui/ (the Controls panel's
     per-action icons). controller.png must already be saved in out. Pure Kenney, so the clean set
-    uses this too. icon_names and spots override single actions' glyphs and picture positions
-    (the Switch clean set's panel follows the port's own pad mapping; see build_clean)."""
+    uses this too. icon_names and spots override single actions' glyphs and picture positions."""
     spots = {**BUTTON_SPOTS[style], **(spots or {})}
     with open(os.path.join(out, "panel.txt"), "w", encoding="ascii") as f:
         # <action> <x> <y>: where the action's button is, in fractions of controller.png
@@ -269,13 +268,36 @@ def panel_and_ui(out, style, icon_names=None, spots=None):
         pad = Image.open(os.path.join(out, "controller.png"))
         x = int(pad.width * 0.78)
         top = next(y for y in range(pad.height) if pad.getpixel((x, y))[3] > 128)
-        print("stylish", 0.78, round(top / pad.height + 0.02, 3), file=f)
+        stylish_y = round(top / pad.height + 0.02, 3)
+        print("stylish", 0.78, stylish_y, file=f)
     # The panel's button icons, one per action.
     os.makedirs(os.path.join(out, "ui"), exist_ok=True)
     icons = {"move": "stick_l", "flip": "A", "jump": "2", "pixl": "1", "tippi": "stick", "stylish": "shake"}
     for action, button in icons.items():
         name = (icon_names or {}).get(action, STYLES[style][button])
         render_svg(style, name, 128).save(os.path.join(out, "ui", action + ".png"))
+    if style == "nintendo":
+        # Per-button art for the panel's dynamic callouts (DrawControlsPanel in
+        # settings_overlay.cpp): one icon per SDL button name, plus buttons.txt saying where
+        # each named button sits on controller.png, so a callout can follow the player's own
+        # bindings instead of the defaults. The names are SDL's positional ones (a = south,
+        # b = east, x = west, y = north) and each picture is the Switch letter printed at that
+        # seat. "b" (east, printed A) gets a spot but no icon: the vendored Kenney subset has
+        # no switch_button_a.svg, so for a binding whose primary input is east the panel keeps
+        # the per-action icon and moves only the callout's spot.
+        button_icons = {"a": "switch_button_b", "x": "switch_button_y", "y": "switch_button_x",
+                        "rightshoulder": "switch_button_r", "righttrigger": "switch_button_r",
+                        "leftstick": "switch_stick_l", "rightstick": "switch_stick_r"}
+        os.makedirs(os.path.join(out, "ui", "buttons"), exist_ok=True)
+        for token, name in button_icons.items():
+            render_svg(style, name, 128).save(os.path.join(out, "ui", "buttons", token + ".png"))
+        button_spots = {"a": (0.763, 0.397), "b": (0.843, 0.310), "x": (0.682, 0.310), "y": (0.763, 0.222),
+                        "rightshoulder": (0.78, stylish_y), "righttrigger": (0.78, stylish_y),
+                        "leftstick": spots["move"], "rightstick": spots["tippi"]}
+        with open(os.path.join(out, "buttons.txt"), "w", encoding="ascii") as f:
+            # <sdl button name> <x> <y>: where that button is, in fractions of controller.png
+            for token, (fx, fy) in button_spots.items():
+                print(token, fx, fy, file=f)
 
 
 def build_clean(out_root):
@@ -294,11 +316,11 @@ def build_clean(out_root):
     artwork into the marker2 files and redraws the 3-6 bubbles from it; that is game art, so it
     stays out of the package, and those textures are simply not missed under the panel.
 
-    The panel data follows THIS port's controls, not the PC set's positions: the Switch pad
-    layer reports each button under its own name (switch/sdl3_shim/sdl3_shim_gamepad.c), so
-    the position-based defaults in virtual_remote.cpp land one step around the diamond: Wii A
-    (Flip) is the pad's Y button and Wii 1 (Use a Pixl) is its X. Jump's picture is unchanged
-    (Wii 2 is the pad's B and A alike; the panel points at B)."""
+    The panel data follows the position-based defaults in virtual_remote.cpp directly: the
+    Switch pad layer reports buttons by position (switch/sdl3_shim/sdl3_shim_gamepad.c), so
+    Wii A (Flip) is the pad's north button, printed X, and Wii 1 (Use a Pixl) is its west
+    button, printed Y. Jump's picture is unchanged (Wii 2 is the pad's B and A alike; the
+    panel points at B)."""
     style = "nintendo"
     out = os.path.join(out_root, style)
     shutil.rmtree(out, ignore_errors=True)
@@ -313,18 +335,13 @@ def build_clean(out_root):
         Image.new("RGBA", (w, h), (0, 0, 0, 0)).save(os.path.join(out, f"marker{marker}", name))
     controller_picture(style).save(os.path.join(out, "controller.png"))
     sideways_picture(Image.open(os.path.join(out, "controller.png"))).save(os.path.join(out, SIDEWAYS_TEXTURE))
-    spots = BUTTON_SPOTS[style]
-    panel_and_ui(out, style,
-                 icon_names={"flip": "switch_button_y", "pixl": "switch_button_x"},
-                 spots={"flip": spots["pixl"], "pixl": spots["flip"]})
+    panel_and_ui(out, style)
     # The pack-independent prompt textures (PROMPT_CLEAN_KINDS): rendered from a blank canvas at
     # the pack's 8x size and saved at 4x under their own names, like the full set, so the in-game
     # prompts they belong to (the button glyphs inside text boxes, the shake prompt's icon) show
-    # Switch buttons in the package too. The glyphs' pictures follow the port's pad mapping, the
-    # same override the panel's icons take above: STYLES follows virtual_remote.cpp's
-    # position-based defaults (Wii 1 = Y, Wii A = X), but the pad layer reports the buttons by
-    # name, one step around the diamond, so Wii 1 is the pad's X and Wii A its Y. The shake
-    # icon's R is the same under both mappings, so it needs no override.
+    # Switch buttons in the package too. The glyphs' pictures follow STYLES directly, which
+    # follows virtual_remote.cpp's position-based defaults (Wii 1 = west, printed Y; Wii A =
+    # north, printed X), and the pad layer now reports buttons by the same positions.
     for name, kind, buttons in TEXTURES:
         if kind not in PROMPT_CLEAN_KINDS:
             continue
@@ -332,8 +349,7 @@ def build_clean(out_root):
         with tempfile.TemporaryDirectory() as tmp:
             blank = os.path.join(tmp, name)
             Image.new("RGBA", (w * 8, h * 8), (0, 0, 0, 0)).save(blank)
-            img = render(blank, kind, buttons, style,
-                         names={"1": "switch_button_x", "A": "switch_button_y"})
+            img = render(blank, kind, buttons, style)
         img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
         img.save(os.path.join(out, name))
     print(f"{style} (clean): -> {out}")
