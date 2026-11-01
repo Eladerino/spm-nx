@@ -1134,3 +1134,52 @@ bool FlagValue(int flag) {
     return g_flagSnap[flag] != 0;
 }
 } // namespace SpmMapSweep
+
+// Anim draw hook, called from the generated animPoseDrawMtx (func_800496B0) via
+// switch/scripts/patch-anim-draw.py, which inserts the check before the
+// function's first block. Returning true skips the draw. The function is void
+// at source level and the check runs before any side effect, so an early return
+// leaves the caller's context exactly as it was set.
+// The walk below mirrors what the draw code itself does: animdrv_wp is
+// SDA-relative in the game code (r13 - 32680); the pose array is at AnimWork
+// + 16 with its count at + 20, each AnimPose is 392 bytes, its group id is at
+// + 16, the group array is at AnimWork + 0 with 16-byte entries whose file
+// entry pointer is at + 8, and FileEntry.path is at + 0x20 (64 bytes).
+extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
+    if (ctx == nullptr) return false;
+    const uint32_t id = ctx->gpr[3];
+    uint32_t wp = 0;
+    if (!Memory::TryRead32(ctx->gpr[13] - 32680u, wp) || wp == 0) return false;
+    uint32_t poses = 0, count = 0;
+    if (!Memory::TryRead32(wp + 16, poses) || !Memory::TryRead32(wp + 20, count)) return false;
+    if (poses == 0 || id >= count) return false;
+    uint32_t groupId = 0;
+    if (!Memory::TryRead32(poses + id * 392 + 16, groupId)) return false;
+    uint32_t groups = 0;
+    if (!Memory::TryRead32(wp, groups) || groups == 0) return false;
+    uint32_t file = 0;
+    if (!Memory::TryRead32(groups + groupId * 16 + 8, file) || file == 0) return false;
+    if (!Memory::Contains(file + 0x20, 64)) return false;
+    char path[65] = {};
+    for (int i = 0; i < 64; ++i) {
+        const uint8_t b = Memory::Read8(file + 0x20 + uint32_t(i));
+        if (b == 0) break;
+        path[i] = static_cast<char>(b);
+    }
+    if (path[0] == 0) return false;
+    const std::string p(path);
+    const bool match = p == "n_controler" || p == "n_controler-" ||
+        (p.size() > 12 && p.compare(p.size() - 12, 12, "/n_controler") == 0) ||
+        (p.size() > 13 && p.compare(p.size() - 13, 13, "/n_controler-") == 0);
+    // One log line per distinct file, so a test run shows which poses the hook sees.
+    static char seen[48][64] = {};
+    static int seenCount = 0;
+    bool known = false;
+    for (int i = 0; i < seenCount; ++i) if (p == seen[i]) { known = true; break; }
+    if (!known && seenCount < 48) {
+        std::snprintf(seen[seenCount++], 64, "%s", p.c_str());
+        RT_LOGF(RT_TAG_RUNTIME, "[animhook] pose %u draws file '%s'%s\n", id, p.c_str(),
+                match ? " (suppressed)" : "");
+    }
+    return match;
+}
