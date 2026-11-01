@@ -135,14 +135,10 @@ else
                      marker7/tex1_40x40_f5cacaa9307af129_14.png \
                      marker7/tex1_64x64_9e627a1a399a4c12_14.png \
                      marker7/tex1_8x40_c50770f50b582d49_5.png \
-                     marker7/tex1_128x128_20c999e118af6c30_0.png \
                      marker7/tex1_16x64_3e38070014458ae9_0.png \
                      marker7/tex1_128x128_5ba2d8b06b8af6e5_0.png \
                      marker7/tex1_40x40_598499bc2848b57b_5.png \
-                     marker7/tex1_108x108_e2b32295a4c82603_14.png \
-                     marker7/tex1_132x132_35b17425ddd47d4d_14.png \
-                     marker7/tex1_16x16_e70a799cb7ed5de4_0.png \
-                     marker7/tex1_16x16_fb0a45486d17dd3d_5.png; do
+                     marker7/tex1_132x132_35b17425ddd47d4d_14.png; do
                 cp "$icons_gen/nintendo/$f" "$icons_dest/nintendo/$f"
             done
             # The runtime compositor's overlays (generator composite/): just the new buttons for
