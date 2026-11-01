@@ -46,7 +46,7 @@ void ReplayFifoRun(void* payload) {
 // True when the store was recorded; false when it should run now (pending records have run).
 bool RecordFifoStore(uint32_t value, uint32_t size) {
     if (!GxWorker::CanRecord()) {
-        GxWorker::Drain();
+        GxWorker::Drain(GxWorker::DrainCause::kFifo);
         return false;
     }
     void* extra = nullptr;
@@ -57,7 +57,7 @@ bool RecordFifoStore(uint32_t value, uint32_t size) {
     }
     void* payload = GxWorker::Reserve(&ReplayFifoRun, sizeof(FifoRun) + sizeof(FifoStore), alignof(FifoRun));
     if (payload == nullptr) {
-        GxWorker::Drain();
+        GxWorker::Drain(GxWorker::DrainCause::kFifo);
         return false;
     }
     FifoRun* run = new (payload) FifoRun{1, 0};
