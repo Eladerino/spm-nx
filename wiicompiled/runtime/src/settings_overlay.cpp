@@ -892,10 +892,11 @@ void ResetGamepadBindings(int style) {
     VirtualRemote::ReloadPadLayouts();
 }
 
-// Friendly names for config inputs, per style. On the Switch the SDL names
-// read as the printed Nintendo letters (the shim maps buttons by label):
-// a is A, b is B, x is X, y is Y, the shoulders are L and R, the triggers
-// ZL and ZR, back is Minus and start is Plus.
+// Friendly names for config inputs, per style. The SDL names are positional
+// (a = south, b = east, x = west, y = north), so each style reads them as the
+// letters printed at those seats: on the Switch a is B, b is A, x is Y and y
+// is X; the shoulders are L and R, the triggers ZL and ZR, back is Minus and
+// start is Plus.
 std::string GamepadBindingLabel(const std::string& name, int style) {
     std::string base = name;
     char sign = 0;
@@ -911,10 +912,10 @@ std::string GamepadBindingLabel(const std::string& name, int style) {
     }
     if (base == "lefttrigger") return style == 0 ? "LT" : (style == 1 ? "L2" : "ZL");
     if (base == "righttrigger") return style == 0 ? "RT" : (style == 1 ? "R2" : "ZR");
-    if (base == "a") return style == 1 ? "Cross" : "A";
-    if (base == "b") return style == 1 ? "Circle" : "B";
-    if (base == "x") return style == 1 ? "Square" : "X";
-    if (base == "y") return style == 1 ? "Triangle" : "Y";
+    if (base == "a") return style == 1 ? "Cross" : (style == 2 ? "B" : "A");
+    if (base == "b") return style == 1 ? "Circle" : (style == 2 ? "A" : "B");
+    if (base == "x") return style == 1 ? "Square" : (style == 2 ? "Y" : "X");
+    if (base == "y") return style == 1 ? "Triangle" : (style == 2 ? "X" : "Y");
     if (base == "back") return style == 0 ? "Back" : (style == 1 ? "Share" : "Minus");
     if (base == "start") return style == 0 ? "Menu" : (style == 1 ? "Options" : "Plus");
     if (base == "guide") return style == 2 ? "Home" : "Guide";
@@ -3144,7 +3145,15 @@ void DrawControlsPanel() {
         bool loaded = false;
         Sprite pad, icons[8];
         ImVec2 spots[8];  // panel.txt: where each action's button is on the picture (fractions)
+        // Per-button art for the dynamic callouts: ui/buttons/<SDL name>.png and buttons.txt
+        // (where each named button sits on the picture). Only the generated Switch set ships
+        // these; other styles keep the per-action icons for every callout.
+        Sprite buttonIcons[8];
+        ImVec2 buttonSpots[8];
+        bool buttonSpotLoaded[8] = {};
     };
+    static const char* const kButtonNames[8] = {"a", "b", "x", "y", "rightshoulder",
+                                                "righttrigger", "leftstick", "rightstick"};
     static Style styles[3];
     static const char* const kActions[8] = {"", "", "move", "flip", "jump", "pixl", "tippi", "stylish"};
     Style& st = styles[style];
@@ -3170,8 +3179,44 @@ void DrawControlsPanel() {
         while (panel >> name >> fx >> fy)
             for (int m = 2; m <= 7; ++m)
                 if (name == kActions[m]) st.spots[m] = ImVec2(fx, fy);
+        for (int b = 0; b < 8; ++b)
+            st.buttonIcons[b] = load(dir / "ui" / "buttons" / (std::string(kButtonNames[b]) + ".png"));
+        std::ifstream buttons(dir / "buttons.txt");
+        while (buttons >> name >> fx >> fy)
+            for (int b = 0; b < 8; ++b)
+                if (name == kButtonNames[b]) {
+                    st.buttonSpots[b] = ImVec2(fx, fy);
+                    st.buttonSpotLoaded[b] = true;
+                }
     }
     if (!st.pad.id) return;
+
+    // Dynamic callouts: Flip, Jump, Use a Pixl and Shake follow the player's own bindings for
+    // this style. The primary binding's button supplies the icon and the picture spot when the
+    // set ships per-button art for it, and a second, different binding is named in the sub-line.
+    // Anything else (Move, Use Tippi, a binding with no per-button art) keeps the per-action
+    // art, so the defaults draw exactly as the shipped set drew them.
+    static const int kMarkerAction[8] = {-1, -1, -1, 6, 4, 5, -1, 7};  // gamepad action per marker
+    const Sprite* iconFor[8];
+    ImVec2 spotFor[8];
+    std::string alsoFor[8];
+    for (int m = 0; m < 8; ++m) {
+        iconFor[m] = &st.icons[m];
+        spotFor[m] = st.spots[m];
+    }
+    for (int m = 2; m <= 7; ++m) {
+        const int action = kMarkerAction[m];
+        if (action < 0) continue;
+        const std::vector<std::string> names = GamepadBindingNames(style, action);
+        if (names.empty()) continue;
+        for (int b = 0; b < 8; ++b) {
+            if (names[0] != kButtonNames[b]) continue;
+            if (st.buttonIcons[b].id) iconFor[m] = &st.buttonIcons[b];
+            if (st.buttonSpotLoaded[b]) spotFor[m] = st.buttonSpots[b];
+            break;
+        }
+        if (names.size() > 1 && names[1] != names[0]) alsoFor[m] = "also " + GamepadBindingLabel(names[1], style);
+    }
 
     static const std::shared_ptr<GameLayout::Font> font = GameLayout::LoadFont("papermarioset_US.bfn");
     const bool gameFont = GameLayout::FontReady(font.get());
@@ -3203,9 +3248,19 @@ void DrawControlsPanel() {
     text("Controls", -360.0f, 176.0f, 26.0f, 0xFFFFFFFFu, 0);
     text(kPadNames[style], 360.0f, 176.0f, 15.0f, 0xA8AEBDFFu, 2);
     list->AddLine(at(-360.0f, 152.0f), at(360.0f, 152.0f), IM_COL32(255, 255, 255, a(30)), 1.5f * view.scale);
-    // How to close it (the game's - or 1, at their default places on each controller).
+    // How to close it (the game's - or 1). On the Switch the hint names the Minus action's own
+    // bindings; the other styles keep their hand-written hints.
     static const char* const kCloseHint[3] = {"View or LB: close", "Create or L1: close", "- or L: close"};
-    text(kCloseHint[style], 360.0f, -196.0f, 15.0f, 0xA8AEBDFFu, 2);
+    std::string closeHint = kCloseHint[style];
+    if (style == 2) {
+        const std::vector<std::string> names = GamepadBindingNames(style, 11);  // the Minus action
+        if (names.size() > 1) {
+            closeHint = GamepadBindingLabel(names[0], style);
+            for (size_t i = 1; i < names.size() && i < 3; ++i) closeHint += " or " + GamepadBindingLabel(names[i], style);
+            closeHint += ": close";
+        }
+    }
+    text(closeHint.c_str(), 360.0f, -196.0f, 15.0f, 0xA8AEBDFFu, 2);
 
     // The controller.
     constexpr float kPadW = 300.0f, kPadCX = -28.0f, kPadCY = -18.0f;
@@ -3215,20 +3270,29 @@ void DrawControlsPanel() {
 
     // Callouts: Move on the left, the face buttons and the right stick on the right, each in the order of its button
     // from top to bottom, with a leader line to the button.
-    struct Callout { int m; const char* title; const char* sub; };
-    static const Callout kLeft[] = {{2, "Move", "Speak, interact"}};
+    struct Callout { int m; const char* title; std::string sub; };
     static const char* const kShakeButtons[3] = {"RB or RT: stylish moves, break free", "R1 or R2: stylish moves, break free",
                                                  "R or ZR: stylish moves, break free"};
-    const Callout kRight[] = {{7, "Shake", kShakeButtons[style]}, {3, "Flip", ""}, {5, "Use a Pixl", "Cancel"},
-                              {4, "Jump", "Confirm"}, {6, "Use Tippi", ""}};
+    const auto sub = [&](int m, const char* base) {
+        std::string s = base;
+        if (!alsoFor[m].empty()) {
+            if (!s.empty()) s += ", ";
+            s += alsoFor[m];
+        }
+        return s;
+    };
+    const std::vector<Callout> kLeft = {{2, "Move", sub(2, "Speak, interact")}};
+    const std::vector<Callout> kRight = {{7, "Shake", sub(7, kShakeButtons[style])}, {3, "Flip", sub(3, "")},
+                                         {5, "Use a Pixl", sub(5, "Cancel")}, {4, "Jump", sub(4, "Confirm")},
+                                         {6, "Use Tippi", sub(6, "")}};
     const auto callouts = [&](const Callout* items, size_t count, bool right) {
         std::vector<const Callout*> shown;
         for (size_t i = 0; i < count; ++i)
             if (seen[items[i].m]) shown.push_back(&items[i]);
-        std::sort(shown.begin(), shown.end(), [&](const Callout* l, const Callout* r) { return st.spots[l->m].y < st.spots[r->m].y; });
+        std::sort(shown.begin(), shown.end(), [&](const Callout* l, const Callout* r) { return spotFor[l->m].y < spotFor[r->m].y; });
         // Each label level with its button, pushed apart where they would touch, so the leaders run nearly level.
         std::vector<float> ys;
-        for (const Callout* co : shown) ys.push_back(kPadCY + padH / 2 - st.spots[co->m].y * padH);
+        for (const Callout* co : shown) ys.push_back(kPadCY + padH / 2 - spotFor[co->m].y * padH);
         constexpr float kSpacing = 50.0f, kTop = 120.0f, kBottom = -150.0f;
         for (size_t i = 0; i < ys.size(); ++i) ys[i] = std::min(ys[i], i == 0 ? kTop : ys[i - 1] - kSpacing);
         for (size_t i = ys.size(); i-- > 0;) ys[i] = std::max(ys[i], i + 1 == ys.size() ? kBottom : ys[i + 1] + kSpacing);
@@ -3238,31 +3302,31 @@ void DrawControlsPanel() {
             const float edge = right ? 360.0f : -360.0f, icon = 30.0f;
             // icon at the outer edge, text inside it
             const float ix = right ? edge - icon / 2 : edge + icon / 2;
-            if (st.icons[co.m].id)
-                list->AddImage(st.icons[co.m].id, at(ix - icon / 2, y + icon / 2), at(ix + icon / 2, y - icon / 2), ImVec2(0, 0),
+            if (iconFor[co.m]->id)
+                list->AddImage(iconFor[co.m]->id, at(ix - icon / 2, y + icon / 2), at(ix + icon / 2, y - icon / 2), ImVec2(0, 0),
                                ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
             const float tx = right ? edge - icon - 8.0f : edge + icon + 8.0f;
-            const bool two = co.sub[0] != '\0';
+            const bool two = !co.sub.empty();
             text(co.title, tx, two ? y + 8.0f : y, 17.0f, 0xFFFFFFFFu, right ? 2 : 0);
-            if (two) text(co.sub, tx, y - 11.0f, 13.0f, 0xA8AEBDFFu, right ? 2 : 0);
+            if (two) text(co.sub.c_str(), tx, y - 11.0f, 13.0f, 0xA8AEBDFFu, right ? 2 : 0);
             // leader: from just past the text toward the button, ending on it with a dot
-            const float tw = std::max(textWidth(co.title, 17.0f), two ? textWidth(co.sub, 13.0f) : 0.0f);
+            const float tw = std::max(textWidth(co.title, 17.0f), two ? textWidth(co.sub.c_str(), 13.0f) : 0.0f);
             const ImVec2 from = at(right ? tx - tw - 10.0f : tx + tw + 10.0f, y);
-            const ImVec2 to(p0.x + st.spots[co.m].x * (p1.x - p0.x), p0.y + st.spots[co.m].y * (p1.y - p0.y));
+            const ImVec2 to(p0.x + spotFor[co.m].x * (p1.x - p0.x), p0.y + spotFor[co.m].y * (p1.y - p0.y));
             list->AddLine(from, to, IM_COL32(255, 255, 255, a(150)), 1.6f * view.scale);
             list->AddCircleFilled(to, 4.0f * view.scale, IM_COL32(255, 255, 255, a(235)));
             list->AddCircleFilled(from, 2.2f * view.scale, IM_COL32(255, 255, 255, a(150)));
         }
     };
-    callouts(kLeft, std::size(kLeft), false);
-    callouts(kRight, std::size(kRight), true);
+    callouts(kLeft.data(), kLeft.size(), false);
+    callouts(kRight.data(), kRight.size(), true);
 
     // Footer, centred: [1] + [2] Quick menu (the game's 1 + 2 combination).
     const float fy = -190.0f, icon = 24.0f, plus = 16.0f, gap = 10.0f;
     float x = -(icon * 2 + plus + gap + textWidth("Quick menu", 15.0f)) / 2;
     const auto footerIcon = [&](int m) {
-        if (st.icons[m].id)
-            list->AddImage(st.icons[m].id, at(x, fy + icon / 2), at(x + icon, fy - icon / 2), ImVec2(0, 0), ImVec2(1, 1),
+        if (iconFor[m]->id)
+            list->AddImage(iconFor[m]->id, at(x, fy + icon / 2), at(x + icon, fy - icon / 2), ImVec2(0, 0), ImVec2(1, 1),
                            IM_COL32(255, 255, 255, a(255)));
         x += icon;
     };
