@@ -3,6 +3,7 @@
 #include "display_settings.h"
 #include "input_bindings.h"
 #include "keybinds.h"
+#include "pad_binding_migration.h"
 #include "runtime_config.h"
 #include "memory.h"
 #include "runtime_log.h"
@@ -24,6 +25,8 @@
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -212,7 +215,131 @@ std::vector<PadInput> ParsePadInputs(const std::string& text) {
     return inputs;
 }
 
+#if defined(__SWITCH__)
+static_assert(Keybinds::kActionCount == 12, "the pad binding migration's tables are sized for 12 actions");
+// The one-time [gamepad] migration (pad_binding_migration.h): bindings a pre-fix Switch
+// build captured name the letters the player pressed, and this build reads names as
+// positions. Runs before the first layout is built from the file; the decision logic and
+// the rotation live in the header, this is only the file handling around them. The
+// original file is copied to Config.toml.pre-pad-migration.bak first (an existing backup
+// is never overwritten: it is the pristine copy) and whatever happened is logged.
+void MigratePreFixPadBindings() {
+    const auto path = RuntimeConfigFile::ResolveConfigPath();
+    std::vector<std::string> lines;
+    {
+        // Scoped reader, closed before the write below opens the file: the Switch
+        // filesystem refuses a write open of a file still open for reading (the same
+        // trap RuntimeConfigFile::WriteSetting documents).
+        std::ifstream input(path);
+        if (!input) {
+            return;
+        }
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            lines.push_back(std::move(line));
+        }
+    }
+
+    const RuntimeUserConfig& config = RuntimeConfigFile::Get();
+    PadBindingMigration::Facts facts;
+    facts.switchSeed = config.resolutionMultiplier && *config.resolutionMultiplier == 1.5f &&
+                       config.frameInterpolationFps && *config.frameInterpolationFps == 0 &&
+                       config.aspectMode && *config.aspectMode == 1;
+    facts.pcEvidence = config.windowPosX || config.windowPosY || config.windowWidth ||
+                       config.windowHeight ||
+                       (config.graphicsApi && *config.graphicsApi != "auto") ||
+                       (config.dvdRoot && PadBindingMigration::LooksLikeWindowsPath(*config.dvdRoot));
+
+    std::array<std::string_view, 12> actionKeys{};
+    std::array<std::string_view, 12> nintendoDefaults{};
+    for (size_t i = 0; i < actionKeys.size(); ++i) {
+        actionKeys[i] = kPadActionKeys[i];
+        nintendoDefaults[i] = kPadDefaults[i][kNintendo];
+    }
+    const PadBindingMigration::Result result =
+        PadBindingMigration::MigrateGamepadLines(lines, actionKeys, nintendoDefaults, facts);
+    using Outcome = PadBindingMigration::Outcome;
+    if (result.outcome == Outcome::kNoBindings || result.outcome == Outcome::kAlreadyStamped ||
+        !result.changed) {
+        return;
+    }
+
+    std::error_code ec;
+    const auto backup = path.parent_path() /
+                        (RuntimeConfigFile::PathToUtf8(path.filename()) + ".pre-pad-migration.bak");
+    if (!std::filesystem::exists(backup, ec)) {
+        std::filesystem::copy_file(path, backup, ec);
+        if (ec) {
+            RT_LOGF(RT_TAG_CONFIG,
+                    "[gamepad] pad binding migration: could not back up Config.toml (%s); file left untouched\n",
+                    ec.message().c_str());
+            return;
+        }
+    }
+
+    bool wrote = false;
+    {
+        std::ofstream output(path, std::ios::trunc);
+        if (output) {
+            for (const auto& outputLine : lines) {
+                output << outputLine << '\n';
+            }
+            wrote = static_cast<bool>(output);
+        }
+    }
+    if (!wrote) {
+        // The C stdio fallback, for the same reason WriteSetting has one.
+        FILE* file = std::fopen(RuntimeConfigFile::PathToUtf8(path).c_str(), "w");
+        if (file == nullptr) {
+            RT_LOGF(RT_TAG_CONFIG, "[gamepad] pad binding migration: could not rewrite Config.toml; file left as the backup\n");
+            return;
+        }
+        wrote = true;
+        for (const auto& outputLine : lines) {
+            wrote = wrote && std::fputs(outputLine.c_str(), file) >= 0 && std::fputc('\n', file) != EOF;
+        }
+        wrote = wrote && std::fclose(file) == 0;
+        if (!wrote) {
+            RT_LOGF(RT_TAG_CONFIG, "[gamepad] pad binding migration: could not rewrite Config.toml; file left as the backup\n");
+            return;
+        }
+    }
+
+    // The config was parsed before the file changed; bring the in-memory copy along so
+    // this run uses the rotated bindings too.
+    for (const auto& [key, value] : result.rotatedValues) {
+        RuntimeConfigFile::Mutable().gamepadBindings[key] = value;
+    }
+    switch (result.outcome) {
+    case Outcome::kRotated:
+        RT_LOGF(RT_TAG_CONFIG,
+                "[gamepad] pad bindings were saved by a pre-fix Switch build: rotated %d binding(s) "
+                "into the positional frame; the original is Config.toml.pre-pad-migration.bak\n",
+                result.rotatedBindings);
+        break;
+    case Outcome::kKeptDefaults:
+        RT_LOGF(RT_TAG_CONFIG,
+                "[gamepad] pad bindings already match the current defaults; marked as positional, nothing rotated\n");
+        break;
+    case Outcome::kKeptNoProvenance:
+        RT_LOGF(RT_TAG_CONFIG,
+                "[gamepad] pad bindings present, but this Config.toml does not look Switch-written; "
+                "left untouched and marked so the question is not asked again\n");
+        break;
+    default:
+        break;
+    }
+}
+#endif
+
 std::array<PadLayout, kPadStyleCount> BuildPadLayouts() {
+#if defined(__SWITCH__)
+    static std::once_flag padMigrationOnce;
+    std::call_once(padMigrationOnce, MigratePreFixPadBindings);
+#endif
     std::array<PadLayout, kPadStyleCount> result;
     for (int style = 0; style < kPadStyleCount; ++style) {
         for (int action = 0; action < Keybinds::kActionCount; ++action) {
