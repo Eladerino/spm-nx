@@ -4450,7 +4450,7 @@ std::vector<OptRow> OptionsRows(int tab) {
 std::vector<std::string> WrapNoticeLine(const GameLayout::Font& font, const std::string& line, float size,
                                         float maxWidth) {
     auto widthOf = [&](const std::string& s) {
-        return GameLayout::MeasureText(font, GameLayout::Utf16(s), size) * 0.5f;
+        return GameLayout::MeasureText(font, GameLayout::Utf16(s), size);
     };
     std::vector<std::string> out;
     std::string cur;
