@@ -174,6 +174,23 @@ void userAppInit(void) {
                  g_sockets ? "up" : "off");
 }
 
+// Prepare graphics (runtime/src/spm_prepare_graphics.cpp): the console stays awake through a
+// sweep nobody touches, and a sweep stuck in a map change starts the program over. The restart
+// only exists in title takeover; from the Homebrew Menu the player closes and reopens the game.
+void spm_switch_keep_awake(bool on) {
+    appletSetAutoSleepDisabled(on);
+}
+
+bool spm_switch_restart_program(void) {
+    AppletType type = appletGetAppletType();
+    if (type != AppletType_Application && type != AppletType_SystemApplication) return false;
+    std::fflush(stderr);
+    static const char arg[] = "spm-nx prepare graphics";
+    Result rc = appletRestartProgram(arg, sizeof arg);
+    std::fprintf(stderr, "[switch] restart failed: appletRestartProgram rc 0x%x\n", rc);
+    return false;
+}
+
 void userAppExit(void) {
     // After main() and the static destructors. A thread still running (the fatal exit leaves
     // Aurora's alive) may touch guest memory once it is unmapped; the crash handler parks it.
