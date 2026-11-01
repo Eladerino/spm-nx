@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>
 
 extern "C" char* fake_heap_end;
 
@@ -39,28 +40,60 @@ Renderer R;
 Diag g_diag;
 
 namespace {
-// One "key=1" line per switch; see diag_init.
+// Every switch by its dk_diag.txt name. diag_read_file, diag_set, diag_get and diag_init's log
+// line all go through this table, so a new switch is one line here plus its field in dk.h.
+struct DiagKey {
+    const char* name;
+    std::atomic<bool> Diag::*field;
+};
+constexpr DiagKey kDiagKeys[] = {
+    {"depth_off", &Diag::depthOff},   {"cull_off", &Diag::cullOff},     {"magenta", &Diag::magenta},
+    {"picdump", &Diag::picDump},      {"efbclear", &Diag::efbClear},    {"bufdump", &Diag::bufDump},
+    {"texdump", &Diag::texDump},      {"shaderdump", &Diag::shaderDump}, {"nomerge", &Diag::noMerge},
+    {"uvlog", &Diag::uvLog},          {"mtxlog", &Diag::mtxLog},        {"perftimer", &Diag::perfTimer},
+    {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"cpthread", &Diag::cpThread},
+    {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},
+};
+
+const DiagKey* find_diag_key(const char* name) {
+    if (!name) return nullptr;
+    for (const DiagKey& key : kDiagKeys) {
+        if (!std::strcmp(key.name, name)) return &key;
+    }
+    return nullptr;
+}
+
+bool is_blank(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+// dk_diag.txt: one switch per line as "key=1" or "key=0". A "#" starts a comment, blank lines and
+// spaces around the "=" are fine, a bare "key" means on, and "0", "off" or "false" mean off. A key
+// the file does not name keeps its default (dk.h); an unknown one is logged and skipped.
 void diag_read_file(FILE* f) {
-    char line[128];
+    char line[256];
+    int lineNumber = 0;
     while (std::fgets(line, sizeof(line), f)) {
-        const bool off = std::strstr(line, "=0") != nullptr;
-        if (std::strstr(line, "depth_off")) g_diag.depthOff = !off;
-        if (std::strstr(line, "cull_off")) g_diag.cullOff = !off;
-        if (std::strstr(line, "magenta")) g_diag.magenta = !off;
-        if (std::strstr(line, "picdump")) g_diag.picDump = !off;
-        if (std::strstr(line, "efbclear")) g_diag.efbClear = !off;
-        if (std::strstr(line, "bufdump")) g_diag.bufDump = !off;
-        if (std::strstr(line, "texdump")) g_diag.texDump = !off;
-        if (std::strstr(line, "shaderdump")) g_diag.shaderDump = !off;
-        if (std::strstr(line, "nomerge")) g_diag.noMerge = !off;
-        if (std::strstr(line, "uvlog")) g_diag.uvLog = !off;
-        if (std::strstr(line, "mtxlog")) g_diag.mtxLog = !off;
-        if (std::strstr(line, "perftimer")) g_diag.perfTimer = !off;
-        if (std::strstr(line, "arrayup")) g_diag.arrayUp = !off;
-        if (std::strstr(line, "profile")) g_diag.profile = !off;
-        if (std::strstr(line, "cpthread")) g_diag.cpThread = !off;
-        if (std::strstr(line, "gxworker")) g_diag.gxWorker = !off;
-        if (std::strstr(line, "gxdefer")) g_diag.gxDefer = !off;
+        ++lineNumber;
+        if (char* comment = std::strchr(line, '#')) *comment = '\0';
+        char* key = line;
+        while (is_blank(*key)) ++key;
+        size_t length = std::strlen(key);
+        while (length > 0 && is_blank(key[length - 1])) key[--length] = '\0';
+        if (length == 0) continue;
+        const char* value = "1";
+        char* keyEnd = key + length;
+        if (char* equals = std::strchr(key, '=')) {
+            keyEnd = equals;
+            value = equals + 1;
+            while (is_blank(*value)) ++value;
+        }
+        while (keyEnd > key && is_blank(keyEnd[-1])) --keyEnd;
+        *keyEnd = '\0';
+        const bool off = !std::strcmp(value, "0") || !strcasecmp(value, "off") || !strcasecmp(value, "false");
+        if (const DiagKey* entry = find_diag_key(key)) {
+            g_diag.*(entry->field) = !off;
+        } else {
+            dklog("diag: dk_diag.txt line %d: unknown switch '%s', skipped", lineNumber, key);
+        }
     }
 }
 
@@ -71,10 +104,8 @@ void apply_gx_worker_mode() {
 }
 } // namespace
 
-// The diagnostic switches (dk.h): one "key=1" per line in UserData/dk_diag.txt, read once here.
-// A line naming a key without "=0" turns it on, and one with "=0" turns it off; a key the file
-// does not name keeps its default (dk.h). The active set is logged so a test log always says
-// which switches the run used.
+// The diagnostic switches (dk.h): UserData/dk_diag.txt, read once here (format at diag_read_file).
+// The active set is logged so a test log always says which switches the run used.
 void diag_init() {
     if (FILE* f = std::fopen("/switch/spm-nx/UserData/dk_diag.txt", "r")) {
         diag_read_file(f);
@@ -106,12 +137,15 @@ void diag_init() {
     if (g_diag.cpThread) aurora::gx::fifo::set_decode_thread_requested(true);
     // The GX record ring takes its mode at the first frame boundary, before any guest frame ends.
     apply_gx_worker_mode();
-    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d nomerge=%d uvlog=%d mtxlog=%d perftimer=%d arrayup=%d profile=%d cpthread=%d gxworker=%d gxdefer=%d",
-          g_diag.depthOff ? 1 : 0, g_diag.cullOff ? 1 : 0, g_diag.magenta ? 1 : 0, g_diag.picDump ? 1 : 0,
-          g_diag.efbClear ? 1 : 0, g_diag.bufDump ? 1 : 0, g_diag.texDump ? 1 : 0, g_diag.shaderDump ? 1 : 0,
-          g_diag.noMerge ? 1 : 0, g_diag.uvLog ? 1 : 0, g_diag.mtxLog ? 1 : 0, g_diag.perfTimer ? 1 : 0,
-          g_diag.arrayUp ? 1 : 0, g_diag.profile ? 1 : 0, g_diag.cpThread ? 1 : 0, g_diag.gxWorker ? 1 : 0,
-          g_diag.gxDefer ? 1 : 0);
+    char active[384] = "";
+    size_t used = 0;
+    for (const DiagKey& key : kDiagKeys) {
+        const int n = std::snprintf(active + used, sizeof(active) - used, "%s%s=%d", used ? " " : "", key.name,
+                                    (g_diag.*(key.field)).load() ? 1 : 0);
+        if (n < 0 || size_t(n) >= sizeof(active) - used) break;
+        used += size_t(n);
+    }
+    dklog("diag: %s", active);
     // A profile=1 in dk_diag.txt starts the sampler now. Renderer init runs before the guest
     // starts, so the session covers the boot too; samples resolve at report time, so nothing
     // about the early start hurts attribution. The clean session is still the menu toggle:
@@ -119,80 +153,31 @@ void diag_init() {
     if (g_diag.profile) GuestProfiler::SetSwitchProfileEnabled(true);
 }
 
-// diag_set (dk.h): the runtime path for the same switches. The eight interposer switches are
-// plain field flips (their use sites read g_diag per bind, per present, per compile); the six
-// Aurora switches also forward to Aurora's flags, which initialise from the env vars above (the
-// decode thread's from diag_init itself) and are settable ever since; the profile switch forwards
-// to the runtime's guest profiler, whose hot list prints when the switch turns off. A flip lands
-// from the switch's next use onward, not at a frame boundary, except cpthread, which Aurora
-// applies at the end of the frame.
+// diag_set (dk.h): the runtime path for the same switches. Every switch stores its field, which
+// the interposer's use sites read per bind, per present or per compile. Aurora's six also forward
+// to Aurora's own flags (initialised from the env vars in diag_init, settable since), the profile
+// switch to the runtime's guest profiler (its hot list prints when it turns off), and the GX record
+// switches to the record ring. A flip lands from the switch's next use onward, except cpthread and
+// the GX record switches, which take effect at the end of the frame.
 bool diag_set(const char* key, bool on) {
-    if (!key) return false;
-    if (!std::strcmp(key, "depth_off")) g_diag.depthOff = on;
-    else if (!std::strcmp(key, "cull_off")) g_diag.cullOff = on;
-    else if (!std::strcmp(key, "magenta")) g_diag.magenta = on;
-    else if (!std::strcmp(key, "picdump")) g_diag.picDump = on;
-    else if (!std::strcmp(key, "efbclear")) g_diag.efbClear = on;
-    else if (!std::strcmp(key, "bufdump")) g_diag.bufDump = on;
-    else if (!std::strcmp(key, "texdump")) g_diag.texDump = on;
-    else if (!std::strcmp(key, "shaderdump")) g_diag.shaderDump = on;
-    else if (!std::strcmp(key, "nomerge")) {
-        g_diag.noMerge = on;
-        aurora::gx::fifo::nsmbw_set_no_merge(on ? 1 : 0);
-    } else if (!std::strcmp(key, "uvlog")) {
-        g_diag.uvLog = on;
-        aurora::gx::nsmbw_set_uv_log(on);
-    } else if (!std::strcmp(key, "mtxlog")) {
-        g_diag.mtxLog = on;
-        aurora::gx::nsmbw_set_mtx_log(on);
-    } else if (!std::strcmp(key, "perftimer")) {
-        g_diag.perfTimer = on;
-        aurora::gfx::stage_timers_set_enabled(on);
-    } else if (!std::strcmp(key, "arrayup")) {
-        g_diag.arrayUp = on;
-        aurora::gx::fifo::nsmbw_set_array_reupload(on);
-    } else if (!std::strcmp(key, "profile")) {
-        g_diag.profile = on;
-        GuestProfiler::SetSwitchProfileEnabled(on);
-    } else if (!std::strcmp(key, "cpthread")) {
-        g_diag.cpThread = on;
-        aurora::gx::fifo::set_decode_thread_requested(on);
-    } else if (!std::strcmp(key, "gxworker")) {
-        g_diag.gxWorker = on;
-        apply_gx_worker_mode();
-    } else if (!std::strcmp(key, "gxdefer")) {
-        g_diag.gxDefer = on;
-        apply_gx_worker_mode();
-    } else {
-        return false;
-    }
+    const DiagKey* entry = find_diag_key(key);
+    if (!entry) return false;
+    g_diag.*(entry->field) = on;
+    if (!std::strcmp(key, "nomerge")) aurora::gx::fifo::nsmbw_set_no_merge(on ? 1 : 0);
+    else if (!std::strcmp(key, "uvlog")) aurora::gx::nsmbw_set_uv_log(on);
+    else if (!std::strcmp(key, "mtxlog")) aurora::gx::nsmbw_set_mtx_log(on);
+    else if (!std::strcmp(key, "perftimer")) aurora::gfx::stage_timers_set_enabled(on);
+    else if (!std::strcmp(key, "arrayup")) aurora::gx::fifo::nsmbw_set_array_reupload(on);
+    else if (!std::strcmp(key, "profile")) GuestProfiler::SetSwitchProfileEnabled(on);
+    else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
+    else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer")) apply_gx_worker_mode();
     return true;
 }
 
-// diag_get (dk.h): the read side of diag_set, for the Switch settings menu's
-// Developer rows. g_diag is authoritative for every key: diag_set stores the
-// field for all fifteen keys and additionally forwards the six Aurora ones
-// (and the profile switch to the guest profiler).
+// diag_get (dk.h): the read side of diag_set, for the settings menu's Diagnostics rows.
 bool diag_get(const char* key) {
-    if (!key) return false;
-    if (!std::strcmp(key, "depth_off")) return g_diag.depthOff;
-    else if (!std::strcmp(key, "cull_off")) return g_diag.cullOff;
-    else if (!std::strcmp(key, "magenta")) return g_diag.magenta;
-    else if (!std::strcmp(key, "picdump")) return g_diag.picDump;
-    else if (!std::strcmp(key, "efbclear")) return g_diag.efbClear;
-    else if (!std::strcmp(key, "bufdump")) return g_diag.bufDump;
-    else if (!std::strcmp(key, "texdump")) return g_diag.texDump;
-    else if (!std::strcmp(key, "shaderdump")) return g_diag.shaderDump;
-    else if (!std::strcmp(key, "nomerge")) return g_diag.noMerge;
-    else if (!std::strcmp(key, "uvlog")) return g_diag.uvLog;
-    else if (!std::strcmp(key, "mtxlog")) return g_diag.mtxLog;
-    else if (!std::strcmp(key, "perftimer")) return g_diag.perfTimer;
-    else if (!std::strcmp(key, "arrayup")) return g_diag.arrayUp;
-    else if (!std::strcmp(key, "profile")) return g_diag.profile;
-    else if (!std::strcmp(key, "cpthread")) return g_diag.cpThread;
-    else if (!std::strcmp(key, "gxworker")) return g_diag.gxWorker;
-    else if (!std::strcmp(key, "gxdefer")) return g_diag.gxDefer;
-    return false;
+    const DiagKey* entry = find_diag_key(key);
+    return entry && (g_diag.*(entry->field)).load();
 }
 
 // diag_present_count (dk.h): R.presents for "[diag]" log markers written

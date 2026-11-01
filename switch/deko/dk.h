@@ -181,8 +181,8 @@ struct Diag {
     std::atomic<bool> cullOff = false;   // rasterizer cull mode forced to None at every pipeline bind
     std::atomic<bool> magenta = false;   // the swapchain image is cleared magenta before every present blit
     std::atomic<bool> picDump = false;   // the picture is read back at a few presents and its content logged
-    std::atomic<bool> efbClear = false;
-    std::atomic<bool> bufDump = false;   // at a few presents (GPU idle), every buffer's size, usage and non-zero bytes  // colour clears of passes with a depth target (the EFB) are magenta
+    std::atomic<bool> efbClear = false;  // colour clears of passes with a depth target (the EFB) are magenta
+    std::atomic<bool> bufDump = false;   // at a few presents (GPU idle), every buffer's size, usage and non-zero bytes
     std::atomic<bool> texDump = false;   // the most-sampled textures are read back to files at a few presents
     std::atomic<bool> shaderDump = false;   // every translated shader: its WGSL and GLSL are saved as it compiles
     std::atomic<bool> noMerge = false;   // Aurora draw merging off (sets NSMBW_NO_MERGE=1 before the first draw)
@@ -199,11 +199,11 @@ extern Diag g_diag;
 void diag_init();
 // Sets one switch by its dk_diag.txt name ("depth_off", "nomerge", ...), at runtime: the
 // interposer switches flip here, the six Aurora switches are forwarded to Aurora's own flags
-// (dk_aurora.h), and the profile switch to the runtime's guest profiler. False for an unknown
-// name. Any thread.
+// (dk_aurora.h), the profile switch to the runtime's guest profiler, and the GX record switches
+// to the record ring. False for an unknown name. Any thread.
 bool diag_set(const char* key, bool on);
 // The read side of diag_set: the current state of one switch by name, for the Switch
-// settings menu's Developer rows. Unknown names read as off.
+// settings menu's Diagnostics rows. Unknown names read as off.
 bool diag_get(const char* key);
 // R.presents, for "[diag]" log markers written outside device.cpp.
 uint64_t diag_present_count();
