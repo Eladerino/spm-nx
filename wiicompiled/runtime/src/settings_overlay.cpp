@@ -485,6 +485,12 @@ uint64_t g_presentedFrame = 0;
 std::atomic_bool g_strapInputAccepted = false;
 std::atomic_uint64_t g_startupDismissFrame = UINT64_MAX;
 constexpr uint64_t kStrapTransitionCoverFrames = 60;
+// The title card holds for a static few seconds before the press prompt can show, so
+// the arrival reads as a deliberate loading beat instead of
+// landing whenever the boot sequence happens to finish. A floor only: on a slow boot the
+// shader and sequence terms keep the cover up longer anyway, and an early press is still
+// accepted underneath, so the hold never makes the player wait past it.
+constexpr uint64_t kTitleCardMinHoldFrames = 180;
 std::atomic_bool g_bootShadersReady = false;
 bool g_bootShaderNotice = false;
 Clock::time_point g_bootShaderWaitStart{};
@@ -4642,6 +4648,7 @@ bool StartupScreenVisible() noexcept {
     return !g_strapInputAccepted.load(std::memory_order_acquire) ||
            !g_bootShadersReady.load(std::memory_order_acquire) ||
            g_presentedFrame < g_startupDismissFrame.load(std::memory_order_relaxed) ||
+           g_presentedFrame < kTitleCardMinHoldFrames ||
            SpmMapSweep::Seq() == 0;
 }
 
