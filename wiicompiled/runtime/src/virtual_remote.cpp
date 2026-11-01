@@ -159,6 +159,9 @@ enum PadStyle { kXbox, kPlayStation, kNintendo, kPadStyleCount };
 // Defaults per style, in Keybinds order: the same jobs the GameCube-pad route gave each position
 // (bottom = 2/jump, left and right = 1, top = A, start = +, back/LB/LT = -, RB/RT = shake, right
 // stick = tilt). Nintendo pads jump with both B and A (bottom and right), like Mario games there.
+// Nintendo exception (Brandon's call, Nov 1, after hands-on with the positional layout): its A and
+// 1 defaults are swapped (left = A, top = 1), keeping the feel of the port's first release, whose
+// letter-based shim had put A on the left button and 1 on the top one and which he had learned.
 constexpr const char* kPadStyleNames[kPadStyleCount] = {"xbox", "playstation", "nintendo"};
 constexpr const char* kPadDefaults[Keybinds::kActionCount][kPadStyleCount] = {
     {"lefty-,dpup", "lefty-,dpup", "lefty-,dpup"},
@@ -166,8 +169,8 @@ constexpr const char* kPadDefaults[Keybinds::kActionCount][kPadStyleCount] = {
     {"leftx-,dpleft", "leftx-,dpleft", "leftx-,dpleft"},
     {"leftx+,dpright", "leftx+,dpright", "leftx+,dpright"},
     {"a", "a", "a,b"},
-    {"b,x", "b,x", "x"},
-    {"y", "y", "y"},
+    {"b,x", "b,x", "y"},
+    {"y", "y", "x"},
     {"rightshoulder,righttrigger", "rightshoulder,righttrigger", "rightshoulder,righttrigger"},
     {"", "", ""},  // tilt: SPM gameplay never reads it; the right stick aims the pointer instead
     {"", "", ""},

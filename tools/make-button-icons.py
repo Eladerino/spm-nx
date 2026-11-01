@@ -38,7 +38,7 @@ STYLES = {
                     "A": "playstation_button_color_triangle", "+": "playstation5_button_options",
                     "-": "playstation5_button_create", "stick": "playstation_stick_r", "stick_l": "playstation_stick_l", "shake": "playstation_trigger_r1",
                     "controller": "controller_playstation5"},
-    "nintendo": {"2": "switch_button_b", "1": "switch_button_y", "A": "switch_button_x", "stick": "switch_stick_r", "stick_l": "switch_stick_l", "shake": "switch_button_r",
+    "nintendo": {"2": "switch_button_b", "1": "switch_button_x", "A": "switch_button_y", "stick": "switch_stick_r", "stick_l": "switch_stick_l", "shake": "switch_button_r",
                  "controller": "controller_switch_pro"},
 }
 
@@ -91,7 +91,7 @@ BUTTON_SPOTS = {
              "tippi": (0.58, 0.514)},
     "playstation": {"move": (0.358, 0.499), "flip": (0.792, 0.242), "jump": (0.792, 0.422), "pixl": (0.853, 0.333),
                     "tippi": (0.641, 0.499)},
-    "nintendo": {"move": (0.236, 0.28), "flip": (0.763, 0.222), "jump": (0.763, 0.397), "pixl": (0.682, 0.31),
+    "nintendo": {"move": (0.236, 0.28), "flip": (0.682, 0.31), "jump": (0.763, 0.397), "pixl": (0.763, 0.222),
                  "tippi": (0.621, 0.513)},
 }
 
@@ -316,11 +316,11 @@ def build_clean(out_root):
     artwork into the marker2 files and redraws the 3-6 bubbles from it; that is game art, so it
     stays out of the package, and those textures are simply not missed under the panel.
 
-    The panel data follows the position-based defaults in virtual_remote.cpp directly: the
-    Switch pad layer reports buttons by position (switch/sdl3_shim/sdl3_shim_gamepad.c), so
-    Wii A (Flip) is the pad's north button, printed X, and Wii 1 (Use a Pixl) is its west
-    button, printed Y. Jump's picture is unchanged (Wii 2 is the pad's B and A alike; the
-    panel points at B)."""
+    The panel data follows the defaults in virtual_remote.cpp directly: the Switch pad layer
+    reports buttons by position (switch/sdl3_shim/sdl3_shim_gamepad.c), and the Nintendo
+    defaults (Brandon's Nov 1 call) put Wii A (Flip) on the pad's west button, printed Y, and
+    Wii 1 (Use a Pixl) on its north button, printed X, the feel of the port's first release.
+    Jump's picture is unchanged (Wii 2 is the pad's B and A alike; the panel points at B)."""
     style = "nintendo"
     out = os.path.join(out_root, style)
     shutil.rmtree(out, ignore_errors=True)
@@ -340,8 +340,8 @@ def build_clean(out_root):
     # the pack's 8x size and saved at 4x under their own names, like the full set, so the in-game
     # prompts they belong to (the button glyphs inside text boxes, the shake prompt's icon) show
     # Switch buttons in the package too. The glyphs' pictures follow STYLES directly, which
-    # follows virtual_remote.cpp's position-based defaults (Wii 1 = west, printed Y; Wii A =
-    # north, printed X), and the pad layer now reports buttons by the same positions.
+    # follows virtual_remote.cpp's Nintendo defaults (Wii 1 = north, printed X; Wii A = west,
+    # printed Y), while the pad layer reports buttons by position underneath either way.
     for name, kind, buttons in TEXTURES:
         if kind not in PROMPT_CLEAN_KINDS:
             continue
