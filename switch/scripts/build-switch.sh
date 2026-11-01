@@ -115,6 +115,7 @@ else
             for f in controller.png panel.txt buttons.txt tex1_464x288_36a6f13147d63352_14.png \
                      tex1_40x40_21ecf92a70736554_14.png tex1_40x40_db14bc3d6c7b16a5_14.png \
                      tex1_40x40_e73bd2aadadde9d9_14.png tex1_96x40_61b1a30a17d36df5_5.png \
+                     tex1_40x40_c4a6d5884f8e8519_5.png tex1_40x40_341c9fd2189acc61_5.png \
                      ui/move.png ui/flip.png ui/jump.png ui/pixl.png ui/tippi.png ui/stylish.png \
                      ui/buttons/a.png ui/buttons/b.png ui/buttons/x.png ui/buttons/y.png ui/buttons/rightshoulder.png \
                      ui/buttons/righttrigger.png ui/buttons/leftstick.png ui/buttons/rightstick.png \
