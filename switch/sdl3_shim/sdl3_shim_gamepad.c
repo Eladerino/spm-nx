@@ -4,10 +4,12 @@
 // thread that polls events; the getters read that sample, so any thread may
 // call them.
 //
-// Buttons map by label, so the game's on-screen prompts match the controller:
-// Switch A is SDL "south", which Aurora's PAD maps to GameCube A, B to B, X to
-// X and Y to Y. ZL/ZR are the analog-trigger axes (GameCube L/R) and R is the
-// right shoulder (GameCube Z).
+// Buttons map by position, the SDL convention: south is SDL "south" whatever
+// letter is printed on it, so Switch B is "south", A is "east", Y is "west" and
+// X is "north". Consumers that show a button (prompts, the Controls panel, the
+// settings menu's labels) translate the position into the Switch's printed
+// letter at that seat. ZL/ZR are the analog-trigger axes (GameCube L/R) and R
+// is the right shoulder (GameCube Z).
 #include <SDL3/SDL.h>
 #include <stdio.h>
 #include <string.h>
@@ -50,10 +52,10 @@ static const struct {
     SDL_GamepadButton button;
     u64 mask;
 } kButtons[] = {
-    {SDL_GAMEPAD_BUTTON_SOUTH, HidNpadButton_A},
-    {SDL_GAMEPAD_BUTTON_EAST, HidNpadButton_B},
-    {SDL_GAMEPAD_BUTTON_WEST, HidNpadButton_X},
-    {SDL_GAMEPAD_BUTTON_NORTH, HidNpadButton_Y},
+    {SDL_GAMEPAD_BUTTON_SOUTH, HidNpadButton_B},
+    {SDL_GAMEPAD_BUTTON_EAST, HidNpadButton_A},
+    {SDL_GAMEPAD_BUTTON_WEST, HidNpadButton_Y},
+    {SDL_GAMEPAD_BUTTON_NORTH, HidNpadButton_X},
     {SDL_GAMEPAD_BUTTON_BACK, HidNpadButton_Minus},
     {SDL_GAMEPAD_BUTTON_START, HidNpadButton_Plus},
     {SDL_GAMEPAD_BUTTON_LEFT_STICK, HidNpadButton_StickL},
