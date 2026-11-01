@@ -26,6 +26,13 @@ namespace GuestProfiler {
 void SetSwitchProfileEnabled(bool enabled);
 }
 
+// The runtime's GX record ring (gx_worker.h), declared here the same way: the gxworker and gxdefer
+// switches pick its mode, which it applies at the next frame boundary.
+namespace GxWorker {
+enum class Mode : uint8_t;
+void RequestMode(Mode mode) noexcept;
+}
+
 namespace swdk {
 
 Renderer R;
@@ -52,7 +59,15 @@ void diag_read_file(FILE* f) {
         if (std::strstr(line, "arrayup")) g_diag.arrayUp = !off;
         if (std::strstr(line, "profile")) g_diag.profile = !off;
         if (std::strstr(line, "cpthread")) g_diag.cpThread = !off;
+        if (std::strstr(line, "gxworker")) g_diag.gxWorker = !off;
+        if (std::strstr(line, "gxdefer")) g_diag.gxDefer = !off;
     }
+}
+
+// gxdefer wins over gxworker: 2 (Deferred), 1 (Immediate), 0 (off), as in gx_worker.h.
+void apply_gx_worker_mode() {
+    const uint8_t mode = g_diag.gxDefer ? 2 : (g_diag.gxWorker ? 1 : 0);
+    GxWorker::RequestMode(static_cast<GxWorker::Mode>(mode));
 }
 } // namespace
 
@@ -89,11 +104,14 @@ void diag_init() {
     // No env var for the decode thread: Aurora reads the request at each frame's end, so setting
     // it now has it take over from the first frame's end.
     if (g_diag.cpThread) aurora::gx::fifo::set_decode_thread_requested(true);
-    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d nomerge=%d uvlog=%d mtxlog=%d perftimer=%d arrayup=%d profile=%d cpthread=%d",
+    // The GX record ring takes its mode at the first frame boundary, before any guest frame ends.
+    apply_gx_worker_mode();
+    dklog("diag: depth_off=%d cull_off=%d magenta=%d picdump=%d efbclear=%d bufdump=%d texdump=%d shaderdump=%d nomerge=%d uvlog=%d mtxlog=%d perftimer=%d arrayup=%d profile=%d cpthread=%d gxworker=%d gxdefer=%d",
           g_diag.depthOff ? 1 : 0, g_diag.cullOff ? 1 : 0, g_diag.magenta ? 1 : 0, g_diag.picDump ? 1 : 0,
           g_diag.efbClear ? 1 : 0, g_diag.bufDump ? 1 : 0, g_diag.texDump ? 1 : 0, g_diag.shaderDump ? 1 : 0,
           g_diag.noMerge ? 1 : 0, g_diag.uvLog ? 1 : 0, g_diag.mtxLog ? 1 : 0, g_diag.perfTimer ? 1 : 0,
-          g_diag.arrayUp ? 1 : 0, g_diag.profile ? 1 : 0, g_diag.cpThread ? 1 : 0);
+          g_diag.arrayUp ? 1 : 0, g_diag.profile ? 1 : 0, g_diag.cpThread ? 1 : 0, g_diag.gxWorker ? 1 : 0,
+          g_diag.gxDefer ? 1 : 0);
     // A profile=1 in dk_diag.txt starts the sampler now. Renderer init runs before the guest
     // starts, so the session covers the boot too; samples resolve at report time, so nothing
     // about the early start hurts attribution. The clean session is still the menu toggle:
@@ -139,6 +157,12 @@ bool diag_set(const char* key, bool on) {
     } else if (!std::strcmp(key, "cpthread")) {
         g_diag.cpThread = on;
         aurora::gx::fifo::set_decode_thread_requested(on);
+    } else if (!std::strcmp(key, "gxworker")) {
+        g_diag.gxWorker = on;
+        apply_gx_worker_mode();
+    } else if (!std::strcmp(key, "gxdefer")) {
+        g_diag.gxDefer = on;
+        apply_gx_worker_mode();
     } else {
         return false;
     }
@@ -166,6 +190,8 @@ bool diag_get(const char* key) {
     else if (!std::strcmp(key, "arrayup")) return g_diag.arrayUp;
     else if (!std::strcmp(key, "profile")) return g_diag.profile;
     else if (!std::strcmp(key, "cpthread")) return g_diag.cpThread;
+    else if (!std::strcmp(key, "gxworker")) return g_diag.gxWorker;
+    else if (!std::strcmp(key, "gxdefer")) return g_diag.gxDefer;
     return false;
 }
 

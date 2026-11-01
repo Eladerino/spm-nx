@@ -1,10 +1,9 @@
 // gx_egg.cpp - EGG Library Helper Stubs
 #include "gx_internal.h"
+#include "runtime_log.h"
 
 // Vertex helper declarations not used by the direct-call catalog.
 extern "C" void GX__SetArray_8016e32c(uint32_t a, uint32_t ba, uint32_t str);
-extern "C" void GX_HLE_FIFO_WriteFloat(float val);
-extern "C" void GX_HLE_FIFO_Write8(uint8_t val);
 
 // ============================================================================
 // EGG::DrawGX Functions
@@ -102,10 +101,15 @@ extern "C" void EGG__LightTexture__SetupTevFinish_HLE_8022e2bc(CpuContext* ctx) 
             const float end = static_cast<float>(origin + span);
             const float lower = static_cast<float>(origin - span);
 
+            // Straight into the HLE FIFO, not through the guest store entry points: this body runs
+            // its GX calls in place (it is an Inline native), so its vertices must not become records.
             auto writeVertex = [](uint8_t posIdx, float s, float t) {
-                GX_HLE_FIFO_Write8(posIdx);
-                GX_HLE_FIFO_WriteFloat(s);
-                GX_HLE_FIFO_WriteFloat(t);
+                uint32_t sBits = 0, tBits = 0;
+                std::memcpy(&sBits, &s, 4);
+                std::memcpy(&tBits, &t, 4);
+                HleFifoWrite(posIdx, 1);
+                try { HleFifoWrite(sBits, 4); } catch (...) { RT_LOGF(RT_TAG_GX, "FIFO write float failed\n"); }
+                try { HleFifoWrite(tBits, 4); } catch (...) { RT_LOGF(RT_TAG_GX, "FIFO write float failed\n"); }
             };
 
             GX__Begin_8016f0f0(GX_QUADS, GX_VTXFMT0, 4);
