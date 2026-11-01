@@ -2,6 +2,9 @@
 #include "gx_stream_common.h"
 #include "gx_cp_decode.h"
 #include "isa/big_endian.h"
+#include "gx_worker.h"
+
+#include <new>
 
 // Opcode constants and the stream helpers this file shares with gx_dl.cpp /
 // gx_vertex.cpp; see gx_stream_common.h.
@@ -788,12 +791,7 @@ static bool WriteDisplayListBurst(const uint8_t* data, uint32_t sizeBytes) {
     return true;
 }
 
-extern "C" void GX_HLE_FIFO_WriteBurst(const uint8_t* data, uint32_t sizeBytes) {
-    if (data == nullptr || sizeBytes == 0) {
-        return;
-    }
-    s_fifoBurstCalls.Hit();
-
+static void RunFifoBurst(const uint8_t* data, uint32_t sizeBytes) {
     if (IsDisplayListActive() && WriteDisplayListBurst(data, sizeBytes)) {
         return;
     }
@@ -802,4 +800,43 @@ extern "C" void GX_HLE_FIFO_WriteBurst(const uint8_t* data, uint32_t sizeBytes) 
     if (applied < sizeBytes) {
         HleFifoWriteBurstChunked(data + applied, sizeBytes - applied);
     }
+}
+
+// A burst under the GX worker (gx_worker.h): the record holds a copy of the stored bytes, since the
+// translated code's staging buffer is reused as soon as this returns.
+struct FifoBurstRecord {
+    uint32_t size;
+    uint32_t pad;
+};
+
+static void ReplayFifoBurst(void* payload) {
+    const FifoBurstRecord* record = static_cast<const FifoBurstRecord*>(payload);
+    RunFifoBurst(reinterpret_cast<const uint8_t*>(record + 1), record->size);
+}
+
+static bool RecordFifoBurst(const uint8_t* data, uint32_t sizeBytes) {
+    if (!GxWorker::CanRecord()) {
+        GxWorker::Drain();
+        return false;
+    }
+    void* payload = GxWorker::Reserve(&ReplayFifoBurst, sizeof(FifoBurstRecord) + sizeBytes, alignof(FifoBurstRecord));
+    if (payload == nullptr) {
+        GxWorker::Drain();
+        return false;
+    }
+    FifoBurstRecord* record = new (payload) FifoBurstRecord{sizeBytes, 0};
+    std::memcpy(record + 1, data, sizeBytes);
+    GxWorker::Commit();
+    return true;
+}
+
+extern "C" void GX_HLE_FIFO_WriteBurst(const uint8_t* data, uint32_t sizeBytes) {
+    if (data == nullptr || sizeBytes == 0) {
+        return;
+    }
+    s_fifoBurstCalls.Hit();
+    if (GxWorker::Engaged() && RecordFifoBurst(data, sizeBytes)) {
+        return;
+    }
+    RunFifoBurst(data, sizeBytes);
 }

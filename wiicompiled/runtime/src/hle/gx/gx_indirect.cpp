@@ -18,9 +18,14 @@ extern "C" void GX__SetIndTexCoordScale_80171968(uint32_t s, uint32_t ss, uint32
 }
 PPC_NATIVE_OVERRIDE_VOID(8028FB74, GX__SetIndTexCoordScale_80171968, (uint32_t s, uint32_t ss, uint32_t ts), (s, ss, ts));
 
-extern "C" void GX__SetIndTexMtx_80171814(uint32_t id, uint32_t ma, uint32_t se) {
-    float m[6]; for(int i=0; i<6; ++i) m[i]=Memory::ReadFloat32(ma+i*4);
+// The GX part of GXSetIndTexMtx, on the matrix's guest bytes (or the GX worker's copy of them).
+static void SetIndTexMtxFrom(const uint8_t* raw, uint32_t id, uint32_t se) {
+    float m[6]; for(int i=0; i<6; ++i) m[i]=BigEndian::ReadFloat32(raw+i*4);
     GXSetIndTexMtx((GXIndTexMtxID)id, m, (s8)se);
+}
+
+extern "C" void GX__SetIndTexMtx_80171814(uint32_t id, uint32_t ma, uint32_t se) {
+    GxWorker::DeferOrRun<&SetIndTexMtxFrom>(Memory::GetPointer(ma, 24), 24, id, se);
 }
 PPC_NATIVE_OVERRIDE_VOID(8028FA20, GX__SetIndTexMtx_80171814, (uint32_t id, uint32_t ma, uint32_t se), (id, ma, se));
 

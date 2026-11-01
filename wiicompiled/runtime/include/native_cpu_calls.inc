@@ -46,7 +46,12 @@ extern "C" void GX__SetCurrentMtx_80173214(uint32_t id);
 #define MKW_KNOWN_TYPED_NATIVE(addr, fn, ...) \
 template <> struct KnownTypedNativeCpuCall<addr> { \
     static constexpr bool kAvailable = true; \
-    static void Invoke(CpuContext* cpu) { (void)cpu; NativeOverrideCalls<addr>.Hit(); fn(__VA_ARGS__); } \
+    static void Invoke(CpuContext* cpu) { \
+        (void)cpu; \
+        NativeOverrideCalls<addr>.Hit(); \
+        if (GxWorker::Engaged() && GxWorker::DispatchCall<addr, &fn>(__VA_ARGS__)) return; \
+        fn(__VA_ARGS__); \
+    } \
 }
 
 MKW_KNOWN_TYPED_NATIVE(0x8028B638u, GX__SetVtxDesc_8016d3a4, cpu->gpr[3], cpu->gpr[4]);

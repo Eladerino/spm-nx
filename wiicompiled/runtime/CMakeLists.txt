@@ -438,6 +438,18 @@ target_link_libraries(mkw_platform_paths_tests PRIVATE mkw_platform)
 target_compile_features(mkw_platform_paths_tests PRIVATE cxx_std_17)
 add_test(NAME mkw_platform_paths_tests COMMAND mkw_platform_paths_tests)
 
+# The GX worker's record ring on its own (tests/gx_worker_tests.cpp supplies the one GX hook it
+# calls). A host test only: nothing in it needs the console to run.
+if(NOT MKW_PLATFORM_SWITCH)
+    add_executable(mkw_gx_worker_tests
+        "${CMAKE_CURRENT_LIST_DIR}/tests/gx_worker_tests.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/hle/gx/gx_worker.cpp")
+    target_include_directories(mkw_gx_worker_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+    target_compile_features(mkw_gx_worker_tests PRIVATE cxx_std_20)
+    set_target_properties(mkw_gx_worker_tests PROPERTIES UNITY_BUILD OFF)
+    add_test(NAME mkw_gx_worker_tests COMMAND mkw_gx_worker_tests)
+endif()
+
 add_executable(mkw_runtime_config_tests "${CMAKE_CURRENT_LIST_DIR}/tests/runtime_config_tests.cpp")
 target_include_directories(mkw_runtime_config_tests PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/include"
