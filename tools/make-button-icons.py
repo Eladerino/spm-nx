@@ -53,7 +53,8 @@ TEXTURES = [
     ("tex1_200x152_8394740b60e9c228_5.png", "disc", [("1", 0.24, 0.547, 0.08)]),
     ("tex1_208x48_3566a7d381dc2f35_5.png", "disc", [("1", 0.115, 0.50, 0.045), ("2", 0.321, 0.50, 0.045)]),
     ("tex1_40x40_1d6fdad80b7dcd8a_14.png", "disc", [("-", 0.5, 0.5, 0.5)]),
-    ("tex1_40x40_341c9fd2189acc61_5.png", "disc", [("2", 0.5, 0.5, 0.5)]),
+    ("tex1_40x40_c4a6d5884f8e8519_5.png", "plaindisc", [("1", 0.5, 0.5, 0.5)]),
+    ("tex1_40x40_341c9fd2189acc61_5.png", "plaindisc", [("2", 0.5, 0.5, 0.5)]),
     ("tex1_48x48_42bca1c8ab4b3dfb_5.png", "disc", [("A", 0.5, 0.5, 0.5)]),
     ("tex1_40x40_21ecf92a70736554_14.png", "glyph", [("1", 0.5, 0.5, 0.5)]),
     ("tex1_40x40_db14bc3d6c7b16a5_14.png", "glyph", [("2", 0.5, 0.5, 0.5)]),
@@ -77,12 +78,13 @@ MARKERS = {"tex1_248x184_fd844c6227d275cf_5.png": 2, "tex1_248x200_55ef64a9d7e80
            "tex1_200x152_8394740b60e9c228_5.png": 5, "tex1_168x136_42b4c0a037f4bbee_5.png": 6}
 
 # Prompt textures whose render never reads the pack artwork it replaces: "glyph" paints the whole
-# texture white before drawing, "shake" builds a new transparent picture, so both come out the same
-# from a blank canvas at the pack's size, and the clean set can ship them. Every other kind draws
+# texture white before drawing, "shake" builds a new transparent picture, "plaindisc" redraws its
+# white disc whole, so all three come out the same from a blank canvas at the pack's size, and the
+# clean set can ship them. Every other kind draws
 # on the artwork itself (disc, face, tippi) or is the artwork (none), so those stay full-set only.
 # None of these four is a marker texture: the full set saves them at the style's root, and so does
 # the clean set.
-PROMPT_CLEAN_KINDS = ("glyph", "shake")
+PROMPT_CLEAN_KINDS = ("glyph", "shake", "plaindisc")
 
 # Where each action's button is on the controller picture (fractions of controller.png): Move = left stick, Flip = top
 # face button, Jump = bottom, Use a Pixl = the 1 button's, Use Tippi = right stick. The panel's callouts point there.
@@ -229,6 +231,16 @@ def render(src, kind, buttons, style, names=None):
             at = ((w - icon.width) // 2, (h - icon.height) // 2)
             img.alpha_composite(solid((20, 20, 20, 255), icon.getchannel("A")), at)
             img.alpha_composite(solid((255, 255, 255, 255), holes(icon)), at)
+        elif kind == "plaindisc":  # a lone white disc on transparency (the in-menu 1/2 discs): redrawn whole
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            m = w * 0.04
+            ring = w * 0.085
+            draw.ellipse([m, m, w - m, h - m], fill="#141414")
+            draw.ellipse([m + ring, m + ring, w - m - ring, h - m - ring], fill="#FFFFFF")
+            size = int(w * 0.62)
+            img.alpha_composite(solid((156, 156, 156, 255), holes(render_svg(style, name, size))),
+                                ((w - size) // 2, (h - size) // 2))
         elif kind == "disc":
             x0, y0, x1, y1 = dark_bbox(img, fx * w, fy * h, fr * max(w, h), 150 if button in "+-" else 90)
             pad = (x1 - x0) * 0.05
