@@ -326,6 +326,19 @@ extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t co
     }
     WiiRemoteInput::KpadSample sample;
     const bool have = ReadSample(chan, sample);
+    {   // Boot-input diagnostic: the logo sequence polls KPAD 4x a frame yet presses never
+        // advance it (the title arrives at about 33 s regardless). Log what a chan-0 read
+        // hands back once a second and on any press, for roughly the first minute of reads.
+        static uint32_t bootReads = 0;
+        if (chan == 0 && bootReads < 16000) {
+            ++bootReads;
+            if (bootReads % 240 == 1 || (have && sample.hold != 0)) {
+                RT_LOGF(RT_TAG_RUNTIME, "[bootinput] read %u have %d hold %08X frameinput %d cover %d\n",
+                        bootReads, have ? 1 : 0, have ? sample.hold : 0u,
+                        FrameInput::Active() ? 1 : 0, settings_overlay::StartupScreenVisible() ? 1 : 0);
+            }
+        }
+    }
     try {
         return WriteStatus(chan, statusPtr, have ? &sample : nullptr);
     } catch (const Memory::AccessViolation&) {
