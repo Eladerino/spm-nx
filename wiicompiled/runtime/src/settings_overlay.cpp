@@ -4311,9 +4311,15 @@ void Draw() noexcept {
 }
 
 bool StartupScreenVisible() noexcept {
+    // The cover also stays up through the game's own boot sequence (Seq 0, the Wii Remote
+    // strap/sideways screen): on Switch that screen is meaningless, so the card covers it and
+    // lifts onto the title screen instead (Brandon's call, Nov 1). The press that dismisses
+    // the card is not swallowed (frame_input only notifies), so the game still gets the A/2
+    // press it waits for and advances underneath.
     return !g_strapInputAccepted.load(std::memory_order_acquire) ||
            !g_bootShadersReady.load(std::memory_order_acquire) ||
-           g_presentedFrame < g_startupDismissFrame.load(std::memory_order_relaxed);
+           g_presentedFrame < g_startupDismissFrame.load(std::memory_order_relaxed) ||
+           SpmMapSweep::Seq() == 0;
 }
 
 void NotifyStrapInputAccepted() noexcept {
