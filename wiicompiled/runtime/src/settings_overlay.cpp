@@ -821,8 +821,13 @@ struct RebindState {
 // Switch settings menu's Controls tab used for the same table.
 int g_optGamepadCapture = -1;  // gamepad row (action * 2 + slot) waiting for an input, or -1
 
+// Display names for the [gamepad] actions. The config grammar keeps the inherited keys
+// ("run", "a", "plus", "minus"), but the menu names what each input actually does in SPM:
+// Wii 1 uses a Pixl and cancels, Wii A flips and works Tippi, Plus opens the pause menu and
+// Minus opens the game's Controls screen.
 const char* const kGamepadActionLabels[] = {
-    "Up", "Down", "Left", "Right", "Jump", "Run", "A", "Shake", "Tilt left", "Tilt right", "Plus", "Minus",
+    "Move up", "Move down", "Move left", "Move right", "Jump / Confirm", "Use a Pixl / Cancel", "Flip / Use Tippi",
+    "Shake", "Tilt left", "Tilt right", "Pause menu", "Controls screen",
 };
 
 std::vector<std::string> SplitBindingNames(const std::string& text) {
@@ -3943,6 +3948,11 @@ std::vector<OptRow> OptionsRows(int tab) {
             auto* pad = index >= 0 ? PADGetSDLGamepadForIndex(static_cast<uint32_t>(index)) : nullptr;
             const int style = pad != nullptr ? VirtualRemote::PadStyleOf(pad) : 2;
             for (int action = 0; action < 12; ++action) {
+                // Tilt left/right (actions 8 and 9) get no rows (Brandon's call, Nov 1): SPM's main
+                // game never reads tilt, their defaults are unbound, and the arcade games that
+                // steer by tilt take it from the left stick and the motion sensor. The reset row
+                // below still covers them.
+                if (action == 8 || action == 9) continue;
                 const std::vector<std::string> names = GamepadBindingNames(style, action);
                 for (int slot = 0; slot < 2; ++slot) {
                     const int idx = action * 2 + slot;
