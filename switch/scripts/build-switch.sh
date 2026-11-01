@@ -108,14 +108,13 @@ else
            python3 "$root/tools/make-button-icons.py" --clean --out "$icons_gen"; then
             # The folder is all generated content, so rebuild it from scratch: copying
             # over the top let files the staging lists had dropped live on in the
-            # staged set (the four shared marker7 textures cut on Nov 1 were still
-            # being carried this way, still tripping the demo prompt everywhere).
+            # staged set.
             rm -rf "$icons_dest"
             mkdir -p "$icons_dest/nintendo/ui" "$icons_dest/nintendo/ui/buttons" "$icons_dest/nintendo/composite" \
                      "$icons_dest/nintendo/marker1" \
                      "$icons_dest/nintendo/marker2" "$icons_dest/nintendo/marker3" \
                      "$icons_dest/nintendo/marker4" "$icons_dest/nintendo/marker5" \
-                     "$icons_dest/nintendo/marker6" "$icons_dest/nintendo/marker7"
+                     "$icons_dest/nintendo/marker6"
             cp "$root/tools/button-art/Kenney-License.txt" "$icons_dest/"
             for f in controller.png panel.txt buttons.txt tex1_464x288_36a6f13147d63352_14.png \
                      tex1_40x40_21ecf92a70736554_14.png tex1_40x40_db14bc3d6c7b16a5_14.png \
@@ -133,17 +132,7 @@ else
                      marker3/tex1_152x144_eba7359cd27cf8b6_5.png \
                      marker4/tex1_176x168_6208c1ec2d692b4f_5.png \
                      marker5/tex1_200x152_8394740b60e9c228_5.png \
-                     marker6/tex1_168x136_42b4c0a037f4bbee_5.png \
-                     marker7/tex1_40x40_1d6fdad80b7dcd8a_14.png \
-                     marker7/tex1_40x40_ba5a00dad5242ff6_14.png \
-                     marker7/tex1_40x40_cbfb60592791075d_14.png \
-                     marker7/tex1_40x40_f5cacaa9307af129_14.png \
-                     marker7/tex1_64x64_9e627a1a399a4c12_14.png \
-                     marker7/tex1_8x40_c50770f50b582d49_5.png \
-                     marker7/tex1_16x64_3e38070014458ae9_0.png \
-                     marker7/tex1_128x128_5ba2d8b06b8af6e5_0.png \
-                     marker7/tex1_40x40_598499bc2848b57b_5.png \
-                     marker7/tex1_132x132_35b17425ddd47d4d_14.png; do
+                     marker6/tex1_168x136_42b4c0a037f4bbee_5.png; do
                 cp "$icons_gen/nintendo/$f" "$icons_dest/nintendo/$f"
             done
             # The runtime compositor's overlays (generator composite/): just the new buttons for
