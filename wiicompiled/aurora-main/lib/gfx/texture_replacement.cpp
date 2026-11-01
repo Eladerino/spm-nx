@@ -16,8 +16,10 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <list>
 #include <memory>
 #include <new>
@@ -77,6 +79,17 @@ absl::flat_hash_map<RuntimeTextureKey, ReplacementIndexEntry> s_replacementIndex
 constexpr const char* kButtonIconStyles[] = {"xbox", "playstation", "nintendo", "common"};
 constexpr int kCommonIcons = 3;
 std::array<absl::flat_hash_map<RuntimeTextureKey, ReplacementIndexEntry>, 4> s_buttonIconIndex;
+
+// Runtime compositor overlays (button_icons/<style>/composite/, listed in its composite.txt):
+// transparent pictures holding only a prompt's new buttons, drawn over the effective texture
+// (the guest texture itself, or its full replacement) when a texture is resolved. This is what
+// lets the disc and face prompts ship without the HD pack's artwork: the generator cannot draw
+// them as replacement files, because their pictures live on the artwork they would replace.
+struct CompositeIndexEntry {
+  std::filesystem::path path;
+  std::string kind; // the generator's word for the prompt (disc, face); kept for log lines
+};
+std::array<absl::flat_hash_map<RuntimeTextureKey, CompositeIndexEntry>, 4> s_compositeIndex;
 std::atomic<int> s_buttonIconStyle{-1};
 std::atomic<bool> s_buttonIconStyleChanged{false};
 int s_appliedButtonIconStyle = -1;
@@ -89,6 +102,7 @@ std::array<TlutMetadata, MaxTluts> s_loadedTluts{};
 std::list<RuntimeTextureKey> s_replacementLru;
 std::filesystem::path s_replacementRoot;
 std::filesystem::path s_dumpRoot;
+std::filesystem::path s_compositeCacheRoot;
 uint64_t s_replacementCacheBytes = 0;
 constexpr uint64_t kReplacementCacheBudgetBytes = 4294967296; // 4GB, reasonable for modern hardware?
 constexpr uint64_t kReplacementWildcardTextureHash = 0xFFFFFFFFFFFFFFFFull;
@@ -524,6 +538,7 @@ void build_index() noexcept {
 
   s_replacementRoot = userPath / "texture_replacements";
   s_dumpRoot = cachePath / "texture_dumps";
+  s_compositeCacheRoot = cachePath / "texture_composites";
 
   if (!ensure_directory(s_replacementRoot)) {
     return;
@@ -598,6 +613,28 @@ void build_index() noexcept {
     }
     Log.info("Button icons '{}': {} textures", kButtonIconStyles[style], s_buttonIconIndex[style].size());
   }
+
+  // The compositor's overlays: only the files composite.txt lists are indexed (the manifest is
+  // the generator's word for which prompts have one), under the same texture keys as everything
+  // else. The composite/ folder itself is never scanned for replacements.
+  for (size_t style = 0; style < s_compositeIndex.size(); ++style) {
+    const auto dir = userPath / "button_icons" / kButtonIconStyles[style] / "composite";
+    std::ifstream manifest(dir / "composite.txt");
+    std::string line;
+    while (std::getline(manifest, line)) {
+      const size_t sep = line.find(' ');
+      if (sep == std::string::npos) {
+        continue;
+      }
+      const auto filename = line.substr(0, sep);
+      if (const auto parsed = parse_replacement_filename(filename); parsed.has_value()) {
+        s_compositeIndex[style].try_emplace(*parsed, CompositeIndexEntry{dir / filename, line.substr(sep + 1)});
+      }
+    }
+    if (!s_compositeIndex[style].empty()) {
+      Log.info("Button icon composites '{}': {} overlays", kButtonIconStyles[style], s_compositeIndex[style].size());
+    }
+  }
   // SPM_BUTTON_ICONS=xbox|playstation|nintendo pins a set (tests; scripted input never reaches the gamepad code).
   if (const char* forced = std::getenv("SPM_BUTTON_ICONS")) {
     for (size_t style = 0; style < kCommonIcons; ++style)
@@ -633,6 +670,19 @@ const ReplacementIndexEntry* find_replacement_path(const RuntimeTextureKey& key)
   return nullptr;
 }
 
+// The applied style's overlay for a texture, else the common one: the same order replacements
+// are looked up in. No wildcards: an overlay is drawn for one exact texture.
+const CompositeIndexEntry* find_composite_overlay(const RuntimeTextureKey& key) noexcept {
+  if (s_appliedButtonIconStyle >= 0) {
+    const auto& overlays = s_compositeIndex[s_appliedButtonIconStyle];
+    if (const auto it = overlays.find(key); it != overlays.end()) return &it->second;
+  }
+  if (const auto it = s_compositeIndex[kCommonIcons].find(key); it != s_compositeIndex[kCommonIcons].end()) {
+    return &it->second;
+  }
+  return nullptr;
+}
+
 const gfx::TextureHandle* find_cached_replacement(const RuntimeTextureKey& key) noexcept {
   const auto cached = s_replacementCache.find(key);
   if (cached == s_replacementCache.end()) {
@@ -643,17 +693,12 @@ const gfx::TextureHandle* find_cached_replacement(const RuntimeTextureKey& key) 
   return &cached->second.handle;
 }
 
-gfx::TextureHandle load_replacement_texture(const RuntimeTextureKey& key, const ReplacementIndexEntry& entry) noexcept {
-  const auto replacement = load_replacement(entry);
-  if (!replacement.has_value()) {
-    s_failedKeys.insert(key);
-    return {};
-  }
-
+gfx::TextureHandle create_replacement_handle(const RuntimeTextureKey& key, const ConvertedTexture& replacement,
+                                              uint8_t marker) noexcept {
   const auto label = fmt::format("TextureReplacement {}", format_replacement_filename(key));
   const wgpu::Extent3D size{
-      .width = replacement->width,
-      .height = replacement->height,
+      .width = replacement.width,
+      .height = replacement.height,
       .depthOrArrayLayers = 1,
   };
   const wgpu::TextureDescriptor textureDescriptor{
@@ -661,25 +706,163 @@ gfx::TextureHandle load_replacement_texture(const RuntimeTextureKey& key, const 
       .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
       .dimension = wgpu::TextureDimension::e2D,
       .size = size,
-      .format = replacement->format,
-      .mipLevelCount = replacement->mips,
+      .format = replacement.format,
+      .mipLevelCount = replacement.mips,
       .sampleCount = 1,
   };
   auto texture = g_device.CreateTexture(&textureDescriptor);
   const auto viewLabel = fmt::format("{} view", label);
   const wgpu::TextureViewDescriptor textureViewDescriptor{
       .label = viewLabel.c_str(),
-      .format = replacement->format,
+      .format = replacement.format,
       .dimension = wgpu::TextureViewDimension::e2D,
-      .mipLevelCount = replacement->mips,
+      .mipLevelCount = replacement.mips,
   };
   auto textureView = texture.CreateView(&textureViewDescriptor);
   auto handle = std::make_shared<gfx::TextureRef>(std::move(texture), std::move(textureView), wgpu::TextureView{}, size,
-                                                  replacement->format, replacement->mips, gfx::InvalidTextureFormat);
+                                                  replacement.format, replacement.mips, gfx::InvalidTextureFormat);
   handle->isReplacement = true;
-  handle->spmMarker = entry.marker;
-  gfx::write_texture(*handle, replacement->data);
+  handle->spmMarker = marker;
+  gfx::write_texture(*handle, replacement.data);
   return handle;
+}
+
+gfx::TextureHandle load_replacement_texture(const RuntimeTextureKey& key, const ReplacementIndexEntry& entry) noexcept {
+  const auto replacement = load_replacement(entry);
+  if (!replacement.has_value()) {
+    s_failedKeys.insert(key);
+    return {};
+  }
+  return create_replacement_handle(key, *replacement, entry.marker);
+}
+
+// The guest texture as RGBA8 pixels, decoded the way dump_editable_texture_dds decodes it.
+std::optional<ConvertedTexture> decode_guest_texture(const GXTexObj_& obj) noexcept {
+  const ArrayRef<uint8_t> texData{static_cast<const uint8_t*>(obj.data), UINT32_MAX};
+  ConvertedTexture pixels;
+  if (is_palette_format(obj.format())) {
+    const TlutMetadata* tlut = get_loaded_tlut(obj);
+    if (tlut == nullptr) {
+      return std::nullopt;
+    }
+    pixels = convert_texture_palette(obj.format(), obj.width(), obj.height(), 1, texData,
+                                     static_cast<GXTlutFmt>(tlut->format), tlut->entries,
+                                     {tlut->data.data(), tlut->data.size()});
+  } else {
+    pixels = convert_texture(obj.format(), obj.width(), obj.height(), 1, texData);
+  }
+  const uint64_t rgbaBytes = calc_texture_size(wgpu::TextureFormat::RGBA8Unorm, obj.width(), obj.height(), 1);
+  if (pixels.data.empty() || pixels.format != wgpu::TextureFormat::RGBA8Unorm || pixels.data.size() != rgbaBytes) {
+    return std::nullopt;
+  }
+  return pixels;
+}
+
+// Draw the overlay over the base (both RGBA8), the overlay scaled to the base's size: a bilinear
+// sample, then a plain alpha-over per pixel. The overlay is transparent away from its buttons, so
+// the base shows through untouched there.
+void composite_overlay_onto(ConvertedTexture& base, const ConvertedTexture& overlay) noexcept {
+  const int bw = static_cast<int>(base.width);
+  const int bh = static_cast<int>(base.height);
+  const int ow = static_cast<int>(overlay.width);
+  const int oh = static_cast<int>(overlay.height);
+  uint8_t* const dst = base.data.data();
+  const uint8_t* const src = overlay.data.data();
+  for (int y = 0; y < bh; ++y) {
+    const float gy = (static_cast<float>(y) + 0.5f) * static_cast<float>(oh) / static_cast<float>(bh) - 0.5f;
+    const int y0 = static_cast<int>(std::floor(gy));
+    const float fy = gy - static_cast<float>(y0);
+    const int ya = std::clamp(y0, 0, oh - 1);
+    const int yb = std::clamp(y0 + 1, 0, oh - 1);
+    for (int x = 0; x < bw; ++x) {
+      const float gx = (static_cast<float>(x) + 0.5f) * static_cast<float>(ow) / static_cast<float>(bw) - 0.5f;
+      const int x0 = static_cast<int>(std::floor(gx));
+      const float fx = gx - static_cast<float>(x0);
+      const int xa = std::clamp(x0, 0, ow - 1);
+      const int xb = std::clamp(x0 + 1, 0, ow - 1);
+      float s[4]{};
+      for (int c = 0; c < 4; ++c) {
+        const float top = static_cast<float>(src[(ya * ow + xa) * 4 + c]) * (1.0f - fx) +
+                          static_cast<float>(src[(ya * ow + xb) * 4 + c]) * fx;
+        const float bottom = static_cast<float>(src[(yb * ow + xa) * 4 + c]) * (1.0f - fx) +
+                             static_cast<float>(src[(yb * ow + xb) * 4 + c]) * fx;
+        s[c] = top * (1.0f - fy) + bottom * fy;
+      }
+      const float oa = s[3] / 255.0f;
+      if (oa <= 0.0f) {
+        continue;
+      }
+      uint8_t* const d = dst + (y * bw + x) * 4;
+      const float da = static_cast<float>(d[3]) / 255.0f;
+      const float outA = oa + da * (1.0f - oa);
+      if (outA <= 0.0f) {
+        d[0] = d[1] = d[2] = d[3] = 0;
+        continue;
+      }
+      for (int c = 0; c < 3; ++c) {
+        d[c] = static_cast<uint8_t>((s[c] * oa + static_cast<float>(d[c]) * da * (1.0f - oa)) / outA + 0.5f);
+      }
+      d[3] = static_cast<uint8_t>(outA * 255.0f + 0.5f);
+    }
+  }
+}
+
+std::filesystem::path composite_cache_path(const RuntimeTextureKey& key, bool packBase) noexcept {
+  const char* styleName = s_appliedButtonIconStyle >= 0 ? kButtonIconStyles[s_appliedButtonIconStyle] : "common";
+  auto dir = s_compositeCacheRoot / styleName / (packBase ? "pack" : "guest");
+  return dir / format_replacement_filename(key);
+}
+
+// The texture with the overlay drawn over the effective picture: the full replacement when there
+// is one (HD pack on), else the guest texture decoded. Only an RGBA8 base can be drawn over; a
+// compressed pack texture (BC) has no decoder here, so it keeps its artwork and the caller falls
+// back to the plain replacement. Composited results are cached as DDS under the cache path (the
+// replacement cache above them already keeps each texture to one composite per run), keyed apart
+// by base kind, and a cached file is only reused at the base's current size.
+gfx::TextureHandle load_composited_texture(const RuntimeTextureKey& key, const GXTexObj_& obj,
+                                           const ReplacementIndexEntry* entry,
+                                           const CompositeIndexEntry& overlayEntry) noexcept {
+  std::optional<ConvertedTexture> base;
+  if (entry != nullptr) {
+    base = load_replacement(*entry);
+    if (!base.has_value() || base->format != wgpu::TextureFormat::RGBA8Unorm) {
+      return {};
+    }
+  } else {
+    base = decode_guest_texture(obj);
+    if (!base.has_value()) {
+      s_failedKeys.insert(key);
+      return {};
+    }
+  }
+  const uint8_t marker = entry != nullptr ? entry->marker : 0;
+
+  const auto cachePath = composite_cache_path(key, entry != nullptr);
+  std::error_code ec;
+  if (std::filesystem::is_regular_file(cachePath, ec)) {
+    if (auto cached = load_texture_file(cachePath); cached.has_value() &&
+        cached->format == wgpu::TextureFormat::RGBA8Unorm && cached->width == base->width &&
+        cached->height == base->height) {
+      return create_replacement_handle(key, *cached, marker);
+    }
+  }
+
+  auto overlay = load_texture_file(overlayEntry.path);
+  if (!overlay.has_value() || overlay->format != wgpu::TextureFormat::RGBA8Unorm) {
+    Log.warn("texture_replacement: failed to load composite overlay {}", fs_path_to_string(overlayEntry.path));
+    if (entry == nullptr) {
+      s_failedKeys.insert(key);
+    }
+    return {};
+  }
+
+  composite_overlay_onto(*base, *overlay);
+  if (ensure_directory(cachePath.parent_path())) {
+    dds::write_rgba8_dds(cachePath, base->width, base->height, base->data);
+  }
+  Log.info("texture_replacement: composited {} overlay onto {}", overlayEntry.kind,
+           format_replacement_filename(key));
+  return create_replacement_handle(key, *base, marker);
 }
 
 void cache_replacement(const RuntimeTextureKey& key, const gfx::TextureHandle& handle) noexcept {
@@ -736,6 +919,7 @@ void initialize() noexcept { build_index(); }
 void shutdown() noexcept {
   s_replacementIndex.clear();
   for (auto& icons : s_buttonIconIndex) icons.clear();
+  for (auto& overlays : s_compositeIndex) overlays.clear();
   s_replacementCache.clear();
   s_failedKeys.clear();
   s_reportedMisses.clear();
@@ -747,6 +931,7 @@ void shutdown() noexcept {
   s_replacementCacheBytes = 0;
   s_replacementRoot.clear();
   s_dumpRoot.clear();
+  s_compositeCacheRoot.clear();
 }
 
 // Mirrors of the guest palettes, kept only so find_replacement can hash and the DDS dump decode a
@@ -853,7 +1038,8 @@ std::optional<TextureHandle> find_replacement(const GXTexObj_& obj) noexcept {
 
   const RuntimeTextureKey key = build_runtime_key(obj);
   const auto* path = find_replacement_path(key);
-  if (path == nullptr) {
+  const auto* overlay = find_composite_overlay(key);
+  if (path == nullptr && overlay == nullptr) {
     report_missing_key(key, obj);
     return std::nullopt;
   }
@@ -866,8 +1052,22 @@ std::optional<TextureHandle> find_replacement(const GXTexObj_& obj) noexcept {
     return std::nullopt;
   }
 
-  auto handle = load_replacement_texture(key, *path);
+  // With an overlay, the applied style's buttons are drawn over the effective picture (the full
+  // replacement, or the guest texture itself when there is none). Marker entries are trip
+  // signals, not pictures (the Controls panel draws that screen itself), so they are never
+  // drawn over. If compositing cannot be done (a compressed pack base, an unreadable overlay),
+  // the plain replacement is used as-is.
+  gfx::TextureHandle handle;
+  if (overlay != nullptr && (path == nullptr || path->marker == 0)) {
+    handle = load_composited_texture(key, obj, path, *overlay);
+  }
+  if (!handle && path != nullptr) {
+    handle = load_replacement_texture(key, *path);
+  }
   if (!handle) {
+    if (path == nullptr) {
+      report_missing_key(key, obj);
+    }
     return std::nullopt;
   }
 
@@ -887,14 +1087,24 @@ int button_icon_style() noexcept { return s_buttonIconStyle.load(); }
 bool take_button_icon_style_change() noexcept {
   if (!s_buttonIconStyleChanged.exchange(false)) return false;
   s_appliedButtonIconStyle = s_buttonIconStyle.load();
+  const auto dropCached = [](const RuntimeTextureKey& key) {
+    if (const auto it = s_replacementCache.find(key); it != s_replacementCache.end()) {
+      s_replacementLru.erase(it->second.lruIt);
+      s_replacementCacheBytes -= it->second.bytes;
+      s_replacementCache.erase(it);
+    }
+    s_failedKeys.erase(key);
+  };
   for (const auto& icons : s_buttonIconIndex) {
     for (const auto& [key, _] : icons) {
-      if (const auto it = s_replacementCache.find(key); it != s_replacementCache.end()) {
-        s_replacementLru.erase(it->second.lruIt);
-        s_replacementCacheBytes -= it->second.bytes;
-        s_replacementCache.erase(it);
-      }
-      s_failedKeys.erase(key);
+      dropCached(key);
+    }
+  }
+  // Composited textures are cached under their texture's own key, which may have no icon entry
+  // at all (a guest texture with only an overlay): they belong to the old style too.
+  for (const auto& overlays : s_compositeIndex) {
+    for (const auto& [key, _] : overlays) {
+      dropCached(key);
     }
   }
   return true;

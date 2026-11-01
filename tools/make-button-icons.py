@@ -7,6 +7,12 @@ controller.png (the Controls screen picture) and remote/ (the Controls screen's 
 The game picks the set for the controller in use (aurora texture_replacement.cpp, virtual_remote.cpp).
 
     python tools/make-button-icons.py [--src <8x PNG pack Interface folder>] [--out Play/UserData/button_icons]
+    python tools/make-button-icons.py --composite [--out <dir>]
+        Only the runtime compositor's overlays (nintendo composite/): one transparent PNG per
+        disc/face prompt texture holding just the new button art at the texture's own size, plus
+        composite.txt. The game draws each overlay over the texture it already has (its own, or
+        the HD pack's replacement), so those prompts need no pack artwork to ship. --clean emits
+        these too; this mode is for generating them on their own.
     python tools/make-button-icons.py --clean [--out <dir>]
         Only the Switch package's set: the nintendo files that come from the vendored CC0 art alone
         (controller.png, ui/, panel.txt, the sideways boot texture), plus the Controls screen's
@@ -267,6 +273,64 @@ def render(src, kind, buttons, style, names=None):
     return img if changed else None
 
 
+# Kinds whose new button art can be drawn without the pack artwork and so can ride the runtime
+# compositor (texture_replacement.cpp): the overlay holds only the new art on transparency and the
+# game draws it over the texture it already has. "tippi" is not one of them: tippi() covers the TV
+# and the remote with tape sampled from the picture itself, so the cover is the game's own art,
+# which no shipped overlay may carry (and a static picture cannot express "copy this part there").
+COMPOSITE_KINDS = ("disc", "face")
+
+
+def render_overlay(kind, buttons, style, w, h):
+    """Only the new button art for one prompt texture, on a transparent canvas at the texture's own
+    (1x) size, positioned from the TEXTURES spots. The disc path draws the ring and button where
+    render() looks for the old one: centred on the spot, the spot's search radius as the radius.
+    The face path draws the symbol at render()'s size for it (1.5x the search window's diameter),
+    centred on the spot; render() squashes it by the old symbol's shape, which only the pack
+    artwork knows, so the overlay's symbol is unsquashed. Returns None when the style has no
+    button for any of the texture's buttons (nintendo keeps the game's own + and -, so their
+    discs get no overlay)."""
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    drew = False
+    for button, fx, fy, fr in buttons:
+        name = STYLES[style].get(button) if button else None
+        if name is None:
+            continue
+        if kind == "disc":
+            r = fr * max(w, h)
+            disc(img, (fx * w - r, fy * h - r, fx * w + r, fy * h + r), style, name)
+        elif kind == "face":
+            size = int(3 * fr * max(w, h))
+            sym = holes(render_svg(style, name, size))
+            img.alpha_composite(solid((46, 46, 46, 255), sym),
+                                (int(fx * w - sym.width / 2), int(fy * h - sym.height / 2)))
+        drew = True
+    return img if drew else None
+
+
+def build_composites(out):
+    """<out>/composite/: one overlay per disc/face prompt texture, plus composite.txt (one line per
+    texture: its filename and kind), for the runtime compositor. Drawn from the vendored Kenney art
+    alone, like the clean set, so the Switch package ships them and no HD pack is involved."""
+    style = "nintendo"
+    comp = os.path.join(out, "composite")
+    os.makedirs(comp, exist_ok=True)
+    lines = []
+    for name, kind, buttons in TEXTURES:
+        if kind not in COMPOSITE_KINDS:
+            continue
+        w, h = (int(v) for v in name.split("_")[1].split("x"))
+        img = render_overlay(kind, buttons, style, w, h)
+        if img is None:
+            continue
+        img.save(os.path.join(comp, name))
+        lines.append(f"{name} {kind}")
+    with open(os.path.join(comp, "composite.txt"), "w", encoding="ascii") as f:
+        for line in lines:
+            print(line, file=f)
+    print(f"{style} (composite): {len(lines)} overlays -> {comp}")
+
+
 def panel_and_ui(out, style, icon_names=None, spots=None):
     """panel.txt (where each action's button sits on controller.png) and ui/ (the Controls panel's
     per-action icons). controller.png must already be saved in out. Pure Kenney, so the clean set
@@ -364,6 +428,10 @@ def build_clean(out_root):
             img = render(blank, kind, buttons, style)
         img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
         img.save(os.path.join(out, name))
+    # The disc and face prompts still cannot ship as pictures (their renders draw on the pack's
+    # artwork), so they ship as overlays for the runtime compositor instead: composite/ holds
+    # only the new buttons, and the game draws them over its own textures at runtime.
+    build_composites(out)
     print(f"{style} (clean): -> {out}")
 
 
@@ -373,7 +441,14 @@ def main():
     ap.add_argument("--out", default=os.path.join(ROOT, "Play", "UserData", "button_icons"))
     ap.add_argument("--clean", action="store_true",
                     help="only the Switch package's clean set (nintendo, from the vendored CC0 art; no --src pack)")
+    ap.add_argument("--composite", action="store_true",
+                    help="only the runtime compositor's overlays (nintendo composite/; no --src pack)")
     args = ap.parse_args()
+    if args.composite:
+        out = os.path.join(args.out, "nintendo")
+        os.makedirs(out, exist_ok=True)
+        build_composites(out)
+        return
     if args.clean:
         build_clean(args.out)
         return
