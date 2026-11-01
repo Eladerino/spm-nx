@@ -1248,6 +1248,11 @@ void DrawRumbleSettings() {
 
 void DrawControllerSettings() {
     ImT::TextUnformatted("Every connected gamepad controls Mario (player 1), mapped for its type.");
+    // On the Switch build everything below except Vibration is cut (Brandon's call, Nov 1):
+    // port assignment, the mapping wizard and editor, keyboard settings and Wii Remote pairing
+    // are PC-side machinery; the console pairs pads itself and player 1 remaps through the
+    // Gamepad rows, so the page keeps only what a Switch player can act on.
+#if !defined(__SWITCH__)
     ImT::TextDisabled("Pick the controller type or remap buttons in the launcher's Controls page.");
     ImGui::Separator();
     for (int port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
@@ -1448,6 +1453,7 @@ void DrawControllerSettings() {
         ImGui::PopID();
     }
     DrawExpressionSettings();
+#endif
     DrawRumbleSettings();
 }
 
@@ -2531,10 +2537,12 @@ void DrawGeneralPage() {
 void DrawAudioPage() { DrawAudioSettings(); DrawRebindPrompt(); }
 void DrawGraphicsPage() { DrawGraphicsSettings(); }
 void DrawControlsPage() {
+#if !defined(__SWITCH__)
     bool mouse = RuntimeConfigFile::MousePointer(true);
     if (ImT::Checkbox(Tr("Mouse acts as the Wii pointer"), &mouse)) RuntimeConfigFile::SetMousePointer(mouse);
     ImT::TextDisabled("%s", Tr("Moving the mouse over the game aims Tippi's pointer, and a click presses A."));
     ImGui::Separator();
+#endif
     DrawControllerSettings();
     DrawRebindPrompt();
 }
