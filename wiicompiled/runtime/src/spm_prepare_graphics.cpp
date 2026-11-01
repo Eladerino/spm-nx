@@ -221,6 +221,48 @@ bool CopyTree(const fs::path& src, const fs::path& dst, const char* what) {
     return true;
 }
 
+// Deletes the tree at root and reports whether it is really gone. remove_all is tried first;
+// if it errors or the tree is still there afterwards, the tree is walked and deleted entry by
+// entry, deepest first (a child's path string extends its parent's, so sorting by length,
+// longest first, visits children before their folders). The Switch FAT layer let a remove_all
+// fail silently under the old unchecked call in RestoreSave, so nothing in this file trusts
+// the call alone any more: the result is always verified with Exists().
+bool DeleteTree(const fs::path& root) {
+    if (!Exists(root)) return true;
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    if (!Exists(root)) return true;
+    std::vector<fs::path> entries;
+    std::error_code iec;
+    fs::recursive_directory_iterator it(root, iec), end;
+    if (!iec) {
+        for (; it != end; it.increment(iec)) {
+            if (iec) break;
+            entries.push_back(it->path());
+        }
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const fs::path& a, const fs::path& b) { return a.string().size() > b.string().size(); });
+    for (const fs::path& p : entries) {
+        std::error_code rec;
+        fs::remove(p, rec);
+    }
+    std::error_code rec;
+    fs::remove(root, rec);
+    return !Exists(root);
+}
+
+// Best-effort tree deletion for the cleanups in BackupSave: a failed deletion there is not
+// itself the safety mechanism (the complete marker, written last, is), but it used to pass
+// silently, so it is logged with what was being cleaned up.
+void RemoveTreeLogged(const fs::path& root, const char* what) {
+    if (!Exists(root)) return;
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    if (ec || Exists(root))
+        RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: could not delete %s\n", what, root.string().c_str());
+}
+
 fs::path ManifestPath() { return Dir() / "manifest.txt"; }
 
 // The manifest is the backup's file list (path and size of every file, relative to the title
@@ -309,13 +351,20 @@ bool BackupSave() {
         // so the boot restore can still spot a save played on since.
         if (!Exists(ManifestPath())) {
             std::vector<TreeEntry> entries;
-            if (ListTree(BackupDir() / "title", entries) && !WriteManifest(entries))
-                RT_LOGF(RT_TAG_RUNTIME, "[prepare] could not write the save manifest; the copy is still used\n");
+            if (ListTree(BackupDir() / "title", entries)) {
+                if (!WriteManifest(entries))
+                    RT_LOGF(RT_TAG_RUNTIME, "[prepare] could not write the save manifest; the copy is still used\n");
+            } else {
+                // ListTree has already logged why the listing failed; this line records the
+                // consequence, so a copy without a manifest is never a silent state (the boot
+                // restore's diverged-save check cannot run without one).
+                RT_LOGF(RT_TAG_RUNTIME, "[prepare] the save copy has no manifest and none could be written; the copy is still used\n");
+            }
         }
         return true;
     }
     std::error_code ec;
-    fs::remove_all(BackupDir(), ec);
+    RemoveTreeLogged(BackupDir(), "save copy");
     Remove(ManifestPath());
     fs::create_directories(BackupDir(), ec);
     if (ec) {
@@ -325,7 +374,7 @@ bool BackupSave() {
     std::vector<TreeEntry> source;
     if (!ListTree(NandTitle(), source)) return false;
     if (Exists(NandTitle()) && !CopyTree(NandTitle(), BackupDir() / "title", "save copy")) {
-        fs::remove_all(BackupDir(), ec);  // a partial copy is never left for a restore to find
+        RemoveTreeLogged(BackupDir(), "save copy");  // a partial copy is never left for a restore to find
         return false;
     }
     // The copy is certified only once every file in it matches the save it came from, in size;
@@ -333,17 +382,17 @@ bool BackupSave() {
     std::vector<TreeEntry> copied;
     if (!ListTree(BackupDir() / "title", copied) || copied != source) {
         RT_LOGF(RT_TAG_RUNTIME, "[prepare] save copy did not verify; the partial copy is deleted\n");
-        fs::remove_all(BackupDir(), ec);
+        RemoveTreeLogged(BackupDir(), "save copy");
         return false;
     }
     if (!WriteManifest(source)) {
         RT_LOGF(RT_TAG_RUNTIME, "[prepare] could not write the save manifest; the copy is deleted\n");
-        fs::remove_all(BackupDir(), ec);
+        RemoveTreeLogged(BackupDir(), "save copy");
         return false;
     }
     if (!Touch(BackupDone())) {
         RT_LOGF(RT_TAG_RUNTIME, "[prepare] could not mark the save copy complete; the copy is deleted\n");
-        fs::remove_all(BackupDir(), ec);
+        RemoveTreeLogged(BackupDir(), "save copy");
         return false;
     }
     return true;
@@ -369,9 +418,26 @@ RestoreResult RestoreSave(bool fromBoot) {
         RT_LOGF(RT_TAG_RUNTIME, "[prepare] save put back failed: the copy stays in %s\n", BackupDir().string().c_str());
         return RestoreResult::Failed;
     }
-    std::error_code ec;
-    fs::remove_all(BackupDir(), ec);
+    // The restore landed, so this copy must never be put back again. The complete marker is
+    // what a later start keys on, so it is removed first, ahead of the tree, and what remains
+    // is checked rather than assumed: run 3 restored successfully at boot and at the end of
+    // the run, but the old code deleted the tree with an unchecked remove_all that failed
+    // silently on this filesystem, the marker survived with the copy, and the next start
+    // would have put the same stale copy back again (with no manifest, the diverged-save
+    // check above could not have caught it). DeleteTree's walk gets a second attempt at the
+    // marker as part of the tree. If anything is left behind, one line says what state it is
+    // in; files without their marker are never restored.
+    std::error_code mec;
+    fs::remove(BackupDone(), mec);
     Remove(ManifestPath());
+    const bool treeGone = DeleteTree(BackupDir());
+    const bool markerGone = !Exists(BackupDone());
+    if (!treeGone || !markerGone) {
+        RT_LOGF(RT_TAG_RUNTIME, "[prepare] the save was put back, but its copy in %s could not be fully deleted; %s\n",
+                BackupDir().string().c_str(),
+                markerGone ? "its complete marker is gone, so it will not be put back again"
+                           : "its complete marker could not be removed either, so a later start may put it back");
+    }
     if (!fromBoot) RT_LOGF(RT_TAG_RUNTIME, "[prepare] save put back\n");
     return RestoreResult::Restored;
 }
