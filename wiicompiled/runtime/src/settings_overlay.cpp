@@ -3857,8 +3857,13 @@ std::vector<OptRow> OptionsRows(int tab) {
             SetFrameInterpolationMode(Cycle(std::min(g_frameInterpolationMode, 1), d == 0 ? 1 : d, 2));  // 60 or 120
         }, "Above 60, extra frames are made between the game's own for smoother motion."});
 #endif
+        // No V-Sync row on Switch: the toggle only picks the WebGPU surface's present mode,
+        // and the Switch build has no surface (the deko3d swapchain's interval is fixed at 1),
+        // so the row could not change the thing it names.
+#if !defined(__SWITCH__)
         rows.push_back({"V-Sync", OnOff(g_vsync.load()), [](int) { SetVSync(!g_vsync.load()); },
                         "No screen tearing. Turn off only if your screen has its own sync (G-Sync, FreeSync)."});
+#endif
         rows.push_back({"FPS counter", OnOff(g_showFps), [](int) { SetShowFps(!g_showFps); }, "Frames per second in the corner."});
     } else if (tab == 2) {
         rows.push_back({"Master volume", Percent(g_audioVolumePercent), [](int d) {
