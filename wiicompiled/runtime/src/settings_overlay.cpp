@@ -3824,55 +3824,83 @@ constexpr const char* kOptTabs[] = {
 constexpr int kOptTabCount = int(std::size(kOptTabs));
 
 #if defined(__SWITCH__)
-// The dk_diag.txt keys the Diagnostics page carries, in page order, with the
-// Developer shell's row labels and help texts.
-constexpr const char* kDiagKeys[] = {
-    "depth_off", "cull_off", "magenta", "picdump", "efbclear", "bufdump", "texdump",
-    "shaderdump", "nomerge", "uvlog", "mtxlog", "perftimer", "arrayup", "profile", "cpthread",
+// The dk_diag.txt switches the Diagnostics page carries, in page order: key, row label, the
+// heading the switch starts in dk_diag.txt (null to stay under the one above), and help text.
+// One table, so a key cannot lose its label or help text the way three parallel lists could.
+struct DiagRow {
+    const char* key;
+    const char* label;
+    const char* group;
+    const char* help;
 };
-constexpr const char* kDiagLabels[] = {
-    "Depth test off (depth_off)", "Face culling off (cull_off)", "Magenta unbound textures (magenta)",
-    "Dump frame pictures (picdump)", "Clear the EFB each pass (efbclear)", "Dump staged buffers (bufdump)",
-    "Dump textures (texdump)", "Dump shaders (shaderdump)", "No draw merging (nomerge)",
-    "UV trace (uvlog)", "Matrix trace (mtxlog)", "Performance timers (perftimer)",
-    "Re-upload vertex arrays (arrayup)", "Guest profiler (profile)", "GX decode thread (cpthread)",
+constexpr DiagRow kDiagRows[] = {
+    {"depth_off", "Depth test off (depth_off)", "Rendering checks",
+     "Forces depth and stencil tests and depth writes off for every pipeline. Geometry can show through other geometry; for isolating depth problems."},
+    {"cull_off", "Face culling off (cull_off)", nullptr,
+     "Forces back-face culling off for every pipeline, so faces that would normally be hidden are drawn. For checking geometry that vanishes."},
+    {"magenta", "Magenta behind the picture (magenta)", nullptr,
+     "Clears the screen magenta before the finished picture is copied over it. Magenta left visible marks pixels the copy did not cover."},
+    {"efbclear", "Clear the EFB each pass (efbclear)", nullptr,
+     "Clears colour to magenta on EFB passes that have a depth target. If the result reaches the screen, those passes are reaching the picture."},
+    {"nomerge", "No draw merging (nomerge)", nullptr,
+     "Stops Aurora from merging compatible draws into one. This can slow rendering, but isolates bugs caused by merging."},
+    {"arrayup", "Re-upload vertex arrays (arrayup)", nullptr,
+     "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data."},
+    {"picdump", "Dump frame pictures (picdump)", "Dumps and traces",
+     "At a few presents, reads the picture back and logs sampled brightness, quadrant averages, and the centre pixel. It does not save an image."},
+    {"bufdump", "Dump staged buffers (bufdump)", nullptr,
+     "At presents 600, 1800, and 3600, logs each live buffer's size, usage, and non-zero words. It waits for the GPU and can hitch."},
+    {"texdump", "Dump textures (texdump)", nullptr,
+     "At a few presents, saves the most-sampled textures and every mip level under UserData/Logs, for comparison with what appeared on screen."},
+    {"shaderdump", "Dump shaders (shaderdump)", nullptr,
+     "Saves each newly compiled shader's WGSL and translated GLSL side by side under its cache key, so the code behind a suspect draw can be read."},
+    {"uvlog", "UV trace (uvlog)", nullptr,
+     "Logs staged textures whose texture-coordinate scale and size disagree. For tracing textures that sample the wrong place."},
+    {"mtxlog", "Matrix trace (mtxlog)", nullptr,
+     "Logs the texture matrices Aurora stages for each draw. For tracing draws that transform or sample textures incorrectly; output can be large."},
+    {"perftimer", "Performance timers (perftimer)", "Performance",
+     "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log, plus the decode thread's time and what the game waited on it for. Use it to measure where frame time goes."},
+    {"profile", "Guest profiler (profile)", nullptr,
+     "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them)."},
+    {"cpthread", "GX decode thread (cpthread)", "Threads",
+     "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong."},
+    {"gxworker", "GX call records (gxworker)", nullptr,
+     "Records the game's GX calls and replays each one straight away, from the next frame. The picture should look exactly the same; anything that differs is a call the records do not carry yet. Every 600 frames with perftimer on, a [gxworker] line counts them."},
+    {"gxdefer", "Deferred GX records (gxdefer)", nullptr,
+     "As GX call records, but the records wait until the game next needs GX state back (a getter, a wait, the end of the frame). Turns records on by itself. An experiment ahead of moving GX work to core 2; turn it off if anything draws wrong."},
 };
-constexpr const char* kDiagHelp[] = {
-    "Forces depth and stencil tests and depth writes off for every pipeline. Geometry can show through other geometry; for isolating depth problems.",
-    "Forces back-face culling off for every pipeline, so faces that would normally be hidden are drawn. For checking geometry that vanishes.",
-    "Clears the screen magenta before the finished picture is copied over it. Magenta left visible marks pixels the copy did not cover.",
-    "At a few presents, reads the picture back and logs sampled brightness, quadrant averages, and the centre pixel. It does not save an image.",
-    "Clears colour to magenta on EFB passes that have a depth target. If the result reaches the screen, those passes are reaching the picture.",
-    "At presents 600, 1800, and 3600, logs each live buffer's size, usage, and non-zero words. It waits for the GPU and can hitch.",
-    "At a few presents, saves the most-sampled textures and every mip level under UserData/Logs, for comparison with what appeared on screen.",
-    "Saves each newly compiled shader's WGSL and translated GLSL side by side under its cache key, so the code behind a suspect draw can be read.",
-    "Stops Aurora from merging compatible draws into one. This can slow rendering, but isolates bugs caused by merging.",
-    "Logs staged textures whose texture-coordinate scale and size disagree. For tracing textures that sample the wrong place.",
-    "Logs the texture matrices Aurora stages for each draw. For tracing draws that transform or sample textures incorrectly; output can be large.",
-    "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log, plus the decode thread's time and what the game waited on it for. Use it to measure where frame time goes.",
-    "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data.",
-    "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them).",
-    "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong.",
-};
-constexpr int kDiagCount = int(std::size(kDiagKeys));
+constexpr int kDiagCount = int(std::size(kDiagRows));
 
-// Persist the full diag state after a Diagnostics flip, in the line format
-// diag_init parses (a line naming the key, "=0" for off, anything else on).
-// The shell's write-back, unchanged.
+// Persists every switch after a Diagnostics flip, grouped under the table's headings, each line
+// "key=0" or "key=1" with the row's name as a comment. device.cpp's diag_init reads it back.
+// The layout also stays readable by builds from before comments were allowed: those took a line
+// naming a key, with "=0" for off, so every line keeps "key=N" unspaced and no comment names a key.
 void WriteDiagFileBack() {
     FILE* file = std::fopen("/switch/spm-nx/UserData/dk_diag.txt", "w");
     if (file == nullptr) {
         std::fprintf(stderr, "[diag] menu: could not write back dk_diag.txt\n");
         return;
     }
-    for (const char* key : kDiagKeys) {
-        std::fprintf(file, "%s=%d\n", key, swdk::diag_get(key) ? 1 : 0);
+    std::fputs("# spm-nx diagnostic switches: 1 turns one on, 0 turns it off.\n"
+               "# Read at launch. The Diagnostics page in the settings menu changes them while the\n"
+               "# game runs and rewrites this file, so edit it with the game closed.\n",
+               file);
+    constexpr int kCommentColumn = 16;
+    for (const DiagRow& row : kDiagRows) {
+        if (row.group != nullptr) {
+            std::fprintf(file, "\n# %s\n", row.group);
+        }
+        const char* nameEnd = std::strstr(row.label, " (");
+        const int nameLength = nameEnd ? int(nameEnd - row.label) : int(std::strlen(row.label));
+        const int used = int(std::strlen(row.key)) + 2;
+        std::fprintf(file, "%s=%d%*s# %.*s\n", row.key, swdk::diag_get(row.key) ? 1 : 0,
+                     used < kCommentColumn ? kCommentColumn - used : 1, "", nameLength, row.label);
     }
     std::fclose(file);
 }
 
 void SetDiagKey(int n, bool on) {
-    const char* key = kDiagKeys[n];
+    const char* key = kDiagRows[n].key;
     if (!swdk::diag_set(key, on)) return;
     // diag_cmd_poll's marker format (device.cpp): diag_set does not log, so
     // the menu emits the marker itself, then persists the file like the file
@@ -4208,11 +4236,11 @@ std::vector<OptRow> OptionsRows(int tab) {
     } else if (tab == 7) {
 #if defined(__SWITCH__)
         // The deko renderer's diagnostic switches, then the log actions.
-        // Flipping one persists the whole set back to dk_diag.txt, exactly
-        // as it did from the Developer shell.
+        // Flipping one persists the whole set back to dk_diag.txt.
         for (int n = 0; n < kDiagCount; ++n) {
-            const bool on = swdk::diag_get(kDiagKeys[n]);
-            rows.push_back({kDiagLabels[n], OnOff(on), [n, on](int) { SetDiagKey(n, !on); }, kDiagHelp[n]});
+            const DiagRow& row = kDiagRows[n];
+            const bool on = swdk::diag_get(row.key);
+            rows.push_back({row.label, OnOff(on), [n, on](int) { SetDiagKey(n, !on); }, row.help});
         }
         rows.push_back({"Flush logs", "", [](int d) {
             if (d == 0) swdk::diag_flush_all("menu");
