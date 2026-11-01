@@ -4,9 +4,11 @@ extern "C" unsigned g_spmAudit[8];
 #include <map>
 // gx_texture.cpp - Texture Object and TLUT Functions
 #include "gx_internal.h"
+#include "gx_worker.h"
 #include "runtime_log.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cstdlib>
 
 // Helper to write GXTexObj structure to guest memory in SDK format
@@ -466,6 +468,35 @@ PPC_NATIVE_OVERRIDE_VOID(801c7160, GX__InitTexObjUserData_80170be8,
 // slot (rejection paths used to just return, so draws sampled stale, unrelated art). Bind
 // aurora's empty texture instead: null image data resolves to a 1x1 transparent placeholder,
 // which is also the correct result for the common case of an intentionally-transparent hide texture.
+// The GX side of a texture load, as a GX worker record replays it (gx_worker.h). It binds from a
+// copy of the host texture object taken at the call: the object is keyed by the guest struct's
+// address and the builders rebuild it in place without a sync point, so a pending bind must not
+// read the live object. g_boundTexMaps is decided here, at replay, because a pending
+// GXCallDisplayList clears it when it replays (the list rebinds textures behind it), and a skip
+// decided at the call would miss that clear.
+enum : uint32_t { kBindAlways = 1u, kBindInit = 2u, kBindTlutChanged = 4u, kBindUploaded = 8u };
+static void BindTexMap(const uint8_t* objBytes, BoundTexInfo bound, uint32_t tid, uint32_t flags) {
+    BoundTexInfo& current = g_boundTexMaps[tid];
+    const bool skip = (flags & kBindAlways) == 0 &&
+                      GxTextureBindingContract::CanSkipHostLoad(current, bound, (flags & kBindInit) != 0,
+                                                                (flags & kBindTlutChanged) != 0,
+                                                                (flags & kBindUploaded) != 0);
+    current = bound;
+    if (SpmDumpFrame()) {
+        RT_LOGF(RT_TAG_GX, "[drawdump] loadtex map %u oa 0x%08X data 0x%08X %ux%u fmt 0x%X tlut %u skip %d init %d up %d\n",
+                tid, bound.objAddr, bound.dataAddr, bound.width, bound.height, bound.format, bound.tlut, skip ? 1 : 0,
+                (flags & kBindInit) != 0 ? 1 : 0, (flags & kBindUploaded) != 0 ? 1 : 0);
+    }
+    if (!skip) {
+        GXTexObj copy;
+        std::memcpy(&copy, objBytes, sizeof(copy));
+        GXLoadTexObj(&copy, static_cast<GXTexMapID>(tid));
+    }
+}
+static void BindHostTexObj(GXTexObj* obj, const BoundTexInfo& bound, uint32_t tid, uint32_t flags) {
+    GxWorker::DeferOrRun<&BindTexMap>(reinterpret_cast<const uint8_t*>(obj), sizeof(GXTexObj), bound, tid, flags);
+}
+
 static void BindUnloadableTexturePlaceholder(uint32_t tid) {
     if (tid >= g_boundTexMaps.size()) {
         return;
@@ -480,8 +511,7 @@ static void BindUnloadableTexturePlaceholder(uint32_t tid) {
     // A zeroed binding record can never compare equal to a real load (those
     // always carry a non-zero objAddr), so the CanSkipHostLoad fast path cannot
     // mistake a later genuine bind for a no-op.
-    g_boundTexMaps[tid] = BoundTexInfo{};
-    GXLoadTexObj(&s_placeholder, (GXTexMapID)tid);
+    BindHostTexObj(&s_placeholder, BoundTexInfo{}, tid, kBindAlways);
 }
 
 // One host texture object per (image, sampler) for loads recorded into display lists; never freed
@@ -670,17 +700,7 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
         static_cast<GxTextureBindingContract::SamplerState&>(newBound) = meta;
         newBound.objAddr = oa;
         newBound.dataAddr = CanonicalizeGxMainRamAddress(meta.dataAddr);
-        const BoundTexInfo& oldBound = g_boundTexMaps[tid];
-        const bool canSkipHostLoad = GxTextureBindingContract::CanSkipHostLoad(
-            oldBound, newBound, needsInit, tlutChanged, textureDataUploaded);
-
-        g_boundTexMaps[tid] = newBound;
         GetTexObjMeta(oa) = meta;
-        if (SpmDumpFrame()) {
-            RT_LOGF(RT_TAG_GX, "[drawdump] loadtex map %u oa 0x%08X data 0x%08X %ux%u fmt 0x%X pal %d tlut %u skip %d init %d up %d\n", tid, oa,
-                    meta.dataAddr, meta.width, meta.height, meta.format, isPalette ? 1 : 0, meta.tlut, canSkipHostLoad ? 1 : 0,
-                    needsInit ? 1 : 0, textureDataUploaded ? 1 : 0);
-        }
         if (SpmAuroraDlRecording()) {
             static int s_texLog = 0;
             if (s_texLog++ < 60) RT_LOGF(RT_TAG_GX, "[spmdl] recorded tex load map %u data 0x%08X %ux%u fmt 0x%X pal %d\n", tid, meta.dataAddr, meta.width, meta.height, meta.format, isPalette ? 1 : 0);
@@ -689,10 +709,12 @@ extern "C" void GX__LoadTexObj_80170f2c(uint32_t oa, uint32_t tid) {
             // SPM builds map materials into display lists from a stack GXTexObj reused for every
             // material, so the shared host twin (keyed by that stack address) would give every recorded
             // load the same texture identity. Recorded loads get a permanent host object per image.
-            GXLoadTexObj(PersistentDlTexObj(meta, wrapS, wrapT, minFilter, magFilter, maxAnisoSafe, size),
-                         (GXTexMapID)tid);
-        } else if (!canSkipHostLoad) {
-            GXLoadTexObj(obj, (GXTexMapID)tid);
+            BindHostTexObj(PersistentDlTexObj(meta, wrapS, wrapT, minFilter, magFilter, maxAnisoSafe, size), newBound,
+                           tid, kBindAlways);
+        } else {
+            const uint32_t flags = (needsInit ? kBindInit : 0u) | (tlutChanged ? kBindTlutChanged : 0u) |
+                                   (textureDataUploaded ? kBindUploaded : 0u);
+            BindHostTexObj(obj, newBound, tid, flags);
         }
     } catch (const std::exception& ex) {
         if (s_hostExceptionLogCount++ < 64) {
