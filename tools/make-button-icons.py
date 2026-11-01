@@ -244,17 +244,21 @@ def render(src, kind, buttons, style, names=None):
             ring = w * 0.085
             draw.ellipse([m, m, w - m, h - m], fill="#141414")
             draw.ellipse([m + ring, m + ring, w - m - ring, h - m - ring], fill="#FFFFFF")
-            size = int(w * 0.62)
-            img.alpha_composite(solid((156, 156, 156, 255), holes(render_svg(style, name, size))),
+            # The letter in ink, big: at the size these chips render in text it was a small
+            # grey letter (156, and the icon render's letter is only about half the render)
+            # and all but vanished on the game's white boxes.
+            size = int(w * 0.98)
+            img.alpha_composite(solid((20, 20, 20, 255), holes(render_svg(style, name, size))),
                                 ((w - size) // 2, (h - size) // 2))
         elif kind == "disc":
             x0, y0, x1, y1 = dark_bbox(img, fx * w, fy * h, fr * max(w, h), 150 if button in "+-" else 90)
             pad = (x1 - x0) * 0.05
             disc(img, (x0 - pad, y0 - pad, x1 + pad, y1 + pad), style, name)
-        elif kind == "glyph":  # grey symbol on white, like the game's own
+        elif kind == "glyph":  # symbol on white, like the game's own, but in ink: the grey
+            # (156) letter washed out at text size, the same as the plaindiscs
             ImageDraw.Draw(img).rectangle([0, 0, w, h], fill="#FFFFFF")
             size = int(w * 0.84)
-            img.alpha_composite(solid((156, 156, 156, 255), holes(render_svg(style, name, size))),
+            img.alpha_composite(solid((20, 20, 20, 255), holes(render_svg(style, name, size))),
                                 ((w - size) // 2, (h - size) // 2))
         else:  # face: paint the old symbol out with the face colour, then the new symbol squashed onto the face
             x0, y0, x1, y1 = dark_bbox(img, fx * w, fy * h, fr * max(w, h), 110)
