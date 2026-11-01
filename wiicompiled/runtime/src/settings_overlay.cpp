@@ -821,8 +821,13 @@ struct RebindState {
 // Switch settings menu's Controls tab used for the same table.
 int g_optGamepadCapture = -1;  // gamepad row (action * 2 + slot) waiting for an input, or -1
 
+// Display names for the [gamepad] actions. The config grammar keeps the inherited keys
+// ("run", "a", "plus", "minus"), but the menu names what each input actually does in SPM:
+// Wii 1 uses a Pixl and cancels, Wii A flips and works Tippi, Plus opens the pause menu and
+// Minus opens the game's Controls screen.
 const char* const kGamepadActionLabels[] = {
-    "Up", "Down", "Left", "Right", "Jump", "Run", "A", "Shake", "Tilt left", "Tilt right", "Plus", "Minus",
+    "Move up", "Move down", "Move left", "Move right", "Jump / Confirm", "Use a Pixl / Cancel", "Flip / Use Tippi",
+    "Shake", "Tilt left", "Tilt right", "Pause menu", "Controls screen",
 };
 
 std::vector<std::string> SplitBindingNames(const std::string& text) {
@@ -892,10 +897,11 @@ void ResetGamepadBindings(int style) {
     VirtualRemote::ReloadPadLayouts();
 }
 
-// Friendly names for config inputs, per style. On the Switch the SDL names
-// read as the printed Nintendo letters (the shim maps buttons by label):
-// a is A, b is B, x is X, y is Y, the shoulders are L and R, the triggers
-// ZL and ZR, back is Minus and start is Plus.
+// Friendly names for config inputs, per style. The SDL names are positional
+// (a = south, b = east, x = west, y = north), so each style reads them as the
+// letters printed at those seats: on the Switch a is B, b is A, x is Y and y
+// is X; the shoulders are L and R, the triggers ZL and ZR, back is Minus and
+// start is Plus.
 std::string GamepadBindingLabel(const std::string& name, int style) {
     std::string base = name;
     char sign = 0;
@@ -911,10 +917,10 @@ std::string GamepadBindingLabel(const std::string& name, int style) {
     }
     if (base == "lefttrigger") return style == 0 ? "LT" : (style == 1 ? "L2" : "ZL");
     if (base == "righttrigger") return style == 0 ? "RT" : (style == 1 ? "R2" : "ZR");
-    if (base == "a") return style == 1 ? "Cross" : "A";
-    if (base == "b") return style == 1 ? "Circle" : "B";
-    if (base == "x") return style == 1 ? "Square" : "X";
-    if (base == "y") return style == 1 ? "Triangle" : "Y";
+    if (base == "a") return style == 1 ? "Cross" : (style == 2 ? "B" : "A");
+    if (base == "b") return style == 1 ? "Circle" : (style == 2 ? "A" : "B");
+    if (base == "x") return style == 1 ? "Square" : (style == 2 ? "Y" : "X");
+    if (base == "y") return style == 1 ? "Triangle" : (style == 2 ? "X" : "Y");
     if (base == "back") return style == 0 ? "Back" : (style == 1 ? "Share" : "Minus");
     if (base == "start") return style == 0 ? "Menu" : (style == 1 ? "Options" : "Plus");
     if (base == "guide") return style == 2 ? "Home" : "Guide";
@@ -1247,6 +1253,11 @@ void DrawRumbleSettings() {
 
 void DrawControllerSettings() {
     ImT::TextUnformatted("Every connected gamepad controls Mario (player 1), mapped for its type.");
+    // On the Switch build everything below except Vibration is cut (Brandon's call, Nov 1):
+    // port assignment, the mapping wizard and editor, keyboard settings and Wii Remote pairing
+    // are PC-side machinery; the console pairs pads itself and player 1 remaps through the
+    // Gamepad rows, so the page keeps only what a Switch player can act on.
+#if !defined(__SWITCH__)
     ImT::TextDisabled("Pick the controller type or remap buttons in the launcher's Controls page.");
     ImGui::Separator();
     for (int port = 0; port < PAD_MAX_CONTROLLERS; ++port) {
@@ -1447,6 +1458,7 @@ void DrawControllerSettings() {
         ImGui::PopID();
     }
     DrawExpressionSettings();
+#endif
     DrawRumbleSettings();
 }
 
@@ -1996,11 +2008,28 @@ void DrawStartupScreen() {
                 // The start button of what the player is holding: the controller's own jump button (its icon), else
                 // the keyboard's jump key. Both are 2 on the Wii Remote, which the cover waits for (frame_input.cpp).
 #if defined(__SWITCH__)
-                // The cover waits for the pad's A button; name it in text instead of using the
-                // icon path below (the shipped set's jump icon is the B button, and that path
-                // would lay out a blank gap if the button_icons set were missing).
-                const std::string icon;
-                const auto press = GameLayout::Utf16("Press A to start!");
+                // The cover waits for the pad's A button (frame_input.cpp): "Press" and the A
+                // button's own icon, the per-button set's b.png (SDL's east token is the printed
+                // A), drawn the same way as the jump icon below. The jump icon itself is the B
+                // button, so it cannot stand in here. Until the pad's style is known, or if the
+                // file is not on the card, the button is named in text instead, so the line
+                // never lays out a blank gap where the icon would sit.
+                const int padStyle = aurora_button_icon_style();
+                static const char* const kStyleDirs[3] = {"xbox", "playstation", "nintendo"};
+                const auto aIconPath = padStyle >= 0 && padStyle < 3
+                    ? RuntimeConfigFile::ApplicationDataDirectory() / "button_icons" /
+                          kStyleDirs[padStyle] / "ui" / "buttons" / "b.png"
+                    : std::filesystem::path();
+                static std::filesystem::path aIconCheckedPath;
+                static bool aIconPresent = false;
+                if (aIconCheckedPath != aIconPath) {
+                    aIconPresent = !aIconPath.empty() && std::filesystem::exists(aIconPath);
+                    aIconCheckedPath = aIconPath;
+                }
+                const std::string icon = aIconPresent && !aIconPath.empty()
+                    ? "@" + RuntimeConfigFile::PathToUtf8(aIconPath)
+                    : std::string();
+                const auto press = GameLayout::Utf16(icon.empty() ? "Press A to start!" : "Press");
 #else
                 const int padStyle = aurora_button_icon_style();
                 static const char* const kStyleDirs[3] = {"xbox", "playstation", "nintendo"};
@@ -2530,10 +2559,12 @@ void DrawGeneralPage() {
 void DrawAudioPage() { DrawAudioSettings(); DrawRebindPrompt(); }
 void DrawGraphicsPage() { DrawGraphicsSettings(); }
 void DrawControlsPage() {
+#if !defined(__SWITCH__)
     bool mouse = RuntimeConfigFile::MousePointer(true);
     if (ImT::Checkbox(Tr("Mouse acts as the Wii pointer"), &mouse)) RuntimeConfigFile::SetMousePointer(mouse);
     ImT::TextDisabled("%s", Tr("Moving the mouse over the game aims Tippi's pointer, and a click presses A."));
     ImGui::Separator();
+#endif
     DrawControllerSettings();
     DrawRebindPrompt();
 }
@@ -3105,7 +3136,9 @@ void ReleaseControllers() noexcept {
 
 // New Super Paper Bros.: the game's Controls screen (- button) shows a 3D Wii Remote with bubbles pointing at its
 // buttons. With a controller in use, this draws a controls panel over it instead: a picture of that controller with a
-// callout for each action the game's screen is showing, in the game's own font. The remote's textures are hidden and
+// badge at every button seat and a callout for each action the game's screen is showing, in the game's own font.
+// The badges are the buttons' own letters and never move; the callouts follow the player's live bindings.
+// The remote's textures are hidden and
 // Aurora reports which of that screen's parts are drawn (UserData/button_icons/<style>/marker<N>,
 // tools/make-button-icons.py): marker 1 = the remote (the screen is up), 2-6 = the Move, Flip, Jump, Use a Pixl and
 // Use Tippi bubbles.
@@ -3143,8 +3176,16 @@ void DrawControlsPanel() {
     struct Style {
         bool loaded = false;
         Sprite pad, icons[8];
-        ImVec2 spots[8];  // panel.txt: where each action's button is on the picture (fractions)
+        // Per-button art: ui/buttons/<SDL name>.png and buttons.txt (where each named button
+        // sits on the picture). The badges pinned on the picture and the dynamic callouts
+        // both read these. Only the generated Switch set ships them; other styles keep the
+        // per-action icons for every callout.
+        Sprite buttonIcons[8];
+        ImVec2 buttonSpots[8];
+        bool buttonSpotLoaded[8] = {};
     };
+    static const char* const kButtonNames[8] = {"a", "b", "x", "y", "rightshoulder",
+                                                "righttrigger", "leftstick", "rightstick"};
     static Style styles[3];
     static const char* const kActions[8] = {"", "", "move", "flip", "jump", "pixl", "tippi", "stylish"};
     Style& st = styles[style];
@@ -3164,14 +3205,58 @@ void DrawControlsPanel() {
         };
         st.pad = load(dir / "controller.png");
         for (int m = 2; m <= 7; ++m) st.icons[m] = load(dir / "ui" / (std::string(kActions[m]) + ".png"));
-        std::ifstream panel(dir / "panel.txt");
+        for (int b = 0; b < 8; ++b)
+            st.buttonIcons[b] = load(dir / "ui" / "buttons" / (std::string(kButtonNames[b]) + ".png"));
         std::string name;
         float fx = 0.0f, fy = 0.0f;
-        while (panel >> name >> fx >> fy)
-            for (int m = 2; m <= 7; ++m)
-                if (name == kActions[m]) st.spots[m] = ImVec2(fx, fy);
+        std::ifstream buttons(dir / "buttons.txt");
+        while (buttons >> name >> fx >> fy)
+            for (int b = 0; b < 8; ++b)
+                if (name == kButtonNames[b]) {
+                    st.buttonSpots[b] = ImVec2(fx, fy);
+                    st.buttonSpotLoaded[b] = true;
+                }
     }
     if (!st.pad.id) return;
+
+    // Dynamic callouts: Flip, Jump, Use a Pixl and Shake follow the player's own bindings for
+    // this style, resolved from GamepadBindingNames at draw time. The primary binding's
+    // button supplies the callout's icon, the spot its label sits level with, and a smaller
+    // second icon when a second, different binding exists (that binding is also named in the
+    // sub-line). No association here reads the default table: a callout whose binding has no
+    // per-button art keeps the per-action icon, and one with no per-button spot stacks in its
+    // column instead of sitting level with the button the defaults would have used. Move and
+    // Use Tippi have no gamepad action to resolve (kMarkerAction < 0): per-action art, stacked.
+    static const int kMarkerAction[8] = {-1, -1, -1, 6, 4, 5, -1, 7};  // gamepad action per marker
+    const Sprite* iconFor[8];
+    const Sprite* secondaryFor[8];
+    ImVec2 spotFor[8];
+    bool spotLive[8] = {};
+    std::string alsoFor[8];
+    for (int m = 0; m < 8; ++m) {
+        iconFor[m] = &st.icons[m];
+        secondaryFor[m] = nullptr;
+    }
+    for (int m = 2; m <= 7; ++m) {
+        const int action = kMarkerAction[m];
+        if (action < 0) continue;
+        const std::vector<std::string> names = GamepadBindingNames(style, action);
+        if (names.empty()) continue;
+        for (int b = 0; b < 8; ++b) {
+            if (names[0] != kButtonNames[b]) continue;
+            if (st.buttonIcons[b].id) iconFor[m] = &st.buttonIcons[b];
+            if (st.buttonSpotLoaded[b]) {
+                spotFor[m] = st.buttonSpots[b];
+                spotLive[m] = true;
+            }
+            break;
+        }
+        if (names.size() > 1 && names[1] != names[0]) {
+            alsoFor[m] = "also " + GamepadBindingLabel(names[1], style);
+            for (int b = 0; b < 8; ++b)
+                if (names[1] == kButtonNames[b] && st.buttonIcons[b].id) secondaryFor[m] = &st.buttonIcons[b];
+        }
+    }
 
     static const std::shared_ptr<GameLayout::Font> font = GameLayout::LoadFont("papermarioset_US.bfn");
     const bool gameFont = GameLayout::FontReady(font.get());
@@ -3203,9 +3288,19 @@ void DrawControlsPanel() {
     text("Controls", -360.0f, 176.0f, 26.0f, 0xFFFFFFFFu, 0);
     text(kPadNames[style], 360.0f, 176.0f, 15.0f, 0xA8AEBDFFu, 2);
     list->AddLine(at(-360.0f, 152.0f), at(360.0f, 152.0f), IM_COL32(255, 255, 255, a(30)), 1.5f * view.scale);
-    // How to close it (the game's - or 1, at their default places on each controller).
+    // How to close it (the game's - or 1). On the Switch the hint names the Minus action's own
+    // bindings; the other styles keep their hand-written hints.
     static const char* const kCloseHint[3] = {"View or LB: close", "Create or L1: close", "- or L: close"};
-    text(kCloseHint[style], 360.0f, -196.0f, 15.0f, 0xA8AEBDFFu, 2);
+    std::string closeHint = kCloseHint[style];
+    if (style == 2) {
+        const std::vector<std::string> names = GamepadBindingNames(style, 11);  // the Minus action
+        if (names.size() > 1) {
+            closeHint = GamepadBindingLabel(names[0], style);
+            for (size_t i = 1; i < names.size() && i < 3; ++i) closeHint += " or " + GamepadBindingLabel(names[i], style);
+            closeHint += ": close";
+        }
+    }
+    text(closeHint.c_str(), 360.0f, -196.0f, 15.0f, 0xA8AEBDFFu, 2);
 
     // The controller.
     constexpr float kPadW = 300.0f, kPadCX = -28.0f, kPadCY = -18.0f;
@@ -3213,23 +3308,67 @@ void DrawControlsPanel() {
     const ImVec2 p0 = at(kPadCX - kPadW / 2, kPadCY + padH / 2), p1 = at(kPadCX + kPadW / 2, kPadCY - padH / 2);
     list->AddImage(st.pad.id, p0, p1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
 
-    // Callouts: Move on the left, the face buttons and the right stick on the right, each in the order of its button
-    // from top to bottom, with a leader line to the button.
-    struct Callout { int m; const char* title; const char* sub; };
-    static const Callout kLeft[] = {{2, "Move", "Speak, interact"}};
+    // Badges pinned on the picture, one per seat: both sticks and the four face buttons, at
+    // the seats buttons.txt names. A badge is the button's own identity (the letter printed
+    // at that seat), never an action's, so the badges stay fixed while the callouts beside
+    // the picture follow the bindings. A seat whose set ships the spot but no picture (the
+    // Switch A seat: the vendored Kenney set has no A button) gets a drawn disc with the
+    // seat's letter until the picture exists, so no seat is ever blank.
+    static const int kSeatButtons[6] = {6, 7, 3, 2, 0, 1};  // left stick, right stick, y, x, a, b (SDL names, positional)
+    for (int s = 0; s < 6; ++s) {
+        const int b = kSeatButtons[s];
+        if (!st.buttonSpotLoaded[b]) continue;
+        const float size = b >= 6 ? 40.0f : 34.0f;  // the sticks are the wider seats
+        const float lx = kPadCX - kPadW / 2 + st.buttonSpots[b].x * kPadW;
+        const float ly = kPadCY + padH / 2 - st.buttonSpots[b].y * padH;
+        if (st.buttonIcons[b].id) {
+            list->AddImage(st.buttonIcons[b].id, at(lx - size / 2, ly + size / 2), at(lx + size / 2, ly - size / 2),
+                           ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
+        } else {
+            const std::string label = GamepadBindingLabel(kButtonNames[b], style);
+            if (label.size() != 1) continue;  // only a single letter fits a badge (the sticks' labels, PlayStation's shapes, do not)
+            const ImVec2 c = at(lx, ly);
+            const float r = size / 2 * view.scale;
+            list->AddCircleFilled(c, r, IM_COL32(24, 24, 30, a(255)));
+            list->AddCircle(c, r, IM_COL32(255, 255, 255, a(235)), 0, 2.0f * view.scale);
+            text(label.c_str(), lx, ly, 15.0f, 0xFFFFFFFFu, 1);
+        }
+    }
+
+    // Callouts: Move on the left, the rest on the right, ordered by the height of the button
+    // each one follows and sitting level with it where its spot is known. No lines point at
+    // the picture: the pinned badges already say where every button is.
+    struct Callout { int m; const char* title; std::string sub; };
     static const char* const kShakeButtons[3] = {"RB or RT: stylish moves, break free", "R1 or R2: stylish moves, break free",
-                                                 "R or ZR: stylish moves, break free"};
-    const Callout kRight[] = {{7, "Shake", kShakeButtons[style]}, {3, "Flip", ""}, {5, "Use a Pixl", "Cancel"},
-                              {4, "Jump", "Confirm"}, {6, "Use Tippi", ""}};
+                                                 "Shake the controller, or hold R or ZR: stylish moves, break free"};
+    const auto sub = [&](int m, const char* base) {
+        std::string s = base;
+        if (!alsoFor[m].empty()) {
+            if (!s.empty()) s += ", ";
+            s += alsoFor[m];
+        }
+        return s;
+    };
+    const std::vector<Callout> kLeft = {{2, "Move", sub(2, "Speak, interact")}};
+    const std::vector<Callout> kRight = {{7, "Shake", sub(7, kShakeButtons[style])}, {3, "Flip", sub(3, "")},
+                                         {5, "Use a Pixl", sub(5, "Cancel")}, {4, "Jump", sub(4, "Confirm")},
+                                         {6, "Use Tippi", sub(6, "")}};
     const auto callouts = [&](const Callout* items, size_t count, bool right) {
         std::vector<const Callout*> shown;
         for (size_t i = 0; i < count; ++i)
             if (seen[items[i].m]) shown.push_back(&items[i]);
-        std::sort(shown.begin(), shown.end(), [&](const Callout* l, const Callout* r) { return st.spots[l->m].y < st.spots[r->m].y; });
-        // Each label level with its button, pushed apart where they would touch, so the leaders run nearly level.
-        std::vector<float> ys;
-        for (const Callout* co : shown) ys.push_back(kPadCY + padH / 2 - st.spots[co->m].y * padH);
+        std::stable_sort(shown.begin(), shown.end(), [&](const Callout* l, const Callout* r) {
+            const float ly = spotLive[l->m] ? spotFor[l->m].y : 10.0f;  // no live spot: after the spotted ones
+            const float ry = spotLive[r->m] ? spotFor[r->m].y : 10.0f;
+            return ly < ry;
+        });
+        // Each label level with the button its live binding points at, pushed apart where
+        // they would touch; a callout with no live spot starts at the top and the same
+        // passes push it into the stack.
         constexpr float kSpacing = 50.0f, kTop = 120.0f, kBottom = -150.0f;
+        std::vector<float> ys;
+        for (const Callout* co : shown)
+            ys.push_back(spotLive[co->m] ? kPadCY + padH / 2 - spotFor[co->m].y * padH : kTop);
         for (size_t i = 0; i < ys.size(); ++i) ys[i] = std::min(ys[i], i == 0 ? kTop : ys[i - 1] - kSpacing);
         for (size_t i = ys.size(); i-- > 0;) ys[i] = std::max(ys[i], i + 1 == ys.size() ? kBottom : ys[i + 1] + kSpacing);
         for (size_t i = 0; i < shown.size(); ++i) {
@@ -3238,31 +3377,32 @@ void DrawControlsPanel() {
             const float edge = right ? 360.0f : -360.0f, icon = 30.0f;
             // icon at the outer edge, text inside it
             const float ix = right ? edge - icon / 2 : edge + icon / 2;
-            if (st.icons[co.m].id)
-                list->AddImage(st.icons[co.m].id, at(ix - icon / 2, y + icon / 2), at(ix + icon / 2, y - icon / 2), ImVec2(0, 0),
+            if (iconFor[co.m]->id)
+                list->AddImage(iconFor[co.m]->id, at(ix - icon / 2, y + icon / 2), at(ix + icon / 2, y - icon / 2), ImVec2(0, 0),
                                ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
+            // A second, different binding (Jump's A beside its B) rides at the primary
+            // icon's lower outer corner, smaller; the sub-line names it too.
+            if (secondaryFor[co.m] && secondaryFor[co.m]->id) {
+                const float icon2 = icon * 0.62f;
+                const float sx = ix + (right ? 1.0f : -1.0f) * icon * 0.36f, sy = y - icon * 0.36f;
+                list->AddImage(secondaryFor[co.m]->id, at(sx - icon2 / 2, sy + icon2 / 2), at(sx + icon2 / 2, sy - icon2 / 2),
+                               ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
+            }
             const float tx = right ? edge - icon - 8.0f : edge + icon + 8.0f;
-            const bool two = co.sub[0] != '\0';
+            const bool two = !co.sub.empty();
             text(co.title, tx, two ? y + 8.0f : y, 17.0f, 0xFFFFFFFFu, right ? 2 : 0);
-            if (two) text(co.sub, tx, y - 11.0f, 13.0f, 0xA8AEBDFFu, right ? 2 : 0);
-            // leader: from just past the text toward the button, ending on it with a dot
-            const float tw = std::max(textWidth(co.title, 17.0f), two ? textWidth(co.sub, 13.0f) : 0.0f);
-            const ImVec2 from = at(right ? tx - tw - 10.0f : tx + tw + 10.0f, y);
-            const ImVec2 to(p0.x + st.spots[co.m].x * (p1.x - p0.x), p0.y + st.spots[co.m].y * (p1.y - p0.y));
-            list->AddLine(from, to, IM_COL32(255, 255, 255, a(150)), 1.6f * view.scale);
-            list->AddCircleFilled(to, 4.0f * view.scale, IM_COL32(255, 255, 255, a(235)));
-            list->AddCircleFilled(from, 2.2f * view.scale, IM_COL32(255, 255, 255, a(150)));
+            if (two) text(co.sub.c_str(), tx, y - 11.0f, 13.0f, 0xA8AEBDFFu, right ? 2 : 0);
         }
     };
-    callouts(kLeft, std::size(kLeft), false);
-    callouts(kRight, std::size(kRight), true);
+    callouts(kLeft.data(), kLeft.size(), false);
+    callouts(kRight.data(), kRight.size(), true);
 
     // Footer, centred: [1] + [2] Quick menu (the game's 1 + 2 combination).
     const float fy = -190.0f, icon = 24.0f, plus = 16.0f, gap = 10.0f;
     float x = -(icon * 2 + plus + gap + textWidth("Quick menu", 15.0f)) / 2;
     const auto footerIcon = [&](int m) {
-        if (st.icons[m].id)
-            list->AddImage(st.icons[m].id, at(x, fy + icon / 2), at(x + icon, fy - icon / 2), ImVec2(0, 0), ImVec2(1, 1),
+        if (iconFor[m]->id)
+            list->AddImage(iconFor[m]->id, at(x, fy + icon / 2), at(x + icon, fy - icon / 2), ImVec2(0, 0), ImVec2(1, 1),
                            IM_COL32(255, 255, 255, a(255)));
         x += icon;
     };
@@ -3307,6 +3447,101 @@ void PatchBootStrings() {
         }
     }
     RT_LOGF(RT_TAG_RUNTIME, "boot screen: %d line(s) now read \"Enjoy New Super Paper Bros!\"\n", patched);
+}
+
+// The game's own instruction lines still talk about the Wii Remote: the Action Command prompts
+// ("Shake <icon PAD ...> up and down!"), the status-recovery prompts, and a couple of prose lines.
+// They live in the message files, which the game reads from the player's own game folder and keeps
+// as text in guest memory, so the lines are rewritten there, by content, the same way
+// PatchBootStrings does the boot screen. Each replacement is no longer than the line it replaces
+// and the rest of the span is padded with spaces, never NULs: a message's text runs on into the
+// file image behind it, so an early NUL could end the string for the game's parser, where
+// trailing spaces are inert. The <icon PAD> pictogram goes with the wording: on the Switch there
+// is no remote to shake or point, the controller is shaken (or R/ZR held, which the pad layer
+// turns into the same shake), and the pointer is aimed with the right stick. US lines only;
+// other languages keep the original wording (their button pictograms are still swapped by the
+// texture sets). PatchBootStrings claims the boot screen's own "Hold the Wii Remote sideways."
+// first (it runs earlier in Draw), so the copy in this table is the message file's, the one the
+// Flipside Arcade's instruction screens read.
+// Message files load per area, not with the dol, so this cannot be a one-shot: it runs again
+// whenever the game's sequence changes (a new area's file has been read by then) and, while
+// lines are still missing, every couple of seconds.
+void PatchMessageStrings() {
+    struct Line {
+        const char* from;
+        const char* to;
+        bool seen = false;
+    };
+    static Line kLines[] = {
+        {"Shake <icon PAD 0.65 1 1 8> up and down!", "Shake the controller, or hold R/ZR!"},
+        {"Shake <icon PAD 0.65 1 1 8> with good timing!", "Shake, or hold R/ZR, with good timing!"},
+        {"Tilt <icon PAD 0.65 1 1 8> as shown!", "Tilt the controller as shown!"},
+        {"Point the <icon PAD 0.65 1 1 8> at the screen!", "Point with the right stick at the screen!"},
+        {"Shake <icon PAD 0.65 1 1 15> to wake up!", "Shake it, or hold R/ZR, to wake up!"},
+        {"Shake <icon PAD 0.65 1 1 15> to recover!", "Shake it, or hold R/ZR, to recover!"},
+        {"Shake <icon PAD 0.65 1 1 15> quickly to escape!", "Shake it fast, or hold R/ZR, to escape!"},
+        {"Hold the Wii Remote sideways.", "Hold the controller sideways."},
+        {"Simply point your Wii Remote", "Simply point your controller"},
+    };
+    static int lastSeq = -2;
+    static int framesSincePass = 1 << 30;  // the first Draw() call passes
+    static int passes = 0;
+    static bool allSeen = false;
+    static bool gaveUp = false;  // some line never matched (see below): stop sweeping MEM2 for it
+    const int seq = SpmMapSweep::Seq();
+    const bool seqChanged = seq != lastSeq;
+    lastSeq = seq;
+    ++framesSincePass;
+    if (!seqChanged && (allSeen || gaveUp || framesSincePass < 120)) return;
+    framesSincePass = 0;
+    ++passes;
+    // MEM1 holds the dol and the game's heaps, message buffers included. MEM2 is swept only
+    // while lines are still missing, in case a build parks the buffers there: at 128 MB it is
+    // the expensive half of a pass, and sequence changes re-run the MEM1 pass on their own.
+    struct Range {
+        uint32_t base;
+        size_t size;
+    };
+    static constexpr Range kRanges[] = {{Memory::kMem1CachedBase, Memory::kMem1Size},
+                                        {Memory::kMem2CachedBase, Memory::kMem2Size}};
+    const size_t rangeCount = (allSeen || gaveUp) ? 1 : 2;
+    int patched = 0;
+    for (size_t r = 0; r < rangeCount; ++r) {
+        const Range range = kRanges[r];
+        uint8_t* const mem = Memory::Contains(range.base, range.size) ? Memory::GetPointer(range.base, range.size) : nullptr;
+        if (mem == nullptr) continue;
+        for (Line& line : kLines) {
+            const auto* from = reinterpret_cast<const uint8_t*>(line.from);  // bytes, as in PatchBootStrings
+            const size_t len = std::strlen(line.from);
+            const size_t toLen = std::strlen(line.to);
+            if (toLen > len) continue;  // the table is length-checked by hand; never write long
+            for (uint8_t* p = mem; (p = std::search(p, mem + range.size, from, from + len)) != mem + range.size; p += len) {
+                if (p + len >= mem + range.size) break;
+                // Whole lines only: the byte behind a match in the message file image is the
+                // line's end (a newline, the next tag, or the NUL of a dol-resident copy).
+                const uint8_t next = p[len];
+                if (next != '\n' && next != '\r' && next != '\0' && next != '<') continue;
+                std::copy(line.to, line.to + toLen, p);
+                std::fill(p + toLen, p + len, uint8_t{' '});
+                line.seen = true;
+                ++patched;
+            }
+        }
+    }
+    allSeen = true;
+    for (const Line& line : kLines) allSeen = allSeen && line.seen;
+    if (patched > 0)
+        RT_LOGF(RT_TAG_RUNTIME, "message strings: %d line(s) rewritten for the controller\n", patched);
+    // A line that never matches is not worth sweeping 128 MB for ever (the sideways line, for
+    // one, may exist only as the dol copy PatchBootStrings already claimed). After 40 passes
+    // the search settles for MEM1 on sequence changes and logs how many lines it gave up on,
+    // so a hardware log shows a line is missing rather than just not loaded yet.
+    if (!allSeen && !gaveUp && passes >= 40) {
+        gaveUp = true;
+        int missing = 0;
+        for (const Line& line : kLines) missing += line.seen ? 0 : 1;
+        RT_LOGF(RT_TAG_RUNTIME, "message strings: %d line(s) never found, MEM2 sweeps stopped\n", missing);
+    }
 }
 
 // ---- Options: the player's settings menu, drawn like the game's own menus (its font, a paper card) ----
@@ -3602,17 +3837,37 @@ std::vector<OptRow> OptionsRows(int tab) {
         int asp = 0;
         for (int i = 0; i < int(kAspects.size()); ++i)
             if (kAspects[i].mode == aspectMode) asp = i;
+#if defined(__SWITCH__)
+        // Fill Window is a PC option (windowed and ultrawide output); the Switch picture is
+        // fixed, so cycling here steps past it and the help never points at it.
+        const char* aspectHelp = "Switching between 4:3 and widescreen takes effect after a restart.";
+#else
+        const char* aspectHelp = (aspectMode != DisplaySettings::kAspect4x3) != DisplaySettings::GameWidescreen()
+                                     ? "Switching between 4:3 and widescreen takes effect after a restart."
+                                     : "Fill Window uses every pixel of wide and ultrawide screens.";
+#endif
         rows.push_back({"Aspect ratio", kAspects[asp].label, [asp](int d) {
-            SetAspectMode(kAspects[Cycle(asp, d == 0 ? 1 : d, int(kAspects.size()))].mode);
-        }, (aspectMode != DisplaySettings::kAspect4x3) != DisplaySettings::GameWidescreen()
-               ? "Switching between 4:3 and widescreen takes effect after a restart."
-               : "Fill Window uses every pixel of wide and ultrawide screens."});
+            int next = Cycle(asp, d == 0 ? 1 : d, int(kAspects.size()));
+#if defined(__SWITCH__)
+            if (kAspects[next].mode == DisplaySettings::kAspectFill)
+                next = Cycle(next, d == 0 ? 1 : d, int(kAspects.size()));
+#endif
+            SetAspectMode(kAspects[next].mode);
+        }, aspectHelp});
+        // No Frame rate row on Switch: the output is 60 Hz, so the 120 option cannot apply.
+#if !defined(__SWITCH__)
         static constexpr const char* kRates[] = {"60 FPS (original)", "120 FPS"};
         rows.push_back({"Frame rate", kRates[g_frameInterpolationMode], [](int d) {
             SetFrameInterpolationMode(Cycle(std::min(g_frameInterpolationMode, 1), d == 0 ? 1 : d, 2));  // 60 or 120
         }, "Above 60, extra frames are made between the game's own for smoother motion."});
+#endif
+        // No V-Sync row on Switch: the toggle only picks the WebGPU surface's present mode,
+        // and the Switch build has no surface (the deko3d swapchain's interval is fixed at 1),
+        // so the row could not change the thing it names.
+#if !defined(__SWITCH__)
         rows.push_back({"V-Sync", OnOff(g_vsync.load()), [](int) { SetVSync(!g_vsync.load()); },
                         "No screen tearing. Turn off only if your screen has its own sync (G-Sync, FreeSync)."});
+#endif
         rows.push_back({"FPS counter", OnOff(g_showFps), [](int) { SetShowFps(!g_showFps); }, "Frames per second in the corner."});
     } else if (tab == 2) {
         rows.push_back({"Master volume", Percent(g_audioVolumePercent), [](int d) {
@@ -3847,6 +4102,10 @@ std::vector<OptRow> OptionsRows(int tab) {
         }
         rows.push_back({"Keyboard: reset to default keys", "", [](int d) { if (d == 0) Keybinds::ResetDefaults(); }, ""});
 #endif
+#if !defined(__SWITCH__)
+        // The Controller rows remap the PAD route, which in this game serves players 2-4. On the
+        // Switch build they are cut (Brandon's call, Nov 1): SPM is single-player, player 1's pad
+        // is the Gamepad list below, and showing both lists side by side confused the menu.
         for (int i = 0; i < int(std::size(kPadRows)); ++i) {
             rows.push_back({std::string("Controller: ") + kPadRows[i].label,
                             g_optPadCapture == i ? "Press a button..." : PadBindingLabel(kPadRows[i].target), [i](int d) {
@@ -3858,6 +4117,7 @@ std::vector<OptRow> OptionsRows(int tab) {
                 g_optPadCapture = i;
             }, "Press A / 2, then the controller button to use. Takes a controller that is connected."});
         }
+#endif
 #if defined(__SWITCH__)
         // Player 1's own gamepad table ([gamepad] in Config.toml). The
         // Controller rows above remap the PAD route, which in this game
@@ -3870,6 +4130,11 @@ std::vector<OptRow> OptionsRows(int tab) {
             auto* pad = index >= 0 ? PADGetSDLGamepadForIndex(static_cast<uint32_t>(index)) : nullptr;
             const int style = pad != nullptr ? VirtualRemote::PadStyleOf(pad) : 2;
             for (int action = 0; action < 12; ++action) {
+                // Tilt left/right (actions 8 and 9) get no rows (Brandon's call, Nov 1): SPM's main
+                // game never reads tilt, their defaults are unbound, and the arcade games that
+                // steer by tilt take it from the left stick and the motion sensor. The reset row
+                // below still covers them.
+                if (action == 8 || action == 9) continue;
                 const std::vector<std::string> names = GamepadBindingNames(style, action);
                 for (int slot = 0; slot < 2; ++slot) {
                     const int idx = action * 2 + slot;
@@ -4194,6 +4459,7 @@ void FilterMenuInput(uint32_t chan, WiiRemoteInput::KpadSample& sample) noexcept
 void Draw() noexcept {
     if (RuntimeFrontend::Active()) return;
     PatchBootStrings();
+    PatchMessageStrings();
     // Wait for the frame worker's DONE phase: it has replayed the previous frame's ImGui draw lists
     // and started the next ImGui frame, so all overlay callers can now safely issue ImGui commands.
     aurora_wait_for_frame_worker();
@@ -4228,9 +4494,15 @@ void Draw() noexcept {
 }
 
 bool StartupScreenVisible() noexcept {
+    // The cover also stays up through the game's own boot sequence (Seq 0, the Wii Remote
+    // strap/sideways screen): on Switch that screen is meaningless, so the card covers it and
+    // lifts onto the title screen instead (Brandon's call, Nov 1). The press that dismisses
+    // the card is not swallowed (frame_input only notifies), so the game still gets the A/2
+    // press it waits for and advances underneath.
     return !g_strapInputAccepted.load(std::memory_order_acquire) ||
            !g_bootShadersReady.load(std::memory_order_acquire) ||
-           g_presentedFrame < g_startupDismissFrame.load(std::memory_order_relaxed);
+           g_presentedFrame < g_startupDismissFrame.load(std::memory_order_relaxed) ||
+           SpmMapSweep::Seq() == 0;
 }
 
 void NotifyStrapInputAccepted() noexcept {

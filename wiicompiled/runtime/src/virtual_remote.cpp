@@ -3,6 +3,7 @@
 #include "display_settings.h"
 #include "input_bindings.h"
 #include "keybinds.h"
+#include "pad_binding_migration.h"
 #include "runtime_config.h"
 #include "memory.h"
 #include "runtime_log.h"
@@ -24,6 +25,8 @@
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -67,6 +70,11 @@ struct Intent {
     uint32_t buttons = 0;  // WPAD bits, already in the sideways layout
     bool shake = false;
     float tilt = 0.0f;     // -1 counter-clockwise (left) .. 1 clockwise (right)
+    // Player 1's real accelerometer, when the pad has a live one: the gravity
+    // direction in the sideways remote's frame, in g (rest 0, -1, 0). Filled by
+    // GamepadIntent from the SDL sensor; hasImu false means no live sample.
+    bool hasImu = false;
+    float imu[3] = {0.0f, 0.0f, 0.0f};
 };
 
 struct Motion {
@@ -154,6 +162,9 @@ enum PadStyle { kXbox, kPlayStation, kNintendo, kPadStyleCount };
 // Defaults per style, in Keybinds order: the same jobs the GameCube-pad route gave each position
 // (bottom = 2/jump, left and right = 1, top = A, start = +, back/LB/LT = -, RB/RT = shake, right
 // stick = tilt). Nintendo pads jump with both B and A (bottom and right), like Mario games there.
+// Nintendo exception (Brandon's call, Nov 1, after hands-on with the positional layout): its A and
+// 1 defaults are swapped (left = A, top = 1), keeping the feel of the port's first release, whose
+// letter-based shim had put A on the left button and 1 on the top one and which he had learned.
 constexpr const char* kPadStyleNames[kPadStyleCount] = {"xbox", "playstation", "nintendo"};
 constexpr const char* kPadDefaults[Keybinds::kActionCount][kPadStyleCount] = {
     {"lefty-,dpup", "lefty-,dpup", "lefty-,dpup"},
@@ -161,8 +172,8 @@ constexpr const char* kPadDefaults[Keybinds::kActionCount][kPadStyleCount] = {
     {"leftx-,dpleft", "leftx-,dpleft", "leftx-,dpleft"},
     {"leftx+,dpright", "leftx+,dpright", "leftx+,dpright"},
     {"a", "a", "a,b"},
-    {"b,x", "b,x", "x"},
-    {"y", "y", "y"},
+    {"b,x", "b,x", "y"},
+    {"y", "y", "x"},
     {"rightshoulder,righttrigger", "rightshoulder,righttrigger", "rightshoulder,righttrigger"},
     {"", "", ""},  // tilt: SPM gameplay never reads it; the right stick aims the pointer instead
     {"", "", ""},
@@ -204,7 +215,131 @@ std::vector<PadInput> ParsePadInputs(const std::string& text) {
     return inputs;
 }
 
+#if defined(__SWITCH__)
+static_assert(Keybinds::kActionCount == 12, "the pad binding migration's tables are sized for 12 actions");
+// The one-time [gamepad] migration (pad_binding_migration.h): bindings a pre-fix Switch
+// build captured name the letters the player pressed, and this build reads names as
+// positions. Runs before the first layout is built from the file; the decision logic and
+// the rotation live in the header, this is only the file handling around them. The
+// original file is copied to Config.toml.pre-pad-migration.bak first (an existing backup
+// is never overwritten: it is the pristine copy) and whatever happened is logged.
+void MigratePreFixPadBindings() {
+    const auto path = RuntimeConfigFile::ResolveConfigPath();
+    std::vector<std::string> lines;
+    {
+        // Scoped reader, closed before the write below opens the file: the Switch
+        // filesystem refuses a write open of a file still open for reading (the same
+        // trap RuntimeConfigFile::WriteSetting documents).
+        std::ifstream input(path);
+        if (!input) {
+            return;
+        }
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
+            lines.push_back(std::move(line));
+        }
+    }
+
+    const RuntimeUserConfig& config = RuntimeConfigFile::Get();
+    PadBindingMigration::Facts facts;
+    facts.switchSeed = config.resolutionMultiplier && *config.resolutionMultiplier == 1.5f &&
+                       config.frameInterpolationFps && *config.frameInterpolationFps == 0 &&
+                       config.aspectMode && *config.aspectMode == 1;
+    facts.pcEvidence = config.windowPosX || config.windowPosY || config.windowWidth ||
+                       config.windowHeight ||
+                       (config.graphicsApi && *config.graphicsApi != "auto") ||
+                       (config.dvdRoot && PadBindingMigration::LooksLikeWindowsPath(*config.dvdRoot));
+
+    std::array<std::string_view, 12> actionKeys{};
+    std::array<std::string_view, 12> nintendoDefaults{};
+    for (size_t i = 0; i < actionKeys.size(); ++i) {
+        actionKeys[i] = kPadActionKeys[i];
+        nintendoDefaults[i] = kPadDefaults[i][kNintendo];
+    }
+    const PadBindingMigration::Result result =
+        PadBindingMigration::MigrateGamepadLines(lines, actionKeys, nintendoDefaults, facts);
+    using Outcome = PadBindingMigration::Outcome;
+    if (result.outcome == Outcome::kNoBindings || result.outcome == Outcome::kAlreadyStamped ||
+        !result.changed) {
+        return;
+    }
+
+    std::error_code ec;
+    const auto backup = path.parent_path() /
+                        (RuntimeConfigFile::PathToUtf8(path.filename()) + ".pre-pad-migration.bak");
+    if (!std::filesystem::exists(backup, ec)) {
+        std::filesystem::copy_file(path, backup, ec);
+        if (ec) {
+            RT_LOGF(RT_TAG_CONFIG,
+                    "[gamepad] pad binding migration: could not back up Config.toml (%s); file left untouched\n",
+                    ec.message().c_str());
+            return;
+        }
+    }
+
+    bool wrote = false;
+    {
+        std::ofstream output(path, std::ios::trunc);
+        if (output) {
+            for (const auto& outputLine : lines) {
+                output << outputLine << '\n';
+            }
+            wrote = static_cast<bool>(output);
+        }
+    }
+    if (!wrote) {
+        // The C stdio fallback, for the same reason WriteSetting has one.
+        FILE* file = std::fopen(RuntimeConfigFile::PathToUtf8(path).c_str(), "w");
+        if (file == nullptr) {
+            RT_LOGF(RT_TAG_CONFIG, "[gamepad] pad binding migration: could not rewrite Config.toml; file left as the backup\n");
+            return;
+        }
+        wrote = true;
+        for (const auto& outputLine : lines) {
+            wrote = wrote && std::fputs(outputLine.c_str(), file) >= 0 && std::fputc('\n', file) != EOF;
+        }
+        wrote = wrote && std::fclose(file) == 0;
+        if (!wrote) {
+            RT_LOGF(RT_TAG_CONFIG, "[gamepad] pad binding migration: could not rewrite Config.toml; file left as the backup\n");
+            return;
+        }
+    }
+
+    // The config was parsed before the file changed; bring the in-memory copy along so
+    // this run uses the rotated bindings too.
+    for (const auto& [key, value] : result.rotatedValues) {
+        RuntimeConfigFile::Mutable().gamepadBindings[key] = value;
+    }
+    switch (result.outcome) {
+    case Outcome::kRotated:
+        RT_LOGF(RT_TAG_CONFIG,
+                "[gamepad] pad bindings were saved by a pre-fix Switch build: rotated %d binding(s) "
+                "into the positional frame; the original is Config.toml.pre-pad-migration.bak\n",
+                result.rotatedBindings);
+        break;
+    case Outcome::kKeptDefaults:
+        RT_LOGF(RT_TAG_CONFIG,
+                "[gamepad] pad bindings already match the current defaults; marked as positional, nothing rotated\n");
+        break;
+    case Outcome::kKeptNoProvenance:
+        RT_LOGF(RT_TAG_CONFIG,
+                "[gamepad] pad bindings present, but this Config.toml does not look Switch-written; "
+                "left untouched and marked so the question is not asked again\n");
+        break;
+    default:
+        break;
+    }
+}
+#endif
+
 std::array<PadLayout, kPadStyleCount> BuildPadLayouts() {
+#if defined(__SWITCH__)
+    static std::once_flag padMigrationOnce;
+    std::call_once(padMigrationOnce, MigratePreFixPadBindings);
+#endif
     std::array<PadLayout, kPadStyleCount> result;
     for (int style = 0; style < kPadStyleCount; ++style) {
         for (int action = 0; action < Keybinds::kActionCount; ++action) {
@@ -289,6 +424,31 @@ Intent GamepadIntent() {
         const WiiRemoteInput::Kind kind = WiiRemoteInput::KindForName(SDL_GetGamepadName(gamepad));
         if (kind != WiiRemoteInput::Kind::NotWii && kind != WiiRemoteInput::Kind::WiiUPro) {
             continue;  // a real Wii Remote: the game reads it through KPAD
+        }
+        // Real motion, when this pad has an accelerometer: enable it and take the
+        // freshest sample. SDL reports proper acceleration in m/s^2 (x right,
+        // y top, z toward the player); the remote's frame wants the gravity
+        // direction in g, with z along the long axis toward the buttons end, so
+        // each axis is negated and the player's toward/away axis becomes x.
+        if (!intent.hasImu && SDL_GamepadHasSensor(gamepad, SDL_SENSOR_ACCEL)) {
+            SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_ACCEL, true);
+            float data[3];
+            if (SDL_GetGamepadSensorData(gamepad, SDL_SENSOR_ACCEL, data, 3)) {
+                constexpr float kGravityMs2 = 9.80665f;  // SDL_STANDARD_GRAVITY
+                intent.hasImu = true;
+                intent.imu[0] = -data[2] / kGravityMs2;
+                intent.imu[1] = -data[1] / kGravityMs2;
+                intent.imu[2] = -data[0] / kGravityMs2;
+                static bool s_imuLogged = false;
+                if (!s_imuLogged) {
+                    s_imuLogged = true;
+                    RT_LOGF(RT_TAG_CONFIG,
+                            "[motion] IMU live on '%s': sdl accel %.2f %.2f %.2f m/s^2, remote %.2f %.2f %.2f g "
+                            "(rest, held normally, should read near 0 -1 0)\n",
+                            SDL_GetGamepadName(gamepad), data[0], data[1], data[2], intent.imu[0], intent.imu[1],
+                            intent.imu[2]);
+                }
+            }
         }
         const PadStyle style = StyleFor(gamepad);
         const PadLayout& layout = (*layouts)[style];
@@ -388,6 +548,24 @@ void ApplyMotion(Motion& motion, const Intent& intent, WiiRemoteInput::KpadSampl
     motion.tilt += (intent.tilt - motion.tilt) * kTiltFollow;
     if (std::fabs(motion.tilt) < 0.001f) {
         motion.tilt = 0.0f;
+    }
+    // A live accelerometer wins over everything synthesized: the player's own
+    // shaking, tilting and gravity, straight into the sample. A sample that is
+    // not finite or beyond the sensor's +-8 g range is a glitch; that frame
+    // falls through to the synthesized path below instead. The one exception is
+    // an explicit shake input (R/ZR held, or the touch shake): while its flick
+    // is running the flick wins, so the button hold keeps working on pads that
+    // also have a live sensor.
+    if (intent.hasImu && motion.shakeFrame >= kShakeFrames) {
+        const float x = intent.imu[0], y = intent.imu[1], z = intent.imu[2];
+        const float mag2 = x * x + y * y + z * z;
+        if (std::isfinite(mag2) && mag2 <= 64.0f) {
+            sample.acc[0] = x;
+            sample.acc[1] = y;
+            sample.acc[2] = z;
+            motion.shakeFrame = kShakeFrames;  // keep the flick parked while the IMU drives
+            return;
+        }
     }
     const float angle = motion.tilt * kMaxTiltRadians;
     sample.acc[0] = 0.0f;
@@ -556,6 +734,12 @@ bool Sample(uint32_t chan, WiiRemoteInput::KpadSample& sample) {
         intent.shake = intent.shake || other.shake;
         if (other.tilt != 0.0f) {
             intent.tilt = other.tilt;
+        }
+        if (other.hasImu) {
+            intent.hasImu = true;
+            intent.imu[0] = other.imu[0];
+            intent.imu[1] = other.imu[1];
+            intent.imu[2] = other.imu[2];
         }
     };
     if (chan == 0 && !g_keyboardOnAPort) {

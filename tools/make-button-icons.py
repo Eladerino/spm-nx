@@ -7,6 +7,12 @@ controller.png (the Controls screen picture) and remote/ (the Controls screen's 
 The game picks the set for the controller in use (aurora texture_replacement.cpp, virtual_remote.cpp).
 
     python tools/make-button-icons.py [--src <8x PNG pack Interface folder>] [--out Play/UserData/button_icons]
+    python tools/make-button-icons.py --composite [--out <dir>]
+        Only the runtime compositor's overlays (nintendo composite/): one transparent PNG per
+        disc/face prompt texture holding just the new button art at the texture's own size, plus
+        composite.txt. The game draws each overlay over the texture it already has (its own, or
+        the HD pack's replacement), so those prompts need no pack artwork to ship. --clean emits
+        these too; this mode is for generating them on their own.
     python tools/make-button-icons.py --clean [--out <dir>]
         Only the Switch package's set: the nintendo files that come from the vendored CC0 art alone
         (controller.png, ui/, panel.txt, the sideways boot texture), plus the Controls screen's
@@ -38,7 +44,7 @@ STYLES = {
                     "A": "playstation_button_color_triangle", "+": "playstation5_button_options",
                     "-": "playstation5_button_create", "stick": "playstation_stick_r", "stick_l": "playstation_stick_l", "shake": "playstation_trigger_r1",
                     "controller": "controller_playstation5"},
-    "nintendo": {"2": "switch_button_b", "1": "switch_button_y", "A": "switch_button_x", "stick": "switch_stick_r", "stick_l": "switch_stick_l", "shake": "switch_button_r",
+    "nintendo": {"2": "switch_button_b", "1": "switch_button_x", "A": "switch_button_y", "stick": "switch_stick_r", "stick_l": "switch_stick_l", "shake": "switch_button_r",
                  "controller": "controller_switch_pro"},
 }
 
@@ -53,7 +59,8 @@ TEXTURES = [
     ("tex1_200x152_8394740b60e9c228_5.png", "disc", [("1", 0.24, 0.547, 0.08)]),
     ("tex1_208x48_3566a7d381dc2f35_5.png", "disc", [("1", 0.115, 0.50, 0.045), ("2", 0.321, 0.50, 0.045)]),
     ("tex1_40x40_1d6fdad80b7dcd8a_14.png", "disc", [("-", 0.5, 0.5, 0.5)]),
-    ("tex1_40x40_341c9fd2189acc61_5.png", "disc", [("2", 0.5, 0.5, 0.5)]),
+    ("tex1_40x40_c4a6d5884f8e8519_5.png", "plaindisc", [("1", 0.5, 0.5, 0.5)]),
+    ("tex1_40x40_341c9fd2189acc61_5.png", "plaindisc", [("2", 0.5, 0.5, 0.5)]),
     ("tex1_48x48_42bca1c8ab4b3dfb_5.png", "disc", [("A", 0.5, 0.5, 0.5)]),
     ("tex1_40x40_21ecf92a70736554_14.png", "glyph", [("1", 0.5, 0.5, 0.5)]),
     ("tex1_40x40_db14bc3d6c7b16a5_14.png", "glyph", [("2", 0.5, 0.5, 0.5)]),
@@ -77,12 +84,13 @@ MARKERS = {"tex1_248x184_fd844c6227d275cf_5.png": 2, "tex1_248x200_55ef64a9d7e80
            "tex1_200x152_8394740b60e9c228_5.png": 5, "tex1_168x136_42b4c0a037f4bbee_5.png": 6}
 
 # Prompt textures whose render never reads the pack artwork it replaces: "glyph" paints the whole
-# texture white before drawing, "shake" builds a new transparent picture, so both come out the same
-# from a blank canvas at the pack's size, and the clean set can ship them. Every other kind draws
+# texture white before drawing, "shake" builds a new transparent picture, "plaindisc" redraws its
+# white disc whole, so all three come out the same from a blank canvas at the pack's size, and the
+# clean set can ship them. Every other kind draws
 # on the artwork itself (disc, face, tippi) or is the artwork (none), so those stay full-set only.
 # None of these four is a marker texture: the full set saves them at the style's root, and so does
 # the clean set.
-PROMPT_CLEAN_KINDS = ("glyph", "shake")
+PROMPT_CLEAN_KINDS = ("glyph", "shake", "plaindisc")
 
 # Where each action's button is on the controller picture (fractions of controller.png): Move = left stick, Flip = top
 # face button, Jump = bottom, Use a Pixl = the 1 button's, Use Tippi = right stick. The panel's callouts point there.
@@ -91,7 +99,7 @@ BUTTON_SPOTS = {
              "tippi": (0.58, 0.514)},
     "playstation": {"move": (0.358, 0.499), "flip": (0.792, 0.242), "jump": (0.792, 0.422), "pixl": (0.853, 0.333),
                     "tippi": (0.641, 0.499)},
-    "nintendo": {"move": (0.236, 0.28), "flip": (0.763, 0.222), "jump": (0.763, 0.397), "pixl": (0.682, 0.31),
+    "nintendo": {"move": (0.236, 0.28), "flip": (0.682, 0.31), "jump": (0.763, 0.397), "pixl": (0.763, 0.222),
                  "tippi": (0.621, 0.513)},
 }
 
@@ -229,6 +237,16 @@ def render(src, kind, buttons, style, names=None):
             at = ((w - icon.width) // 2, (h - icon.height) // 2)
             img.alpha_composite(solid((20, 20, 20, 255), icon.getchannel("A")), at)
             img.alpha_composite(solid((255, 255, 255, 255), holes(icon)), at)
+        elif kind == "plaindisc":  # a lone white disc on transparency (the in-menu 1/2 discs): redrawn whole
+            img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            m = w * 0.04
+            ring = w * 0.085
+            draw.ellipse([m, m, w - m, h - m], fill="#141414")
+            draw.ellipse([m + ring, m + ring, w - m - ring, h - m - ring], fill="#FFFFFF")
+            size = int(w * 0.62)
+            img.alpha_composite(solid((156, 156, 156, 255), holes(render_svg(style, name, size))),
+                                ((w - size) // 2, (h - size) // 2))
         elif kind == "disc":
             x0, y0, x1, y1 = dark_bbox(img, fx * w, fy * h, fr * max(w, h), 150 if button in "+-" else 90)
             pad = (x1 - x0) * 0.05
@@ -255,11 +273,68 @@ def render(src, kind, buttons, style, names=None):
     return img if changed else None
 
 
+# Kinds whose new button art can be drawn without the pack artwork and so can ride the runtime
+# compositor (texture_replacement.cpp): the overlay holds only the new art on transparency and the
+# game draws it over the texture it already has. "tippi" is not one of them: tippi() covers the TV
+# and the remote with tape sampled from the picture itself, so the cover is the game's own art,
+# which no shipped overlay may carry (and a static picture cannot express "copy this part there").
+COMPOSITE_KINDS = ("disc", "face")
+
+
+def render_overlay(kind, buttons, style, w, h):
+    """Only the new button art for one prompt texture, on a transparent canvas at the texture's own
+    (1x) size, positioned from the TEXTURES spots. The disc path draws the ring and button where
+    render() looks for the old one: centred on the spot, the spot's search radius as the radius.
+    The face path draws the symbol at render()'s size for it (1.5x the search window's diameter),
+    centred on the spot; render() squashes it by the old symbol's shape, which only the pack
+    artwork knows, so the overlay's symbol is unsquashed. Returns None when the style has no
+    button for any of the texture's buttons (nintendo keeps the game's own + and -, so their
+    discs get no overlay)."""
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    drew = False
+    for button, fx, fy, fr in buttons:
+        name = STYLES[style].get(button) if button else None
+        if name is None:
+            continue
+        if kind == "disc":
+            r = fr * max(w, h)
+            disc(img, (fx * w - r, fy * h - r, fx * w + r, fy * h + r), style, name)
+        elif kind == "face":
+            size = int(3 * fr * max(w, h))
+            sym = holes(render_svg(style, name, size))
+            img.alpha_composite(solid((46, 46, 46, 255), sym),
+                                (int(fx * w - sym.width / 2), int(fy * h - sym.height / 2)))
+        drew = True
+    return img if drew else None
+
+
+def build_composites(out):
+    """<out>/composite/: one overlay per disc/face prompt texture, plus composite.txt (one line per
+    texture: its filename and kind), for the runtime compositor. Drawn from the vendored Kenney art
+    alone, like the clean set, so the Switch package ships them and no HD pack is involved."""
+    style = "nintendo"
+    comp = os.path.join(out, "composite")
+    os.makedirs(comp, exist_ok=True)
+    lines = []
+    for name, kind, buttons in TEXTURES:
+        if kind not in COMPOSITE_KINDS:
+            continue
+        w, h = (int(v) for v in name.split("_")[1].split("x"))
+        img = render_overlay(kind, buttons, style, w, h)
+        if img is None:
+            continue
+        img.save(os.path.join(comp, name))
+        lines.append(f"{name} {kind}")
+    with open(os.path.join(comp, "composite.txt"), "w", encoding="ascii") as f:
+        for line in lines:
+            print(line, file=f)
+    print(f"{style} (composite): {len(lines)} overlays -> {comp}")
+
+
 def panel_and_ui(out, style, icon_names=None, spots=None):
     """panel.txt (where each action's button sits on controller.png) and ui/ (the Controls panel's
     per-action icons). controller.png must already be saved in out. Pure Kenney, so the clean set
-    uses this too. icon_names and spots override single actions' glyphs and picture positions
-    (the Switch clean set's panel follows the port's own pad mapping; see build_clean)."""
+    uses this too. icon_names and spots override single actions' glyphs and picture positions."""
     spots = {**BUTTON_SPOTS[style], **(spots or {})}
     with open(os.path.join(out, "panel.txt"), "w", encoding="ascii") as f:
         # <action> <x> <y>: where the action's button is, in fractions of controller.png
@@ -269,13 +344,36 @@ def panel_and_ui(out, style, icon_names=None, spots=None):
         pad = Image.open(os.path.join(out, "controller.png"))
         x = int(pad.width * 0.78)
         top = next(y for y in range(pad.height) if pad.getpixel((x, y))[3] > 128)
-        print("stylish", 0.78, round(top / pad.height + 0.02, 3), file=f)
+        stylish_y = round(top / pad.height + 0.02, 3)
+        print("stylish", 0.78, stylish_y, file=f)
     # The panel's button icons, one per action.
     os.makedirs(os.path.join(out, "ui"), exist_ok=True)
     icons = {"move": "stick_l", "flip": "A", "jump": "2", "pixl": "1", "tippi": "stick", "stylish": "shake"}
     for action, button in icons.items():
         name = (icon_names or {}).get(action, STYLES[style][button])
         render_svg(style, name, 128).save(os.path.join(out, "ui", action + ".png"))
+    if style == "nintendo":
+        # Per-button art for the panel's dynamic callouts (DrawControlsPanel in
+        # settings_overlay.cpp): one icon per SDL button name, plus buttons.txt saying where
+        # each named button sits on controller.png, so a callout can follow the player's own
+        # bindings instead of the defaults. The names are SDL's positional ones (a = south,
+        # b = east, x = west, y = north) and each picture is the Switch letter printed at that
+        # seat, each rendered from its Kenney file (the A file joined the vendored set from
+        # the same pack, 1.5; its B/X/Y files are byte-identical to the ones already here).
+        button_icons = {"a": "switch_button_b", "b": "switch_button_a", "x": "switch_button_y",
+                        "y": "switch_button_x",
+                        "rightshoulder": "switch_button_r", "righttrigger": "switch_button_r",
+                        "leftstick": "switch_stick_l", "rightstick": "switch_stick_r"}
+        os.makedirs(os.path.join(out, "ui", "buttons"), exist_ok=True)
+        for token, name in button_icons.items():
+            render_svg(style, name, 128).save(os.path.join(out, "ui", "buttons", token + ".png"))
+        button_spots = {"a": (0.763, 0.397), "b": (0.843, 0.310), "x": (0.682, 0.310), "y": (0.763, 0.222),
+                        "rightshoulder": (0.78, stylish_y), "righttrigger": (0.78, stylish_y),
+                        "leftstick": spots["move"], "rightstick": spots["tippi"]}
+        with open(os.path.join(out, "buttons.txt"), "w", encoding="ascii") as f:
+            # <sdl button name> <x> <y>: where that button is, in fractions of controller.png
+            for token, (fx, fy) in button_spots.items():
+                print(token, fx, fy, file=f)
 
 
 def build_clean(out_root):
@@ -294,11 +392,11 @@ def build_clean(out_root):
     artwork into the marker2 files and redraws the 3-6 bubbles from it; that is game art, so it
     stays out of the package, and those textures are simply not missed under the panel.
 
-    The panel data follows THIS port's controls, not the PC set's positions: the Switch pad
-    layer reports each button under its own name (switch/sdl3_shim/sdl3_shim_gamepad.c), so
-    the position-based defaults in virtual_remote.cpp land one step around the diamond: Wii A
-    (Flip) is the pad's Y button and Wii 1 (Use a Pixl) is its X. Jump's picture is unchanged
-    (Wii 2 is the pad's B and A alike; the panel points at B)."""
+    The panel data follows the defaults in virtual_remote.cpp directly: the Switch pad layer
+    reports buttons by position (switch/sdl3_shim/sdl3_shim_gamepad.c), and the Nintendo
+    defaults (Brandon's Nov 1 call) put Wii A (Flip) on the pad's west button, printed Y, and
+    Wii 1 (Use a Pixl) on its north button, printed X, the feel of the port's first release.
+    Jump's picture is unchanged (Wii 2 is the pad's B and A alike; the panel points at B)."""
     style = "nintendo"
     out = os.path.join(out_root, style)
     shutil.rmtree(out, ignore_errors=True)
@@ -313,18 +411,13 @@ def build_clean(out_root):
         Image.new("RGBA", (w, h), (0, 0, 0, 0)).save(os.path.join(out, f"marker{marker}", name))
     controller_picture(style).save(os.path.join(out, "controller.png"))
     sideways_picture(Image.open(os.path.join(out, "controller.png"))).save(os.path.join(out, SIDEWAYS_TEXTURE))
-    spots = BUTTON_SPOTS[style]
-    panel_and_ui(out, style,
-                 icon_names={"flip": "switch_button_y", "pixl": "switch_button_x"},
-                 spots={"flip": spots["pixl"], "pixl": spots["flip"]})
+    panel_and_ui(out, style)
     # The pack-independent prompt textures (PROMPT_CLEAN_KINDS): rendered from a blank canvas at
     # the pack's 8x size and saved at 4x under their own names, like the full set, so the in-game
     # prompts they belong to (the button glyphs inside text boxes, the shake prompt's icon) show
-    # Switch buttons in the package too. The glyphs' pictures follow the port's pad mapping, the
-    # same override the panel's icons take above: STYLES follows virtual_remote.cpp's
-    # position-based defaults (Wii 1 = Y, Wii A = X), but the pad layer reports the buttons by
-    # name, one step around the diamond, so Wii 1 is the pad's X and Wii A its Y. The shake
-    # icon's R is the same under both mappings, so it needs no override.
+    # Switch buttons in the package too. The glyphs' pictures follow STYLES directly, which
+    # follows virtual_remote.cpp's Nintendo defaults (Wii 1 = north, printed X; Wii A = west,
+    # printed Y), while the pad layer reports buttons by position underneath either way.
     for name, kind, buttons in TEXTURES:
         if kind not in PROMPT_CLEAN_KINDS:
             continue
@@ -332,10 +425,13 @@ def build_clean(out_root):
         with tempfile.TemporaryDirectory() as tmp:
             blank = os.path.join(tmp, name)
             Image.new("RGBA", (w * 8, h * 8), (0, 0, 0, 0)).save(blank)
-            img = render(blank, kind, buttons, style,
-                         names={"1": "switch_button_x", "A": "switch_button_y"})
+            img = render(blank, kind, buttons, style)
         img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
         img.save(os.path.join(out, name))
+    # The disc and face prompts still cannot ship as pictures (their renders draw on the pack's
+    # artwork), so they ship as overlays for the runtime compositor instead: composite/ holds
+    # only the new buttons, and the game draws them over its own textures at runtime.
+    build_composites(out)
     print(f"{style} (clean): -> {out}")
 
 
@@ -345,7 +441,14 @@ def main():
     ap.add_argument("--out", default=os.path.join(ROOT, "Play", "UserData", "button_icons"))
     ap.add_argument("--clean", action="store_true",
                     help="only the Switch package's clean set (nintendo, from the vendored CC0 art; no --src pack)")
+    ap.add_argument("--composite", action="store_true",
+                    help="only the runtime compositor's overlays (nintendo composite/; no --src pack)")
     args = ap.parse_args()
+    if args.composite:
+        out = os.path.join(args.out, "nintendo")
+        os.makedirs(out, exist_ok=True)
+        build_composites(out)
+        return
     if args.clean:
         build_clean(args.out)
         return
