@@ -3272,7 +3272,7 @@ void DrawControlsPanel() {
     // from top to bottom, with a leader line to the button.
     struct Callout { int m; const char* title; std::string sub; };
     static const char* const kShakeButtons[3] = {"RB or RT: stylish moves, break free", "R1 or R2: stylish moves, break free",
-                                                 "R or ZR: stylish moves, break free"};
+                                                 "Shake the controller, or hold R or ZR: stylish moves, break free"};
     const auto sub = [&](int m, const char* base) {
         std::string s = base;
         if (!alsoFor[m].empty()) {
