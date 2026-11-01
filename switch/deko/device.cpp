@@ -27,7 +27,7 @@ namespace GuestProfiler {
 void SetSwitchProfileEnabled(bool enabled);
 }
 
-// The runtime's GX record ring (gx_worker.h), declared here the same way: the gxworker and gxdefer
+// The runtime's GX record ring (gx_worker.h), declared here the same way: the gxworker, gxdefer and gxthread
 // switches pick its mode, which it applies at the next frame boundary.
 namespace GxWorker {
 enum class Mode : uint8_t;
@@ -52,7 +52,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"texdump", &Diag::texDump},      {"shaderdump", &Diag::shaderDump}, {"nomerge", &Diag::noMerge},
     {"uvlog", &Diag::uvLog},          {"mtxlog", &Diag::mtxLog},        {"perftimer", &Diag::perfTimer},
     {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"cpthread", &Diag::cpThread},
-    {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},
+    {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -97,9 +97,10 @@ void diag_read_file(FILE* f) {
     }
 }
 
-// gxdefer wins over gxworker: 2 (Deferred), 1 (Immediate), 0 (off), as in gx_worker.h.
+// The strongest GX record switch wins: 3 (Threaded), 2 (Deferred), 1 (Immediate), 0 (off), as in
+// gx_worker.h.
 void apply_gx_worker_mode() {
-    const uint8_t mode = g_diag.gxDefer ? 2 : (g_diag.gxWorker ? 1 : 0);
+    const uint8_t mode = g_diag.gxThread ? 3 : g_diag.gxDefer ? 2 : (g_diag.gxWorker ? 1 : 0);
     GxWorker::RequestMode(static_cast<GxWorker::Mode>(mode));
 }
 } // namespace
@@ -170,7 +171,8 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "arrayup")) aurora::gx::fifo::nsmbw_set_array_reupload(on);
     else if (!std::strcmp(key, "profile")) GuestProfiler::SetSwitchProfileEnabled(on);
     else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
-    else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer")) apply_gx_worker_mode();
+    else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer") || !std::strcmp(key, "gxthread"))
+        apply_gx_worker_mode();
     return true;
 }
 
