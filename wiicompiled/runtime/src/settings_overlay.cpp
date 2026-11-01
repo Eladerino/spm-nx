@@ -2926,8 +2926,14 @@ void PersistDisplayModeIfChanged() {
 }
 
 void ApplyInputBlockState() {
+    // The startup cover is NOT in this list on purpose. It stays up for the whole logo
+    // sequence (sequence 0), and that sequence skips its long stages on a button press:
+    // with the cover blocking input, KPAD handed the game zeroed samples for the entire
+    // boot (the [bootinput] diagnostic logged hold 0 on every read until the title), so
+    // no press could ever shorten the roughly 33 s wait. The cover owns no input; its
+    // dismiss press is the same press the game is waiting for.
     const bool blocked = controller_mapping_wizard::IsActive() || g_rebind.active ||
-                         g_exitPromptOpen || OverlayMenuVisible() || g_optOpen || StartupScreenVisible();
+                         g_exitPromptOpen || OverlayMenuVisible() || g_optOpen;
     PADBlockInput(blocked);
     InputBindings::SetInputBlocked(blocked);
 }
