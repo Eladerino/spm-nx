@@ -15,13 +15,13 @@
 //
 // NoSync: as Inline but without running pending records first, for a call that touches nothing a
 // record changes. The three getters answer from a game-side copy their setters keep at the call
-// while records are pending; InitTexObj only fills in a host texture object and its guest struct,
-// which nothing reads until LoadTexObj (Inline).
+// while records are pending; the texture object builders (InitTexObj and its LOD, filter, wrap
+// mode, TLUT and CI forms) only fill in a host texture object and its guest struct, which nothing
+// reads until LoadTexObj (Inline).
 //
 // Not here on purpose, so Inline: the other getters (Get*), waits (DrawDone, Flush, PixModeSync,
-// SetDrawSync), the other builders that write guest memory (InitTexObjCI and friends,
-// InitTlutObj), LoadTexObj and LoadTlut (they read a host object keyed by the guest address),
-// display list recording, copies, FIFO setup, the indexed matrix loads (they read the matrix array
+// SetDrawSync), InitTlutObj, LoadTexObj and LoadTlut (they read a host object keyed by the guest
+// address), display list recording, copies, FIFO setup, the indexed matrix loads (they read the matrix array
 // through array state a pending SetArray may still change), setters that write __GXData
 // (SetScissorBoxOffset, SetZScaleOffset; SetScissor writes its part at the call and defers the
 // rest), the Poke* calls, list setters (SetVtxDescv, SetVtxAttrFmtv), and the EGG and NSMBW
@@ -108,6 +108,11 @@ GX_WORKER_KIND(0x80291748u, NoSync);     // GXGetProjectionv
 
 // Texture (gx_texture.cpp)
 GX_WORKER_KIND(0x8028EA24u, NoSync);     // GXInitTexObj
+GX_WORKER_KIND(0x8028EC30u, NoSync);     // GXInitTexObjCI
+GX_WORKER_KIND(0x8028EC78u, NoSync);     // GXInitTexObjLOD
+GX_WORKER_KIND(0x8028ED8Cu, NoSync);     // GXInitTexObjWrapMode
+GX_WORKER_KIND(0x8028EDA0u, NoSync);     // GXInitTexObjTlut
+GX_WORKER_KIND(0x8028EDA8u, NoSync);     // GXInitTexObjFilter
 
 // Display lists (gx_dl.cpp): the list's bytes are read at replay, as the GPU reads them late on
 // hardware and the decode thread already does.
