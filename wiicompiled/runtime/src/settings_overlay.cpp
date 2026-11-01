@@ -3464,8 +3464,10 @@ void PatchBootStrings() {
 // first (it runs earlier in Draw), so the copy in this table is the message file's, the one the
 // Flipside Arcade's instruction screens read.
 // Message files load per area, not with the dol, so this cannot be a one-shot: it runs again
-// whenever the game's sequence changes (a new area's file has been read by then) and, while
-// lines are still missing, every couple of seconds.
+// whenever the game's sequence changes (a new area's file has been read by then). It used to
+// also run every couple of seconds while lines were missing; on the Switch a pass over both
+// memory ranges costs about a second and a half of game thread, which showed up as brutal
+// launch hitching (stderr-24: 23 frames of ~1.51 s), so passes are sequence changes only.
 void PatchMessageStrings() {
     struct Line {
         const char* from;
@@ -3483,28 +3485,26 @@ void PatchMessageStrings() {
         {"Hold the Wii Remote sideways.", "Hold the controller sideways."},
         {"Simply point your Wii Remote", "Simply point your controller"},
     };
-    static int lastSeq = -2;
-    static int framesSincePass = 1 << 30;  // the first Draw() call passes
+    static int lastSeq = -2;  // not a real sequence: the first Draw() call passes
     static int passes = 0;
     static bool allSeen = false;
-    static bool gaveUp = false;  // some line never matched (see below): stop sweeping MEM2 for it
+    static bool gaveUp = false;  // the missing-lines log below has fired
     const int seq = SpmMapSweep::Seq();
     const bool seqChanged = seq != lastSeq;
     lastSeq = seq;
-    ++framesSincePass;
-    if (!seqChanged && (allSeen || gaveUp || framesSincePass < 120)) return;
-    framesSincePass = 0;
+    if (!seqChanged) return;
     ++passes;
-    // MEM1 holds the dol and the game's heaps, message buffers included. MEM2 is swept only
-    // while lines are still missing, in case a build parks the buffers there: at 128 MB it is
-    // the expensive half of a pass, and sequence changes re-run the MEM1 pass on their own.
+    // MEM1 holds the dol and the game's heaps, message buffers included. MEM2 is swept on
+    // the first pass only, in case a build parks the buffers there: at 128 MB it is the
+    // expensive half of a pass, and a line still missing after that pass is far more likely
+    // not loaded yet than parked in MEM2.
     struct Range {
         uint32_t base;
         size_t size;
     };
     static constexpr Range kRanges[] = {{Memory::kMem1CachedBase, Memory::kMem1Size},
                                         {Memory::kMem2CachedBase, Memory::kMem2Size}};
-    const size_t rangeCount = (allSeen || gaveUp) ? 1 : 2;
+    const size_t rangeCount = passes == 1 ? 2 : 1;
     int patched = 0;
     for (size_t r = 0; r < rangeCount; ++r) {
         const Range range = kRanges[r];
@@ -3532,15 +3532,15 @@ void PatchMessageStrings() {
     for (const Line& line : kLines) allSeen = allSeen && line.seen;
     if (patched > 0)
         RT_LOGF(RT_TAG_RUNTIME, "message strings: %d line(s) rewritten for the controller\n", patched);
-    // A line that never matches is not worth sweeping 128 MB for ever (the sideways line, for
-    // one, may exist only as the dol copy PatchBootStrings already claimed). After 40 passes
-    // the search settles for MEM1 on sequence changes and logs how many lines it gave up on,
-    // so a hardware log shows a line is missing rather than just not loaded yet.
+    // A line can stay missing for a long while without anything being wrong (a line read
+    // only by a late area, the Flipside Arcade's sideways copy for one, is not loaded until
+    // that area is). After 40 passes the search logs how many lines never matched, once, so
+    // a hardware log can tell a missing line apart from one that is just not loaded yet.
     if (!allSeen && !gaveUp && passes >= 40) {
         gaveUp = true;
         int missing = 0;
         for (const Line& line : kLines) missing += line.seen ? 0 : 1;
-        RT_LOGF(RT_TAG_RUNTIME, "message strings: %d line(s) never found, MEM2 sweeps stopped\n", missing);
+        RT_LOGF(RT_TAG_RUNTIME, "message strings: %d line(s) never found after %d passes\n", missing, passes);
     }
 }
 
@@ -3680,7 +3680,6 @@ constexpr int kOptTabCount = int(std::size(kOptTabs));
 constexpr const char* kDiagKeys[] = {
     "depth_off", "cull_off", "magenta", "picdump", "efbclear", "bufdump", "texdump",
     "shaderdump", "nomerge", "uvlog", "mtxlog", "perftimer", "arrayup", "profile", "cpthread",
-    "gxworker", "gxdefer",
 };
 constexpr const char* kDiagLabels[] = {
     "Depth test off (depth_off)", "Face culling off (cull_off)", "Magenta unbound textures (magenta)",
@@ -3688,7 +3687,6 @@ constexpr const char* kDiagLabels[] = {
     "Dump textures (texdump)", "Dump shaders (shaderdump)", "No draw merging (nomerge)",
     "UV trace (uvlog)", "Matrix trace (mtxlog)", "Performance timers (perftimer)",
     "Re-upload vertex arrays (arrayup)", "Guest profiler (profile)", "GX decode thread (cpthread)",
-    "GX call records (gxworker)", "Deferred GX records (gxdefer)",
 };
 constexpr const char* kDiagHelp[] = {
     "Forces depth and stencil tests and depth writes off for every pipeline. Geometry can show through other geometry; for isolating depth problems.",
@@ -3706,8 +3704,6 @@ constexpr const char* kDiagHelp[] = {
     "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data.",
     "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them).",
     "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong.",
-    "Records the game's GX calls and replays each one straight away, from the next frame. The picture should look exactly the same; anything that differs is a call the records do not carry yet. Every 600 frames with perftimer on, a [gxworker] line counts them.",
-    "As GX call records, but the records wait until the game next needs GX state back (a getter, a wait, the end of the frame). Turns records on by itself. An experiment ahead of moving GX work to core 2; turn it off if anything draws wrong.",
 };
 constexpr int kDiagCount = int(std::size(kDiagKeys));
 
