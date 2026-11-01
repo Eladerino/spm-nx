@@ -2020,7 +2020,11 @@ void DrawStartupScreen() {
                 // button, so it cannot stand in here. Until the pad's style is known, or if the
                 // file is not on the card, the button is named in text instead, so the line
                 // never lays out a blank gap where the icon would sit.
-                const int padStyle = aurora_button_icon_style();
+                // Before a pad has reported its style, assume the Switch's own buttons (the
+                // only style a Switch pad reports), so the icon is there from the first frame
+                // instead of the line starting as text and swapping to the icon later.
+                const int reportedStyle = aurora_button_icon_style();
+                const int padStyle = reportedStyle >= 0 ? reportedStyle : 2;
                 static const char* const kStyleDirs[3] = {"xbox", "playstation", "nintendo"};
                 const auto aIconPath = padStyle >= 0 && padStyle < 3
                     ? RuntimeConfigFile::ApplicationDataDirectory() / "button_icons" /
@@ -2059,15 +2063,22 @@ void DrawStartupScreen() {
                     }
                     GameLayout::DrawText(list, view, *pmFont, u, at, py, fs, 0x3D8BFFFFu, 0x1A3FA0FFu, 1.0f, 0, 1);
                 };
-                outlined(press, x);
-                if (!icon.empty()) {
-                    x += wPress + gap;
-                    // The icon is a white disc with the letter knocked out, drawn for a dark
-                    // background: on the cream card it blends in, so an ink disc sits behind
-                    // it, a touch wider, the same treatment as the Controls panel's icons.
-                    list->AddCircleFilled(S(x + iconSize * 0.5f, py), iconSize * 0.54f * k, IM_COL32(24, 18, 12, 255));
-                    Draw(icon.c_str(), x + iconSize * 0.5f, py, iconSize, 0.0f, false);
-                    outlined(rest, x + iconSize + gap);
+                if (g_strapInputAccepted.load(std::memory_order_relaxed)) {
+                    // Start was pressed; the game is finishing its boot underneath. Say so,
+                    // rather than keep asking for a press that has already been taken.
+                    const auto starting = GameLayout::Utf16("Starting...");
+                    outlined(starting, -GameLayout::MeasureText(*pmFont, starting, fs) * 0.5f);
+                } else {
+                    outlined(press, x);
+                    if (!icon.empty()) {
+                        x += wPress + gap;
+                        // The icon is a white disc with the letter knocked out, drawn for a dark
+                        // background: on the cream card it blends in, so an ink disc sits behind
+                        // it, a touch wider, the same treatment as the Controls panel's icons.
+                        list->AddCircleFilled(S(x + iconSize * 0.5f, py), iconSize * 0.54f * k, IM_COL32(24, 18, 12, 255));
+                        Draw(icon.c_str(), x + iconSize * 0.5f, py, iconSize, 0.0f, false);
+                        outlined(rest, x + iconSize + gap);
+                    }
                 }
             }
             // The heroes flank the card; Peach waves from the hills.
@@ -4603,6 +4614,18 @@ void NotifyStrapInputAccepted() noexcept {
         g_startupDismissFrame.store(g_presentedFrame + kStrapTransitionCoverFrames,
                                     std::memory_order_release);
     }
+}
+
+uint32_t StartupAutoPressBits() noexcept {
+    // The cover's start press reaches the game, but the game's logo sequence (Seq 0) only
+    // skips a stage on a press made while that stage is listening, one stage per press. A
+    // single A therefore did nothing visible: the cover stayed up and the boot ran on to
+    // its own timeout. Once the player has pressed start, tap A and 2 for the game (four
+    // frames down, four up, so each tap is a fresh press) until the sequence reaches the
+    // title. The taps stop the moment Seq leaves 0, so the title screen never sees one.
+    if (!g_strapInputAccepted.load(std::memory_order_acquire) || SpmMapSweep::Seq() != 0) return 0;
+    constexpr uint32_t kWpadA = 0x0800u, kWpadTwo = 0x0100u;
+    return (g_presentedFrame / 4) % 2 == 0 ? (kWpadA | kWpadTwo) : 0u;
 }
 
 void AdvancePresentedFrame() noexcept { ++g_presentedFrame; }
