@@ -2008,11 +2008,28 @@ void DrawStartupScreen() {
                 // The start button of what the player is holding: the controller's own jump button (its icon), else
                 // the keyboard's jump key. Both are 2 on the Wii Remote, which the cover waits for (frame_input.cpp).
 #if defined(__SWITCH__)
-                // The cover waits for the pad's A button; name it in text instead of using the
-                // icon path below (the shipped set's jump icon is the B button, and that path
-                // would lay out a blank gap if the button_icons set were missing).
-                const std::string icon;
-                const auto press = GameLayout::Utf16("Press A to start!");
+                // The cover waits for the pad's A button (frame_input.cpp): "Press" and the A
+                // button's own icon, the per-button set's b.png (SDL's east token is the printed
+                // A), drawn the same way as the jump icon below. The jump icon itself is the B
+                // button, so it cannot stand in here. Until the pad's style is known, or if the
+                // file is not on the card, the button is named in text instead, so the line
+                // never lays out a blank gap where the icon would sit.
+                const int padStyle = aurora_button_icon_style();
+                static const char* const kStyleDirs[3] = {"xbox", "playstation", "nintendo"};
+                const auto aIconPath = padStyle >= 0 && padStyle < 3
+                    ? RuntimeConfigFile::ApplicationDataDirectory() / "button_icons" /
+                          kStyleDirs[padStyle] / "ui" / "buttons" / "b.png"
+                    : std::filesystem::path();
+                static std::filesystem::path aIconCheckedPath;
+                static bool aIconPresent = false;
+                if (aIconCheckedPath != aIconPath) {
+                    aIconPresent = !aIconPath.empty() && std::filesystem::exists(aIconPath);
+                    aIconCheckedPath = aIconPath;
+                }
+                const std::string icon = aIconPresent && !aIconPath.empty()
+                    ? "@" + RuntimeConfigFile::PathToUtf8(aIconPath)
+                    : std::string();
+                const auto press = GameLayout::Utf16(icon.empty() ? "Press A to start!" : "Press");
 #else
                 const int padStyle = aurora_button_icon_style();
                 static const char* const kStyleDirs[3] = {"xbox", "playstation", "nintendo"};
