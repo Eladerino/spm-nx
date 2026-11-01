@@ -780,7 +780,7 @@ struct AbiRawCpuThunk {
     // first, since it may read or change what they change.
     static void Invoke(CpuContext* cpu) {
         if (GxWorker::Engaged()) {
-            GxWorker::Drain();
+            GxWorker::Drain(GxWorker::DrainCause::kUnnamedNative);
         }
         InvokeNoSync(cpu);
     }
@@ -844,13 +844,13 @@ template <uint32_t Address, auto Target>
 inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
     constexpr GxWorker::Kind kind = GxWorker::KindOf<Address>::kKind;
     if constexpr (kind == GxWorker::Kind::Inline) {
-        GxWorker::Drain();
+        GxWorker::Drain(Address);
         return false;
     } else {
         static_assert(!std::is_invocable_v<decltype(Target), CpuContext*>,
                       "only typed overrides can be queued or defer themselves");
         if (!GxWorker::CanRecord()) {
-            GxWorker::Drain();
+            GxWorker::Drain(Address);
             return false;
         }
         if constexpr (kind == GxWorker::Kind::Queue) {
@@ -859,7 +859,7 @@ inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
             const bool recorded = std::apply([](auto... args) { return GxWorker::RecordCall<Target>(args...); },
                                              AbiTrampoline<Signature>::BuildArgs(cpu));
             if (!recorded) {
-                GxWorker::Drain();
+                GxWorker::Drain(Address);
             }
             return recorded;
         } else {
@@ -869,6 +869,18 @@ inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
         }
     }
 }
+
+// The raw invoker of a plain registered native: as AbiRawCpuThunk, with its guest address for the
+// GX worker's drain counts.
+template <uint32_t Address, auto Target>
+struct NativeRawCpuThunk {
+    static void Invoke(CpuContext* cpu) {
+        if (GxWorker::Engaged()) {
+            GxWorker::Drain(Address);
+        }
+        AbiRawCpuThunk<Target>::InvokeNoSync(cpu);
+    }
+};
 
 // The raw invoker of a counted native override: counts the call, then runs the plain thunk (or
 // records it, with GX records on).
@@ -884,10 +896,10 @@ struct CountedAbiRawCpuThunk {
 };
 
 #define REGISTER_NATIVE_FUNCTION(address, fn) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &AbiRawCpuThunk<&fn>::Invoke)
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn>::Invoke)
 
 #define REGISTER_NATIVE_FUNCTION_AS(address, fn, pretty_name) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_named_, __COUNTER__)(address, pretty_name, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &AbiRawCpuThunk<&fn>::Invoke)
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_named_, __COUNTER__)(address, pretty_name, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn>::Invoke)
 
 // REGISTER_NATIVE_FUNCTION for PPC_NATIVE_OVERRIDE: the same entry, with a raw invoker that counts.
 #define REGISTER_COUNTED_NATIVE_FUNCTION(address, fn) \

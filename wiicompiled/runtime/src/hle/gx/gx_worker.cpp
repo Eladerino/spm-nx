@@ -7,8 +7,12 @@
 
 #include "gx_worker.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <exception>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace GxWorker {
 
@@ -57,6 +61,53 @@ Stat g_ringFull;
 Stat g_replayErrors;
 std::atomic<uint64_t> g_peakBytes{0};  // since the last print; the printer swaps it back to zero
 
+// Drains that had work, by cause (DrainCause or a guest address): an open-addressed table the owner
+// fills and the printing thread reads. A cause that finds the table full counts as kOther.
+constexpr uint32_t kNoCause = 0xFFFFFFFFu;
+constexpr size_t kCauseSlots = 512;
+struct CauseSlot {
+    std::atomic<uint32_t> key{kNoCause};
+    Stat count;
+};
+CauseSlot g_causes[kCauseSlots];
+
+void CountCause(uint32_t cause) noexcept {
+    size_t index = (cause * 2654435761u) % kCauseSlots;
+    for (size_t probe = 0; probe < kCauseSlots; ++probe) {
+        CauseSlot& slot = g_causes[(index + probe) % kCauseSlots];
+        const uint32_t key = slot.key.load(std::memory_order_relaxed);
+        if (key == cause) {
+            slot.count.Add();
+            return;
+        }
+        if (key == kNoCause) {
+            slot.key.store(cause, std::memory_order_release);
+            slot.count.Add();
+            return;
+        }
+    }
+    if (cause != DrainCause::kOther) {
+        CountCause(DrainCause::kOther);
+    }
+}
+
+const char* FixedCauseName(uint32_t cause) {
+    switch (cause) {
+    case DrainCause::kOther: return "(other)";
+    case DrainCause::kFrame: return "(frame end)";
+    case DrainCause::kRingFull: return "(ring full)";
+    case DrainCause::kCommit: return "(immediate)";
+    case DrainCause::kFifo: return "(FIFO store)";
+    case DrainCause::kUnnamedNative: return "(native)";
+    case DrainCause::kSelfDefer: return "(self-defer)";
+    default: return nullptr;
+    }
+}
+
+// The [gxworker] cause lines list at most this many, this many to a line.
+constexpr size_t kCauseMaxEntries = 24;
+constexpr size_t kCausesPerLine = 6;
+
 Mode CurrentMode() noexcept { return static_cast<Mode>(g_mode.load(std::memory_order_relaxed)); }
 
 constexpr size_t AlignUp(size_t value) { return (value + (kAlign - 1)) & ~(kAlign - 1); }
@@ -73,12 +124,13 @@ bool CanRecord() noexcept {
     return t_owner && CurrentMode() != Mode::Off && !g_draining && !GxWorkerRecordingBlocked();
 }
 
-void Drain() {
+void Drain(uint32_t cause) {
     if (!t_owner || g_draining || g_write == 0) {
         return;
     }
     g_draining = true;
     g_drains.Add();
+    CountCause(cause);
     if (g_write > g_peakBytes.load(std::memory_order_relaxed)) {
         g_peakBytes.store(g_write, std::memory_order_relaxed);
     }
@@ -123,7 +175,7 @@ void* Reserve(ReplayFn replay, size_t size, size_t align) {
     size_t start = AlignUp(g_write);
     if (start + sizeof(RecordHeader) + size > kRingBytes) {
         g_ringFull.Add();
-        Drain();
+        Drain(DrainCause::kRingFull);
         start = 0;
         if (g_draining) {
             return nullptr;
@@ -143,7 +195,7 @@ void* Reserve(ReplayFn replay, size_t size, size_t align) {
 void Commit() {
     g_reserved = false;
     if (CurrentMode() == Mode::Immediate) {
-        Drain();
+        Drain(DrainCause::kCommit);
     }
 }
 
@@ -169,7 +221,7 @@ void FrameBoundary() {
     if (!t_owner || g_draining) {
         return;
     }
-    Drain();
+    Drain(DrainCause::kFrame);
     const Mode requested = RequestedMode();
     const Mode current = CurrentMode();
     if (requested != current) {
@@ -179,7 +231,7 @@ void FrameBoundary() {
     }
 }
 
-void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame) {
+void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*nameOf)(uint32_t)) {
     if (lastFrame < firstFrame) {
         return;
     }
@@ -200,6 +252,50 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame) {
                  static_cast<unsigned>(mode), static_cast<double>(records) / frames,
                  static_cast<double>(drains) / frames, static_cast<unsigned long long>(peak / 1024),
                  static_cast<unsigned long long>(full), static_cast<unsigned long long>(errors));
+
+    // What made pending records run, busiest first, as drains a frame. Immediate mode's per-record
+    // drains are left out: they say nothing about what the worker will have to wait for.
+    std::vector<std::pair<uint64_t, uint32_t>> causes;
+    for (CauseSlot& slot : g_causes) {
+        const uint32_t key = slot.key.load(std::memory_order_acquire);
+        if (key == kNoCause) {
+            continue;
+        }
+        const uint64_t delta = slot.count.TakeDelta();
+        if (delta != 0 && key != DrainCause::kCommit) {
+            causes.emplace_back(delta, key);
+        }
+    }
+    if (causes.empty()) {
+        return;
+    }
+    std::sort(causes.begin(), causes.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    if (causes.size() > kCauseMaxEntries) {
+        causes.resize(kCauseMaxEntries);
+    }
+    std::fprintf(stderr, "[gxworker] frames %llu-%llu: drains a frame by cause, busiest first:\n",
+                 static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame));
+    std::string line;
+    for (size_t i = 0; i < causes.size(); ++i) {
+        const uint32_t key = causes[i].second;
+        const char* name = FixedCauseName(key);
+        char hex[16];
+        if (name == nullptr && nameOf != nullptr) {
+            name = nameOf(key);
+        }
+        if (name == nullptr) {
+            std::snprintf(hex, sizeof(hex), "%08X", key);
+            name = hex;
+        }
+        char item[160];
+        std::snprintf(item, sizeof(item), "%s%s %.1f", line.empty() ? "" : ", ", name,
+                      static_cast<double>(causes[i].first) / frames);
+        line += item;
+        if ((i + 1) % kCausesPerLine == 0 || i + 1 == causes.size()) {
+            std::fprintf(stderr, "[gxworker]   %s\n", line.c_str());
+            line.clear();
+        }
+    }
 }
 
 } // namespace GxWorker
