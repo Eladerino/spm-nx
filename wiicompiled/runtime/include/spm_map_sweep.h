@@ -21,6 +21,11 @@ void SetGamePaused(bool paused);
 int Seq();
 // Where the game is, for logs: "he3_08 2D", "he3_08 3D", or the sequence ("title", "mapchange"...).
 void CurrentPlace(char* out, size_t size);
+// Game-thread state the Prepare sweep's flip phases poll (each calls the game's own function on
+// the frame's cpu, so they cannot be used from the UI thread).
+bool MarioIn3d(CpuContext* cpu);        // marioCheck3d: Mario is in 3D
+int MarioCharacter(CpuContext* cpu);    // the character in play: 0 Mario, 1 Peach, 2 Bowser, 3 Luigi; -1 if unreadable
+bool MarioHasControl(CpuContext* cpu);  // marioWork ctrl and keyOff both 0: no event, message or menu owns him
 // Pause menu (pausewin) open, for faster menus.
 bool PauseMenuOpen();
 // Options > Save game: what a save block does (nandUpdateSave + nandWriteSave on the file in play), so loading the

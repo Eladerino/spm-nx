@@ -93,6 +93,13 @@ static std::mutex g_pipelineCacheWriterMutex;
 static std::deque<PipelineCacheWrite> g_pipelineCacheWriteQueue;
 static absl::flat_hash_set<PipelineRef> g_pipelineCachePendingWrites;
 static bool g_pipelineCacheWriterStop = false;
+// Flush accounting, all guarded by g_pipelineCacheWriterMutex: writes ever queued vs writes
+// the writer has committed. flush_pipeline_cache_writes() waits on the second reaching the
+// first; without it, nothing outside this file can tell whether the recording has landed.
+static std::condition_variable g_pipelineCacheFlushCv;
+static uint64_t g_pipelineCacheWritesQueued = 0;
+static uint64_t g_pipelineCacheWritesDone = 0;
+static bool g_pipelineCacheWriterRunning = false;
 static int g_sdlVfsRegisterResult = SQLITE_ERROR;
 
 static SdlVfsSqliteFile* sdl_vfs_file(sqlite3_file* file) {
@@ -370,6 +377,7 @@ static void enqueue_pipeline_cache_write(PipelineCacheWrite write) {
       return;
     }
     g_pipelineCacheWriteQueue.emplace_back(std::move(write));
+    ++g_pipelineCacheWritesQueued;
   }
   g_pipelineCacheWriterCv.notify_one();
 }
@@ -912,6 +920,7 @@ static void pipeline_cache_writer() {
       g_pipelineCacheWriterCv.wait(lock,
                                    [] { return g_pipelineCacheWriterStop || !g_pipelineCacheWriteQueue.empty(); });
       if (g_pipelineCacheWriterStop && g_pipelineCacheWriteQueue.empty()) {
+        g_pipelineCacheFlushCv.notify_all();
         return;
       }
       batch.swap(g_pipelineCacheWriteQueue);
@@ -940,9 +949,33 @@ static void pipeline_cache_writer() {
 
     if (writeFailed) {
       pipeline_cache_abort();
+      // The cache is broken, so no flush can ever complete: wake any waiter to see it.
+      std::lock_guard lock{g_pipelineCacheWriterMutex};
+      g_pipelineCacheFlushCv.notify_all();
       return;
     }
+
+    {
+      std::lock_guard lock{g_pipelineCacheWriterMutex};
+      g_pipelineCacheWritesDone += batch.size();
+    }
+    g_pipelineCacheFlushCv.notify_all();
   }
+}
+
+bool flush_pipeline_cache_writes() {
+  if (g_pipelineCacheDb == nullptr || g_pipelineCacheBroken) {
+    return false;
+  }
+  std::unique_lock lock{g_pipelineCacheWriterMutex};
+  const uint64_t target = g_pipelineCacheWritesQueued;
+  // The writer commits a whole swapped batch per wake, so this is normally already true; the
+  // wait only stretches across an in-flight batch. The bound keeps a stuck database (a dying
+  // SD card) from hanging the caller forever: the rows stay queued and the false says so.
+  g_pipelineCacheFlushCv.wait_for(lock, std::chrono::seconds(30), [&] {
+    return g_pipelineCacheWritesDone >= target || g_pipelineCacheBroken || !g_pipelineCacheWriterRunning;
+  });
+  return g_pipelineCacheWritesDone >= target && !g_pipelineCacheBroken;
 }
 
 // Boot prewarm telemetry: how long the cached-recipe rebuild takes and how well the
@@ -1133,7 +1166,11 @@ static void start_pipeline_cache_writer() {
     return;
   }
 
-  g_pipelineCacheWriterStop = false;
+  {
+    std::lock_guard lock{g_pipelineCacheWriterMutex};
+    g_pipelineCacheWriterStop = false;
+    g_pipelineCacheWriterRunning = true;
+  }
   g_pipelineCacheWriterThread = std::thread(pipeline_cache_writer);
 }
 
@@ -1149,8 +1186,13 @@ static void stop_pipeline_cache_writer() {
     g_pipelineCacheWriterStop = false;
   }
 
-  g_pipelineCacheWriteQueue.clear();
-  g_pipelineCachePendingWrites.clear();
+  {
+    std::lock_guard lock{g_pipelineCacheWriterMutex};
+    g_pipelineCacheWriterRunning = false;
+    g_pipelineCacheWriteQueue.clear();
+    g_pipelineCachePendingWrites.clear();
+  }
+  g_pipelineCacheFlushCv.notify_all();
 }
 
 template <>
@@ -1303,3 +1345,5 @@ void aurora_set_skip_unready_pipelines(const bool enabled) { aurora::gfx::set_sk
 bool aurora_get_skip_unready_pipelines() { return aurora::gfx::skip_unready_pipelines(); }
 
 uint32_t aurora_get_queued_pipeline_count() { return aurora::gfx::queued_pipeline_count(); }
+
+bool aurora_flush_pipeline_cache_writes() { return aurora::gfx::flush_pipeline_cache_writes(); }

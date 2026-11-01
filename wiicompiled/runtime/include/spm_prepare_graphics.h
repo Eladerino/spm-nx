@@ -4,7 +4,9 @@
 // Nothing game-derived ships with the port (PROVENANCE.md, "Pipeline cache seed: removed"), so
 // a new install meets every effect for the first time while playing, and each first meeting
 // stutters while its shaders compile. This walks every room in the Debug warp list
-// (spm_warp_rooms.inc) and waits in each until Aurora has nothing left to compile. What gets
+// (spm_warp_rooms.inc) and waits in each until Aurora has nothing left to compile, then flips
+// Mario to 3D where the room lets him and waits again, so the flipped view's shaders are built
+// too (a different set: without this, a player's first flip in a room still stutters). What gets
 // built lands in the caches that already persist on the SD card (UserData/Cache/pipeline_cache.db
 // and the Switch's dksh_cache.bin), so the next start prewarms all of it.
 //
@@ -28,6 +30,12 @@ void Start();
 void Stop();
 // The stop button's state, from the input filter while a sweep runs: held long enough, Stop().
 void NoteStopButton(bool held);
+
+// WPAD bits the sweep adds to the game's input on this read (the flip press: one tap of Wii A),
+// or 0. The KPAD read ORs this in after the menu input filter, the same place as the startup
+// cover's auto-press, so the filter zeroing the player's own buttons during a sweep cannot
+// eat the press.
+uint32_t FlipAutoPressBits();
 
 struct Status {
     bool running = false;   // warping; the game's input is blocked
