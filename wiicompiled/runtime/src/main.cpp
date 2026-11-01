@@ -91,6 +91,7 @@
 #include <aurora/gfx.h>
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
+#include "gx_worker.h"
 
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
 extern std::atomic_bool g_auroraFrameActive;
@@ -110,7 +111,11 @@ std::string FormatHostStackTrace(unsigned framesToSkip = 0);
 void ServiceGuestTimingDuringAuroraFrameWait() {
     // Aurora can block inside FIFO drains before control returns to GX HLE, for as long as a
     // whole display period. Keep VI retraces, alarms and audio moving at wall-clock cadence here
-    // while still suppressing guest rescheduling and recursive Aurora work.
+    // while still suppressing guest rescheduling and recursive Aurora work. Not from the GX worker
+    // thread (gx_worker.h): its Aurora waits leave the game thread running, which services itself.
+    if (GxWorker::OnWorkerThread()) {
+        return;
+    }
     VI_HLE_ProcessRetracesDeferred(8);
     OS_HLE_ProcessAlarmsDeferred(8);
     Audio_HLE_PollDeferred();
@@ -1704,6 +1709,7 @@ int RuntimeMain(int argc, char** argv) {
         RT_LOG(RT_TAG_RUNTIME) << "graphics adapter: " << GraphicsInfo::Name() << ", compatibility fixes "
                   << (auroraInfo.gpuCompatActive ? "on" : "off") << std::endl;
         aurora_set_frame_worker_wait_callback(ServiceGuestTimingDuringAuroraFrameWait);
+        GxWorker::SetWaitService(ServiceGuestTimingDuringAuroraFrameWait);
         GxGuestWrite::InstallAuroraHooks();
         DisplaySettings::OnFrameBoundary(auroraInfo.windowSize.native_fb_width,
                                          auroraInfo.windowSize.native_fb_height);
