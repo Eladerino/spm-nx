@@ -123,6 +123,14 @@ PPC_NATIVE_OVERRIDE_VOID(80291A4C, GX__SetScissor_80173430, (uint32_t l, uint32_
 // Projection
 // ============================================================================
 
+// The GX part of GXSetProjection, on the matrix's guest bytes (or the GX worker's copy of them).
+static void SetProjectionFrom(const uint8_t* bytes, uint32_t pt) {
+    float m[16];
+    SwapBeF32ArrayToHost(reinterpret_cast<const uint32_t*>(bytes), m, 16);
+    GXSetProjection(m, (GXProjectionType)pt);
+    UpdateProjectionVectorFromMatrix(m, (GXProjectionType)pt);
+}
+
 extern "C" void GX__SetProjection_8017301c(uint32_t ma, uint32_t pt) {
     const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma, 64); float m[16];
     SwapBeF32ArrayToHost(raw, m, 16);
@@ -168,10 +176,20 @@ extern "C" void GX__SetProjection_8017301c(uint32_t ma, uint32_t pt) {
         const CpuContext* c = TryGetCpuContext();
         RT_LOGF(RT_TAG_GX, "[drawdump] setproj type %u m0 %.4f m5 %.4f m2 %.4f m6 %.4f m10 %.4f m11 %.4f m14 %.4f lr %08X\n", pt, m[0], m[5], m[2], m[6], m[10], m[11], m[14], c ? c->lr : 0);
     }
-    GXSetProjection(m, (GXProjectionType)pt);
-    UpdateProjectionVectorFromMatrix(m, (GXProjectionType)pt);
+    GxWorker::DeferOrRun<&SetProjectionFrom>(reinterpret_cast<const uint8_t*>(raw), 64, pt);
 }
 PPC_NATIVE_OVERRIDE_VOID(80291698, GX__SetProjection_8017301c, (uint32_t ma, uint32_t pt), (ma, pt));
+
+// The GX part of GXSetProjectionv, on the vector's guest bytes (or the GX worker's copy of them).
+static void SetProjectionvFrom(const uint8_t* bytes) {
+    float v[7];
+    SwapBeF32ArrayToHost(reinterpret_cast<const uint32_t*>(bytes), v, 7);
+    GXProjectionType pt=(v[0]!=0.f)?GX_ORTHOGRAPHIC:GX_PERSPECTIVE;
+    float m[16]={0.f}; m[0]=v[1]; m[5]=v[3]; m[10]=v[5]; m[11]=v[6];
+    if(pt==GX_PERSPECTIVE){ m[2]=v[2]; m[6]=v[4]; m[14]=-1.f; } else { m[3]=v[2]; m[7]=v[4]; m[15]=1.f; }
+    GXSetProjection(m, pt);
+    UpdateProjectionVectorFromProjV(v);
+}
 
 extern "C" void GX__SetProjectionv_80173080(uint32_t pa) {
     const uint32_t* raw=(const uint32_t*)GuestToHostPtr(pa, 28); float v[7];
@@ -217,11 +235,8 @@ extern "C" void GX__SetProjectionv_80173080(uint32_t pa) {
                          -v[2] / v[1], -v[4] / v[3], chain);
         }
     }
-    float m[16]={0.f}; m[0]=v[1]; m[5]=v[3]; m[10]=v[5]; m[11]=v[6];
-    if(pt==GX_PERSPECTIVE){ m[2]=v[2]; m[6]=v[4]; m[14]=-1.f; } else { m[3]=v[2]; m[7]=v[4]; m[15]=1.f; }
     if (SpmDumpFrame()) RT_LOGF(RT_TAG_GX, "[drawdump] setprojv type %d %.4f %.4f %.4f %.4f %.4f %.4f\n", pt == GX_ORTHOGRAPHIC ? 1 : 0, v[1], v[2], v[3], v[4], v[5], v[6]);
-    GXSetProjection(m, pt);
-    UpdateProjectionVectorFromProjV(v);
+    GxWorker::DeferOrRun<&SetProjectionvFrom>(reinterpret_cast<const uint8_t*>(raw), 28);
 }
 PPC_NATIVE_OVERRIDE_VOID(802916FC, GX__SetProjectionv_80173080, (uint32_t pa), (pa));
 
@@ -292,11 +307,26 @@ void SpmBBoxPosition(const float* p, int count) {
     g_bbox[2] = std::min(g_bbox[2], iy); g_bbox[3] = std::max(g_bbox[3], iy);
 }
 
-extern "C" void GX__LoadPosMtxImm_8017310c(uint32_t ma, uint32_t id) {
-    const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma); float m[12];
-    SwapBeF32ArrayToHost(raw, m, 12);
+// The GX part of the immediate matrix loads, on the matrix's guest bytes (or the GX worker's copy).
+static void LoadPosMtxImmFrom(const uint8_t* bytes, uint32_t id) {
+    float m[12];
+    SwapBeF32ArrayToHost(reinterpret_cast<const uint32_t*>(bytes), m, 12);
     if (id / 3u < 10u) std::memcpy(g_pnMtx[id / 3u], m, sizeof(m));
     GXLoadPosMtxImm((float(*)[4])m, id);
+}
+static void LoadNrmMtxImmFrom(const uint8_t* bytes, uint32_t id) {
+    float m[12];
+    SwapBeF32ArrayToHost(reinterpret_cast<const uint32_t*>(bytes), m, 12); GXLoadNrmMtxImm((float(*)[4])m, id);
+}
+static void LoadTexMtxImmFrom(const uint8_t* bytes, uint32_t id, uint32_t t) {
+    size_t c=(t==(uint32_t)GX_MTX3x4)?12:8;
+    float l[12]={};
+    SwapBeF32ArrayToHost(reinterpret_cast<const uint32_t*>(bytes),l,c); GXLoadTexMtxImm(l, id, (GXTexMtxType)t);
+}
+
+extern "C" void GX__LoadPosMtxImm_8017310c(uint32_t ma, uint32_t id) {
+    const uint8_t* raw=static_cast<const uint8_t*>(GuestToHostPtr(ma, 48));
+    GxWorker::DeferOrRun<&LoadPosMtxImmFrom>(raw, 48, id);
 }
 PPC_NATIVE_OVERRIDE_VOID(80291788, GX__LoadPosMtxImm_8017310c, (uint32_t ma, uint32_t id), (ma, id));
 
@@ -311,8 +341,8 @@ PPC_NATIVE_OVERRIDE_VOID(801c9990, GX__LoadPosMtxIndx_8017315c, (uint32_t mi, ui
 #endif
 
 extern "C" void GX__LoadNrmMtxImm_80173188(uint32_t ma, uint32_t id) {
-    const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma, 48); float m[12];
-    SwapBeF32ArrayToHost(raw, m, 12); GXLoadNrmMtxImm((float(*)[4])m, id);
+    const uint8_t* raw=static_cast<const uint8_t*>(GuestToHostPtr(ma, 48));
+    GxWorker::DeferOrRun<&LoadNrmMtxImmFrom>(raw, 48, id);
 }
 PPC_NATIVE_OVERRIDE_VOID(802917D8, GX__LoadNrmMtxImm_80173188, (uint32_t ma, uint32_t id), (ma, id));
 
@@ -337,9 +367,9 @@ PPC_NATIVE_OVERRIDE_VOID(801c9a20, GX__LoadNrmMtxIndx3x3_801731e0, (uint32_t mi,
 #endif
 
 extern "C" void GX__LoadTexMtxImm_80173234(uint32_t ma, uint32_t id, uint32_t t) {
-    size_t c=(t==(uint32_t)GX_MTX3x4)?12:8;
-    const uint32_t* raw=(const uint32_t*)GuestToHostPtr(ma,c*4); float l[12]={};
-    SwapBeF32ArrayToHost(raw,l,c); GXLoadTexMtxImm(l, id, (GXTexMtxType)t);
+    const uint32_t bytes = (t==(uint32_t)GX_MTX3x4) ? 48u : 32u;
+    const uint8_t* raw=static_cast<const uint8_t*>(GuestToHostPtr(ma, bytes));
+    GxWorker::DeferOrRun<&LoadTexMtxImmFrom>(raw, bytes, id, t);
 }
 PPC_NATIVE_OVERRIDE_VOID(80291850, GX__LoadTexMtxImm_80173234, (uint32_t ma, uint32_t id, uint32_t t), (ma, id, t));
 

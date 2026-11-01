@@ -31,33 +31,51 @@ bool ValidateGuestLightObj(uint32_t addr, const char* operation) {
     return false;
 }
 
-float ReadGuestLightFloat(uint32_t addr, uint32_t offset) {
-    return Memory::ReadFloat32(addr + offset);
+// `obj` is the guest object's kLightObjSize bytes: in guest memory, or the GX worker's copy of them.
+float ReadLightFloat(const uint8_t* obj, uint32_t offset) {
+    return BigEndian::ReadFloat32(obj + offset);
 }
 
-void InitializeHostLightFromGuest(GXLightObj& host, uint32_t guestAddr) {
-    GXInitLightColor(&host, DecodeGxColor(Memory::Read32(guestAddr + kColorOffset)));
+void InitializeHostLightFromGuest(GXLightObj& host, const uint8_t* obj) {
+    GXInitLightColor(&host, DecodeGxColor(BigEndian::Read32(obj + kColorOffset)));
     GXInitLightAttn(
         &host,
-        ReadGuestLightFloat(guestAddr, kAttnAOffset + 0),
-        ReadGuestLightFloat(guestAddr, kAttnAOffset + 4),
-        ReadGuestLightFloat(guestAddr, kAttnAOffset + 8),
-        ReadGuestLightFloat(guestAddr, kAttnKOffset + 0),
-        ReadGuestLightFloat(guestAddr, kAttnKOffset + 4),
-        ReadGuestLightFloat(guestAddr, kAttnKOffset + 8));
+        ReadLightFloat(obj, kAttnAOffset + 0),
+        ReadLightFloat(obj, kAttnAOffset + 4),
+        ReadLightFloat(obj, kAttnAOffset + 8),
+        ReadLightFloat(obj, kAttnKOffset + 0),
+        ReadLightFloat(obj, kAttnKOffset + 4),
+        ReadLightFloat(obj, kAttnKOffset + 8));
     GXInitLightPos(
         &host,
-        ReadGuestLightFloat(guestAddr, kPositionOffset + 0),
-        ReadGuestLightFloat(guestAddr, kPositionOffset + 4),
-        ReadGuestLightFloat(guestAddr, kPositionOffset + 8));
+        ReadLightFloat(obj, kPositionOffset + 0),
+        ReadLightFloat(obj, kPositionOffset + 4),
+        ReadLightFloat(obj, kPositionOffset + 8));
 
     // GXInitLightDir negates its arguments before storing them. The guest
     // object already contains those stored XF direction components.
     GXInitLightDir(
         &host,
-        -ReadGuestLightFloat(guestAddr, kDirectionOffset + 0),
-        -ReadGuestLightFloat(guestAddr, kDirectionOffset + 4),
-        -ReadGuestLightFloat(guestAddr, kDirectionOffset + 8));
+        -ReadLightFloat(obj, kDirectionOffset + 0),
+        -ReadLightFloat(obj, kDirectionOffset + 4),
+        -ReadLightFloat(obj, kDirectionOffset + 8));
+}
+
+void LoadLightObjFrom(const uint8_t* obj, uint32_t lid) {
+    GXLightObj host{};
+    InitializeHostLightFromGuest(host, obj);
+    GXLoadLightObjImm(&host, static_cast<GXLightID>(lid));
+}
+
+// The GX part of the channel colour setters, on the colour's guest bytes (or the GX worker's copy).
+void SetChanAmbColorFrom(const uint8_t* color, uint32_t c) {
+    EnsureAuroraFrameActive();
+    GXSetChanAmbColor((GXChannelID)c, DecodeGxColor(BigEndian::Read32(color)));
+}
+
+void SetChanMatColorFrom(const uint8_t* color, uint32_t c) {
+    EnsureAuroraFrameActive();
+    GXSetChanMatColor((GXChannelID)c, DecodeGxColor(BigEndian::Read32(color)));
 }
 
 } // namespace
@@ -68,9 +86,7 @@ void InitializeHostLightFromGuest(GXLightObj& host, uint32_t guestAddr) {
 
 extern "C" void GX__LoadLightObjImm_80170320(uint32_t la, uint32_t lid) {
     if (!ValidateGuestLightObj(la, "GXLoadLightObjImm")) return;
-    GXLightObj host{};
-    InitializeHostLightFromGuest(host, la);
-    GXLoadLightObjImm(&host, static_cast<GXLightID>(lid));
+    GxWorker::DeferOrRun<&LoadLightObjFrom>(Memory::GetPointer(la, kLightObjSize), kLightObjSize, lid);
 }
 PPC_NATIVE_OVERRIDE_VOID(8028E54C, GX__LoadLightObjImm_80170320, (uint32_t la, uint32_t lid), (la, lid));
 
@@ -79,18 +95,14 @@ PPC_NATIVE_OVERRIDE_VOID(8028E54C, GX__LoadLightObjImm_80170320, (uint32_t la, u
 // ============================================================================
 
 extern "C" void GX__SetChanAmbColor_8017039c(uint32_t c, uint32_t cp) {
-    EnsureAuroraFrameActive();
-    GXColor color = DecodeGxColor(Memory::Read32(cp));
     { static int n = 0; if (n++ < 60) RT_LOGF(RT_TAG_GX, "[spmchan] amb ch %u %08X\n", c, Memory::Read32(cp)); }
-    GXSetChanAmbColor((GXChannelID)c, color);
+    GxWorker::DeferOrRun<&SetChanAmbColorFrom>(Memory::GetPointer(cp, 4), 4, c);
 }
 PPC_NATIVE_OVERRIDE_VOID(8028e5c8, GX__SetChanAmbColor_8017039c, (uint32_t c, uint32_t cp), (c, cp));
 
 extern "C" void GX__SetChanMatColor_80170474(uint32_t c, uint32_t cp) {
-    EnsureAuroraFrameActive();
-    GXColor color = DecodeGxColor(Memory::Read32(cp));
     { static int n = 0; if (n++ < 60) RT_LOGF(RT_TAG_GX, "[spmchan] mat ch %u %08X\n", c, Memory::Read32(cp)); }
-    GXSetChanMatColor((GXChannelID)c, color);
+    GxWorker::DeferOrRun<&SetChanMatColorFrom>(Memory::GetPointer(cp, 4), 4, c);
 }
 PPC_NATIVE_OVERRIDE_VOID(8028E6A0, GX__SetChanMatColor_80170474, (uint32_t c, uint32_t cp), (c, cp));
 

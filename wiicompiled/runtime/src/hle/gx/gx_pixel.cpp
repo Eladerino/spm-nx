@@ -62,8 +62,13 @@ PPC_NATIVE_OVERRIDE_VOID(80290a08, GX__SetDstAlpha_8017295c, (uint32_t en, uint3
 // Fog and Alpha Compare
 // ============================================================================
 
+// The GX part of GXSetFog, on the colour's guest bytes (or the GX worker's copy of them).
+static void SetFogFrom(const uint8_t* color, uint32_t t, float sz, float ez, float nz, float fz) {
+    GXSetFog((GXFogType)t, sz, ez, nz, fz, DecodeGxColor(BigEndian::Read32(color)));
+}
+
 extern "C" void GX__SetFog_801722cc(uint32_t t, float sz, float ez, float nz, float fz, uint32_t cp) {
-    GXSetFog((GXFogType)t, sz, ez, nz, fz, DecodeGxColor(Memory::Read32(cp)));
+    GxWorker::DeferOrRun<&SetFogFrom>(Memory::GetPointer(cp, 4), 4, t, sz, ez, nz, fz);
 }
 PPC_NATIVE_OVERRIDE_VOID(802904d8, GX__SetFog_801722cc, (uint32_t t, float sz, float ez, float nz, float fz, uint32_t cp), (t, sz, ez, nz, fz, cp));
 

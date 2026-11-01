@@ -20,6 +20,8 @@
 #include <tuple>
 #include <type_traits>
 
+#include "gx_worker.h"
+
 inline void InvokeIndirectCpu(uint32_t target, CpuContext* ctx);
 
 // Some game-facing runtime options alter arguments at well-defined ABI
@@ -774,7 +776,15 @@ public:
 
 template <auto Target>
 struct AbiRawCpuThunk {
+    // A native that isn't a counted override: with GX records on (gx_worker.h), pending ones run
+    // first, since it may read or change what they change.
     static void Invoke(CpuContext* cpu) {
+        if (GxWorker::Engaged()) {
+            GxWorker::Drain();
+        }
+        InvokeNoSync(cpu);
+    }
+    static void InvokeNoSync(CpuContext* cpu) {
         if constexpr (std::is_invocable_v<decltype(Target), CpuContext*>) {
             (void)Target(cpu);
         } else {
@@ -827,12 +837,49 @@ public:
 #define REGISTER_TRANSLATED_FUNCTION(address, fn) \
     static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::BaseTranslated, false, kPpcAllNonvolatileFprMask, 0, 0, nullptr, KnownTranslatedCpuCall<address>::kMustRemainDynamicallyDispatchable)
 
-// The raw invoker of a counted native override: counts the call, then runs the plain thunk.
+// The registry path into a native override with GX records on (gx_worker.h): true when the call was
+// recorded or ran through its self-deferring body, false when the caller runs it now (after the
+// pending records, for an Inline one).
+template <uint32_t Address, auto Target>
+inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
+    constexpr GxWorker::Kind kind = GxWorker::KindOf<Address>::kKind;
+    if constexpr (kind == GxWorker::Kind::Inline) {
+        GxWorker::Drain();
+        return false;
+    } else {
+        static_assert(!std::is_invocable_v<decltype(Target), CpuContext*>,
+                      "only typed overrides can be queued or defer themselves");
+        if (!GxWorker::CanRecord()) {
+            GxWorker::Drain();
+            return false;
+        }
+        if constexpr (kind == GxWorker::Kind::Queue) {
+            using Signature = std::remove_pointer_t<decltype(Target)>;
+            static_assert(GxWorker::ReturnsVoid(Target), "only void calls can be queued");
+            const bool recorded = std::apply([](auto... args) { return GxWorker::RecordCall<Target>(args...); },
+                                             AbiTrampoline<Signature>::BuildArgs(cpu));
+            if (!recorded) {
+                GxWorker::Drain();
+            }
+            return recorded;
+        } else {
+            GxWorker::SelfDeferScope armed;
+            AbiRawCpuThunk<Target>::InvokeNoSync(cpu);
+            return true;
+        }
+    }
+}
+
+// The raw invoker of a counted native override: counts the call, then runs the plain thunk (or
+// records it, with GX records on).
 template <uint32_t Address, auto Target>
 struct CountedAbiRawCpuThunk {
     static void Invoke(CpuContext* cpu) {
         NativeOverrideCalls<Address>.Hit();
-        AbiRawCpuThunk<Target>::Invoke(cpu);
+        if (GxWorker::Engaged() && GxWorkerDispatchCpu<Address, Target>(cpu)) {
+            return;
+        }
+        AbiRawCpuThunk<Target>::InvokeNoSync(cpu);
     }
 };
 

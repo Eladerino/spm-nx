@@ -3445,6 +3445,7 @@ constexpr int kOptTabCount = int(std::size(kOptTabs));
 constexpr const char* kDiagKeys[] = {
     "depth_off", "cull_off", "magenta", "picdump", "efbclear", "bufdump", "texdump",
     "shaderdump", "nomerge", "uvlog", "mtxlog", "perftimer", "arrayup", "profile", "cpthread",
+    "gxworker", "gxdefer",
 };
 constexpr const char* kDiagLabels[] = {
     "Depth test off (depth_off)", "Face culling off (cull_off)", "Magenta unbound textures (magenta)",
@@ -3452,6 +3453,7 @@ constexpr const char* kDiagLabels[] = {
     "Dump textures (texdump)", "Dump shaders (shaderdump)", "No draw merging (nomerge)",
     "UV trace (uvlog)", "Matrix trace (mtxlog)", "Performance timers (perftimer)",
     "Re-upload vertex arrays (arrayup)", "Guest profiler (profile)", "GX decode thread (cpthread)",
+    "GX call records (gxworker)", "Deferred GX records (gxdefer)",
 };
 constexpr const char* kDiagHelp[] = {
     "Forces depth and stencil tests and depth writes off for every pipeline. Geometry can show through other geometry; for isolating depth problems.",
@@ -3469,6 +3471,8 @@ constexpr const char* kDiagHelp[] = {
     "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data.",
     "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them).",
     "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong.",
+    "Records the game's GX calls and replays each one straight away, from the next frame. The picture should look exactly the same; anything that differs is a call the records do not carry yet. Every 600 frames with perftimer on, a [gxworker] line counts them.",
+    "As GX call records, but the records wait until the game next needs GX state back (a getter, a wait, the end of the frame). Turns records on by itself. An experiment ahead of moving GX work to core 2; turn it off if anything draws wrong.",
 };
 constexpr int kDiagCount = int(std::size(kDiagKeys));
 

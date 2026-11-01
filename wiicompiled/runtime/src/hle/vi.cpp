@@ -979,6 +979,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     if (s_presentSequenceActive.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
+    // GX records (gx_worker.h): the frame's pending GX calls run before it is presented, and a mode
+    // change from the dk_diag switches or the settings menu takes effect here.
+    GxWorker::FrameBoundary();
     // Frontend frame timing: encode/submit cost, reported apart from guest CPU time.
     struct PresentTimer {
         Clock::time_point start = Clock::now();
