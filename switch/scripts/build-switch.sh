@@ -109,6 +109,11 @@ else
         icons_dest=$dest/UserData/button_icons
         if python3 -c 'import PIL' >/dev/null 2>&1 && command -v magick >/dev/null &&
            python3 "$root/tools/make-button-icons.py" --clean --out "$icons_gen"; then
+            # The folder is all generated content, so rebuild it from scratch: copying
+            # over the top let files the staging lists had dropped live on in the
+            # staged set (the four shared marker7 textures cut on Nov 1 were still
+            # being carried this way, still tripping the demo prompt everywhere).
+            rm -rf "$icons_dest"
             mkdir -p "$icons_dest/nintendo/ui" "$icons_dest/nintendo/ui/buttons" "$icons_dest/nintendo/composite" \
                      "$icons_dest/nintendo/marker1" \
                      "$icons_dest/nintendo/marker2" "$icons_dest/nintendo/marker3" \
