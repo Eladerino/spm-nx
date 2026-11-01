@@ -3374,19 +3374,48 @@ void DrawControlsPanel() {
             const float ry = spotLive[r->m] ? spotFor[r->m].y : 10.0f;
             return ly < ry;
         });
+        const float edge = right ? 360.0f : -360.0f, icon = 30.0f;
+        // Sub-lines wrap to the width the column has before the controller picture: drawn
+        // whole, the Shake sentence ran straight over the picture's shoulder.
+        const float maxSubW = right ? (edge - icon - 8.0f) - (kPadCX + kPadW / 2) - 6.0f
+                                    : (kPadCX - kPadW / 2) - (edge + icon + 8.0f) - 6.0f;
+        std::vector<std::vector<std::string>> subLines(shown.size());
+        std::vector<float> heights(shown.size(), 50.0f);
+        for (size_t i = 0; i < shown.size(); ++i) {
+            if (shown[i]->sub.empty()) continue;
+            std::string line, word;
+            const auto flushWord = [&]() {
+                if (word.empty()) return;
+                const std::string trial = line.empty() ? word : line + " " + word;
+                if (!line.empty() && textWidth(trial.c_str(), 13.0f) > maxSubW) {
+                    subLines[i].push_back(line);
+                    line = word;
+                } else line = trial;
+                word.clear();
+            };
+            for (const char c : shown[i]->sub) {
+                if (c == ' ') flushWord();
+                else word += c;
+            }
+            flushWord();
+            if (!line.empty() || subLines[i].empty()) subLines[i].push_back(line);
+            heights[i] = 50.0f + 15.0f * static_cast<float>(subLines[i].size() - 1);
+        }
         // Each label level with the button its live binding points at, pushed apart where
         // they would touch; a callout with no live spot starts at the top and the same
-        // passes push it into the stack.
-        constexpr float kSpacing = 50.0f, kTop = 120.0f, kBottom = -150.0f;
+        // passes push it into the stack. A wrapped callout takes the extra room its lines
+        // need from the gap between centres.
+        constexpr float kTop = 120.0f, kBottom = -150.0f;
         std::vector<float> ys;
         for (const Callout* co : shown)
             ys.push_back(spotLive[co->m] ? kPadCY + padH / 2 - spotFor[co->m].y * padH : kTop);
-        for (size_t i = 0; i < ys.size(); ++i) ys[i] = std::min(ys[i], i == 0 ? kTop : ys[i - 1] - kSpacing);
-        for (size_t i = ys.size(); i-- > 0;) ys[i] = std::max(ys[i], i + 1 == ys.size() ? kBottom : ys[i + 1] + kSpacing);
+        for (size_t i = 0; i < ys.size(); ++i)
+            ys[i] = std::min(ys[i], i == 0 ? kTop : ys[i - 1] - (heights[i - 1] + heights[i]) / 2);
+        for (size_t i = ys.size(); i-- > 0;)
+            ys[i] = std::max(ys[i], i + 1 == ys.size() ? kBottom : ys[i + 1] + (heights[i] + heights[i + 1]) / 2);
         for (size_t i = 0; i < shown.size(); ++i) {
             const Callout& co = *shown[i];
             const float y = ys[i];
-            const float edge = right ? 360.0f : -360.0f, icon = 30.0f;
             // icon at the outer edge, text inside it
             const float ix = right ? edge - icon / 2 : edge + icon / 2;
             if (iconFor[co.m]->id) {
@@ -3404,9 +3433,10 @@ void DrawControlsPanel() {
                                ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
             }
             const float tx = right ? edge - icon - 8.0f : edge + icon + 8.0f;
-            const bool two = !co.sub.empty();
+            const bool two = !subLines[i].empty();
             text(co.title, tx, two ? y + 8.0f : y, 17.0f, 0x18120CFFu, right ? 2 : 0);
-            if (two) text(co.sub.c_str(), tx, y - 11.0f, 13.0f, 0x5A4A38FFu, right ? 2 : 0);
+            for (size_t j = 0; j < subLines[i].size(); ++j)
+                text(subLines[i][j].c_str(), tx, y - 11.0f - 15.0f * static_cast<float>(j), 13.0f, 0x5A4A38FFu, right ? 2 : 0);
         }
     };
     callouts(kLeft.data(), kLeft.size(), false);
@@ -3496,6 +3526,10 @@ void PatchMessageStrings() {
         {"Shake <icon PAD 0.65 1 1 8> with good timing!", "Shake, or hold R/ZR, with good timing!"},
         {"Tilt <icon PAD 0.65 1 1 8> as shown!", "Tilt the controller as shown!"},
         {"Point the <icon PAD 0.65 1 1 8> at the screen!", "Point with the right stick at the screen!"},
+        // The star and shell action commands ("Aim with your cursor and fire / at <icon>!"):
+        // no cursor on the Switch, and the shot is WPAD A, the Flip button (physical Y).
+        // First line only, so the line break and the target icon keep their own bytes.
+        {"Aim with your cursor and fire", "Aim and press Y to fire"},
         {"Shake <icon PAD 0.65 1 1 15> to wake up!", "Shake it, or hold R/ZR, to wake up!"},
         {"Shake <icon PAD 0.65 1 1 15> to recover!", "Shake it, or hold R/ZR, to recover!"},
         {"Shake <icon PAD 0.65 1 1 15> quickly to escape!", "Shake it fast, or hold R/ZR, to escape!"},
