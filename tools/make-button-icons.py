@@ -161,6 +161,28 @@ def solid(color, mask):
     return layer
 
 
+# The printed letter's height as a fraction of its disc's diameter, one rule for every
+# path that prints a letter (the composite discs, the plaindiscs, the text-box glyphs).
+# Kenney's own letter is only about 31% of his icon, so at that share the letters read
+# small next to the game's own prompt art, and B, his narrowest letter (16 wide against
+# A's 20 at the same height), all but vanished in the title screen's big disc. Fitted to
+# just under half the disc, every letter lands at the same size whatever its width, at
+# the weight of the discs around it, with room to spare inside the ring's face (the
+# face is 83% of the diameter, so the letter takes about 57% of it).
+LETTER_FRACTION = 0.47
+
+
+def letter_image(style, name, height):
+    """A button's letter as a mask, fitted to `height` px tall with its natural
+    proportions: the icon's see-through letter (holes) cropped to its own bounds and
+    scaled, so a narrow letter is not left smaller than a wide one. Rendered big and
+    scaled down so the edges stay clean at the small sizes the discs print at."""
+    mask = holes(render_svg(style, name, 512))
+    letter = mask.crop(mask.getbbox())
+    w = max(1, round(letter.width * height / letter.height))
+    return letter.resize((w, max(1, round(height))), Image.LANCZOS)
+
+
 def disc(img, box, style, name):
     """The game's look: a black ring, then Kenney's button, its symbol showing the ring's black through."""
     x0, y0, x1, y1 = box
@@ -247,22 +269,24 @@ def render(src, kind, buttons, style, names=None):
             ring = w * 0.085
             draw.ellipse([m, m, w - m, h - m], fill="#141414")
             draw.ellipse([m + ring, m + ring, w - m - ring, h - m - ring], fill="#FFFFFF")
-            # The letter in ink, big: at the size these chips render in text it was a small
-            # grey letter (156, and the icon render's letter is only about half the render)
-            # and all but vanished on the game's white boxes.
-            size = int(w * 0.98)
-            img.alpha_composite(solid((20, 20, 20, 255), holes(render_svg(style, name, size))),
-                                ((w - size) // 2, (h - size) // 2))
+            # The letter in ink, fitted to LETTER_FRACTION of the disc (letter_image): at
+            # the size these chips render in text a small letter all but vanishes on the
+            # game's white boxes.
+            letter = letter_image(style, name, (w - 2 * m) * LETTER_FRACTION)
+            img.alpha_composite(solid((20, 20, 20, 255), letter),
+                                ((w - letter.width) // 2, (h - letter.height) // 2))
         elif kind == "disc":
             x0, y0, x1, y1 = dark_bbox(img, fx * w, fy * h, fr * max(w, h), 150 if button in "+-" else 90)
             pad = (x1 - x0) * 0.05
             disc(img, (x0 - pad, y0 - pad, x1 + pad, y1 + pad), style, name)
         elif kind == "glyph":  # symbol on white, like the game's own, but in ink: the grey
-            # (156) letter washed out at text size, the same as the plaindiscs
+            # (156) letter washed out at text size, the same as the plaindiscs. The letter
+            # is fitted to LETTER_FRACTION of the texture (letter_image), the texture
+            # standing in for the disc, so the glyphs match the discs' letters.
             ImageDraw.Draw(img).rectangle([0, 0, w, h], fill="#FFFFFF")
-            size = int(w * 0.84)
-            img.alpha_composite(solid((20, 20, 20, 255), holes(render_svg(style, name, size))),
-                                ((w - size) // 2, (h - size) // 2))
+            letter = letter_image(style, name, w * LETTER_FRACTION)
+            img.alpha_composite(solid((20, 20, 20, 255), letter),
+                                ((w - letter.width) // 2, (h - letter.height) // 2))
         else:  # face: paint the old symbol out with the face colour, then the new symbol squashed onto the face
             x0, y0, x1, y1 = dark_bbox(img, fx * w, fy * h, fr * max(w, h), 110)
             px = img.load()
@@ -315,9 +339,9 @@ def render_overlay(kind, buttons, style, w, h):
             band = bw * 0.085
             d.ellipse(box, fill="#141414")
             d.ellipse([box[0] + band, box[1] + band, box[2] - band, box[3] - band], fill="#FFFFFF")
-            size = int(bw * 0.98)
-            img.alpha_composite(solid((20, 20, 20, 255), holes(render_svg(style, name, size))),
-                                (int(fx * w - size / 2), int(fy * h - size / 2)))
+            letter = letter_image(style, name, bw * LETTER_FRACTION)
+            img.alpha_composite(solid((20, 20, 20, 255), letter),
+                                (int(fx * w - letter.width / 2), int(fy * h - letter.height / 2)))
         elif kind == "face":
             size = int(3 * fr * max(w, h))
             sym = holes(render_svg(style, name, size))
