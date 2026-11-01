@@ -358,21 +358,15 @@ def panel_and_ui(out, style, icon_names=None, spots=None):
         # each named button sits on controller.png, so a callout can follow the player's own
         # bindings instead of the defaults. The names are SDL's positional ones (a = south,
         # b = east, x = west, y = north) and each picture is the Switch letter printed at that
-        # seat. "b" (east, printed A) gets a spot and a drawn badge: the vendored Kenney subset
-        # has no switch_button_a.svg, so its picture is drawn below in the same style.
-        button_icons = {"a": "switch_button_b", "x": "switch_button_y", "y": "switch_button_x",
+        # seat, each rendered from its Kenney file (the A file joined the vendored set from
+        # the same pack, 1.5; its B/X/Y files are byte-identical to the ones already here).
+        button_icons = {"a": "switch_button_b", "b": "switch_button_a", "x": "switch_button_y",
+                        "y": "switch_button_x",
                         "rightshoulder": "switch_button_r", "righttrigger": "switch_button_r",
                         "leftstick": "switch_stick_l", "rightstick": "switch_stick_r"}
         os.makedirs(os.path.join(out, "ui", "buttons"), exist_ok=True)
         for token, name in button_icons.items():
             render_svg(style, name, 128).save(os.path.join(out, "ui", "buttons", token + ".png"))
-        # The A badge, drawn: a light button like Kenney's, its letter as dark strokes.
-        a_icon = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
-        ad = ImageDraw.Draw(a_icon)
-        ad.ellipse([8, 8, 120, 120], fill=(250, 250, 250, 255))
-        ad.line([(46, 94), (64, 36), (82, 94)], fill=(35, 35, 40, 255), width=12, joint="curve")
-        ad.line([(53, 74), (75, 74)], fill=(35, 35, 40, 255), width=10)
-        a_icon.save(os.path.join(out, "ui", "buttons", "b.png"))
         button_spots = {"a": (0.763, 0.397), "b": (0.843, 0.310), "x": (0.682, 0.310), "y": (0.763, 0.222),
                         "rightshoulder": (0.78, stylish_y), "righttrigger": (0.78, stylish_y),
                         "leftstick": spots["move"], "rightstick": spots["tippi"]}
