@@ -3907,6 +3907,10 @@ std::vector<OptRow> OptionsRows(int tab) {
         }
         rows.push_back({"Keyboard: reset to default keys", "", [](int d) { if (d == 0) Keybinds::ResetDefaults(); }, ""});
 #endif
+#if !defined(__SWITCH__)
+        // The Controller rows remap the PAD route, which in this game serves players 2-4. On the
+        // Switch build they are cut (Brandon's call, Nov 1): SPM is single-player, player 1's pad
+        // is the Gamepad list below, and showing both lists side by side confused the menu.
         for (int i = 0; i < int(std::size(kPadRows)); ++i) {
             rows.push_back({std::string("Controller: ") + kPadRows[i].label,
                             g_optPadCapture == i ? "Press a button..." : PadBindingLabel(kPadRows[i].target), [i](int d) {
@@ -3918,6 +3922,7 @@ std::vector<OptRow> OptionsRows(int tab) {
                 g_optPadCapture = i;
             }, "Press A / 2, then the controller button to use. Takes a controller that is connected."});
         }
+#endif
 #if defined(__SWITCH__)
         // Player 1's own gamepad table ([gamepad] in Config.toml). The
         // Controller rows above remap the PAD route, which in this game
