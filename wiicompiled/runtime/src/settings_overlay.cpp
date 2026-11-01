@@ -3816,15 +3816,30 @@ std::vector<OptRow> OptionsRows(int tab) {
         int asp = 0;
         for (int i = 0; i < int(kAspects.size()); ++i)
             if (kAspects[i].mode == aspectMode) asp = i;
+#if defined(__SWITCH__)
+        // Fill Window is a PC option (windowed and ultrawide output); the Switch picture is
+        // fixed, so cycling here steps past it and the help never points at it.
+        const char* aspectHelp = "Switching between 4:3 and widescreen takes effect after a restart.";
+#else
+        const char* aspectHelp = (aspectMode != DisplaySettings::kAspect4x3) != DisplaySettings::GameWidescreen()
+                                     ? "Switching between 4:3 and widescreen takes effect after a restart."
+                                     : "Fill Window uses every pixel of wide and ultrawide screens.";
+#endif
         rows.push_back({"Aspect ratio", kAspects[asp].label, [asp](int d) {
-            SetAspectMode(kAspects[Cycle(asp, d == 0 ? 1 : d, int(kAspects.size()))].mode);
-        }, (aspectMode != DisplaySettings::kAspect4x3) != DisplaySettings::GameWidescreen()
-               ? "Switching between 4:3 and widescreen takes effect after a restart."
-               : "Fill Window uses every pixel of wide and ultrawide screens."});
+            int next = Cycle(asp, d == 0 ? 1 : d, int(kAspects.size()));
+#if defined(__SWITCH__)
+            if (kAspects[next].mode == DisplaySettings::kAspectFill)
+                next = Cycle(next, d == 0 ? 1 : d, int(kAspects.size()));
+#endif
+            SetAspectMode(kAspects[next].mode);
+        }, aspectHelp});
+        // No Frame rate row on Switch: the output is 60 Hz, so the 120 option cannot apply.
+#if !defined(__SWITCH__)
         static constexpr const char* kRates[] = {"60 FPS (original)", "120 FPS"};
         rows.push_back({"Frame rate", kRates[g_frameInterpolationMode], [](int d) {
             SetFrameInterpolationMode(Cycle(std::min(g_frameInterpolationMode, 1), d == 0 ? 1 : d, 2));  // 60 or 120
         }, "Above 60, extra frames are made between the game's own for smoother motion."});
+#endif
         rows.push_back({"V-Sync", OnOff(g_vsync.load()), [](int) { SetVSync(!g_vsync.load()); },
                         "No screen tearing. Turn off only if your screen has its own sync (G-Sync, FreeSync)."});
         rows.push_back({"FPS counter", OnOff(g_showFps), [](int) { SetShowFps(!g_showFps); }, "Frames per second in the corner."});
