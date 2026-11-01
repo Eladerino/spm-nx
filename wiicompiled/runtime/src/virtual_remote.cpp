@@ -422,8 +422,11 @@ void ApplyMotion(Motion& motion, const Intent& intent, WiiRemoteInput::KpadSampl
     // A live accelerometer wins over everything synthesized: the player's own
     // shaking, tilting and gravity, straight into the sample. A sample that is
     // not finite or beyond the sensor's +-8 g range is a glitch; that frame
-    // falls through to the synthesized path below instead.
-    if (intent.hasImu) {
+    // falls through to the synthesized path below instead. The one exception is
+    // an explicit shake input (R/ZR held, or the touch shake): while its flick
+    // is running the flick wins, so the button hold keeps working on pads that
+    // also have a live sensor.
+    if (intent.hasImu && motion.shakeFrame >= kShakeFrames) {
         const float x = intent.imu[0], y = intent.imu[1], z = intent.imu[2];
         const float mag2 = x * x + y * y + z * z;
         if (std::isfinite(mag2) && mag2 <= 64.0f) {
