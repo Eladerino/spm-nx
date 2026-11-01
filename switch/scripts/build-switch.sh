@@ -116,7 +116,7 @@ else
                      tex1_40x40_21ecf92a70736554_14.png tex1_40x40_db14bc3d6c7b16a5_14.png \
                      tex1_40x40_e73bd2aadadde9d9_14.png tex1_96x40_61b1a30a17d36df5_5.png \
                      ui/move.png ui/flip.png ui/jump.png ui/pixl.png ui/tippi.png ui/stylish.png \
-                     ui/buttons/a.png ui/buttons/x.png ui/buttons/y.png ui/buttons/rightshoulder.png \
+                     ui/buttons/a.png ui/buttons/b.png ui/buttons/x.png ui/buttons/y.png ui/buttons/rightshoulder.png \
                      ui/buttons/righttrigger.png ui/buttons/leftstick.png ui/buttons/rightstick.png \
                      marker1/tex1_256x64_ddc0097f76e8016b_14.png \
                      marker1/tex1_256x64_a2fd9566973811d6_14.png \
