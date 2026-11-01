@@ -95,7 +95,7 @@ mapping keeps the same jobs on the Switch buttons:
 | X | A |
 | Y | 1 |
 | Right stick | Pointer (Tippi) |
-| R or ZR | Shake (hold) |
+| R or ZR | Shake (hold), or shake the controller itself |
 | + | + |
 | -, L or ZL | - |
 

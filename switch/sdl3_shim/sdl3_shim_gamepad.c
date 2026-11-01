@@ -35,6 +35,19 @@ static Mutex g_lock;
 static u64 g_buttons;
 static HidAnalogStickState g_sticks[2];
 
+// Six-axis motion: player 1's devices in the pump's priority order (the handheld
+// sensor, a Pro Controller, paired Joy-Cons left then right). The pump stashes the
+// newest sample from the first connected one; the SDL sensor getters below serve
+// it in SDL's units (m/s^2 for the accelerometer, rad/s for the gyroscope).
+#define SIXAXIS_HANDLES 4
+static HidSixAxisSensorHandle g_sixaxis[SIXAXIS_HANDLES];
+static int g_sixaxis_count;
+static bool g_imu_enabled;   // an SDL consumer asked for sensor data
+static float g_imu_accel[3]; // in g, HID frame (x right, y up, z toward the player)
+static float g_imu_gyro[3];  // rad/s, same frame
+static u64 g_imu_sampling;   // sampling_number of the stashed sample; 0 = none yet
+static Uint64 g_imu_tick;    // SDL_GetTicks() when it was stashed
+
 // Rumble through HD rumble: handheld Joy-Cons, and player 1's paired
 // Joy-Cons or Pro Controller. The pump stops it when its duration ends.
 #define VIBRATION_TARGETS 3
@@ -90,6 +103,27 @@ void sdl3_shim_gamepad_init(void) {
             rumble = true;
         }
     }
+    static const struct {
+        HidNpadIdType id;
+        HidNpadStyleTag style;
+        int handles;
+    } kSixAxisTargets[3] = {
+        {HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld, 1},
+        {HidNpadIdType_No1, HidNpadStyleTag_NpadFullKey, 1},
+        {HidNpadIdType_No1, HidNpadStyleTag_NpadJoyDual, 2},
+    };
+    for (int i = 0; i < 3 && g_sixaxis_count < SIXAXIS_HANDLES; ++i) {
+        HidSixAxisSensorHandle handles[2];
+        if (R_FAILED(hidGetSixAxisSensorHandles(handles, kSixAxisTargets[i].handles, kSixAxisTargets[i].id,
+                                                kSixAxisTargets[i].style)))
+            continue;
+        for (int h = 0; h < kSixAxisTargets[i].handles && g_sixaxis_count < SIXAXIS_HANDLES; ++h) {
+            if (R_SUCCEEDED(hidStartSixAxisSensor(handles[h])))
+                g_sixaxis[g_sixaxis_count++] = handles[h];
+        }
+    }
+    if (g_sixaxis_count > 0)
+        fprintf(stderr, "[switch] six-axis: %d motion sensor(s) started\n", g_sixaxis_count);
     g_gamepad.properties = SDL_CreateProperties();
     SDL_SetBooleanProperty(g_gamepad.properties, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, rumble);
     SDL_SetBooleanProperty(g_gamepad.properties, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
@@ -209,6 +243,28 @@ void sdl3_shim_gamepad_pump(void) {
         g_sticks[1].x = sticks[2], g_sticks[1].y = sticks[3];
     }
     g_buttons = minus_menu_filter(buttons);
+    // Motion, beside the buttons it belongs with: the newest state of the first
+    // connected sensor (hidGetSixAxisSensorStates returns newest first, so one
+    // state is the latest). A sensor whose sampling number stops advancing goes
+    // stale in the getter instead of freezing the remote.
+    for (int i = 0; i < g_sixaxis_count; ++i) {
+        HidSixAxisSensorState state;
+        if (hidGetSixAxisSensorStates(g_sixaxis[i], &state, 1) == 0)
+            continue;
+        if ((state.attributes & HidSixAxisSensorAttribute_IsConnected) == 0)
+            continue;
+        if (state.sampling_number != g_imu_sampling) {
+            g_imu_sampling = state.sampling_number;
+            g_imu_accel[0] = state.acceleration.x;
+            g_imu_accel[1] = state.acceleration.y;
+            g_imu_accel[2] = state.acceleration.z;
+            g_imu_gyro[0] = state.angular_velocity.x;
+            g_imu_gyro[1] = state.angular_velocity.y;
+            g_imu_gyro[2] = state.angular_velocity.z;
+            g_imu_tick = SDL_GetTicks();
+        }
+        break;
+    }
     mutexUnlock(&g_lock);
     static int s_attached = -1;
     if ((int)attached != s_attached) {
@@ -422,7 +478,7 @@ bool SDL_RumbleGamepad(SDL_Gamepad* gamepad, Uint16 low_frequency_rumble,
     return true;
 }
 
-// No LEDs or motion sensors yet.
+// No LED yet. Motion sensors are real: see the six-axis block at the top.
 
 bool SDL_SetGamepadLED(SDL_Gamepad* gamepad, Uint8 red, Uint8 green, Uint8 blue) {
     (void)gamepad;
@@ -433,23 +489,43 @@ bool SDL_SetGamepadLED(SDL_Gamepad* gamepad, Uint8 red, Uint8 green, Uint8 blue)
 }
 
 bool SDL_GamepadHasSensor(SDL_Gamepad* gamepad, SDL_SensorType type) {
-    (void)gamepad;
-    (void)type;
-    return false;
+    if (gamepad != &g_gamepad)
+        return false;
+    return g_sixaxis_count > 0 && (type == SDL_SENSOR_ACCEL || type == SDL_SENSOR_GYRO);
 }
 
 bool SDL_SetGamepadSensorEnabled(SDL_Gamepad* gamepad, SDL_SensorType type, bool enabled) {
-    (void)gamepad;
-    (void)type;
-    (void)enabled;
-    return false;
+    if (!SDL_GamepadHasSensor(gamepad, type))
+        return false;
+    // HID starts the accelerometer and gyroscope together, so one flag serves both.
+    mutexLock(&g_lock);
+    g_imu_enabled = enabled;
+    mutexUnlock(&g_lock);
+    return true;
 }
 
 bool SDL_GetGamepadSensorData(SDL_Gamepad* gamepad, SDL_SensorType type, float* data,
                               int num_values) {
-    (void)gamepad;
-    (void)type;
-    (void)data;
-    (void)num_values;
-    return false;
+    if (data == NULL || num_values < 3 || !SDL_GamepadHasSensor(gamepad, type))
+        return false;
+    mutexLock(&g_lock);
+    // Fresh means: enabled, at least one sample seen, and its sampling number
+    // advanced within the last 100 ms.
+    const bool fresh = g_imu_enabled && g_imu_sampling != 0 && SDL_GetTicks() - g_imu_tick <= 100;
+    const float* src = type == SDL_SENSOR_ACCEL ? g_imu_accel : g_imu_gyro;
+    const float v[3] = {src[0], src[1], src[2]};
+    mutexUnlock(&g_lock);
+    if (!fresh)
+        return false;
+    if (type == SDL_SENSOR_ACCEL) {
+        // HID reports g; SDL wants m/s^2 (SDL_STANDARD_GRAVITY).
+        data[0] = v[0] * 9.80665f;
+        data[1] = v[1] * 9.80665f;
+        data[2] = v[2] * 9.80665f;
+    } else {
+        data[0] = v[0];
+        data[1] = v[1];
+        data[2] = v[2];
+    }
+    return true;
 }
