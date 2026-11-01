@@ -15,7 +15,10 @@
 //   Queue      void setters with scalar arguments: recorded from the argument registers.
 //   SelfDefer  setters whose argument points at a small struct: the body reads it and defers itself
 //              through DeferOrRun, so the record holds the struct's bytes rather than its address.
-//   Inline     everything else (getters, waits, builders, display list recording, every non-GX
+//   NoSync     calls that touch no state a record changes (a getter answered from a game-side
+//              copy, a builder that only fills in a guest struct): they run in place, and
+//              pending records stay pending.
+//   Inline     everything else (other getters, waits, display list recording, every non-GX
 //              native): pending records run first, then the call runs as it always has.
 
 #include <atomic>
@@ -28,7 +31,7 @@
 
 namespace GxWorker {
 
-enum class Kind : uint8_t { Inline, Queue, SelfDefer };
+enum class Kind : uint8_t { Inline, Queue, SelfDefer, NoSync };
 
 enum class Mode : uint8_t {
     Off = 0,
@@ -69,6 +72,10 @@ constexpr uint32_t kSelfDefer = 6;       // a self-deferring call that couldn't 
 // during a replay: a sync point reached from inside a replayed call already has everything recorded
 // before that call applied, which is exactly what it would have seen inline.
 void Drain(uint32_t cause = DrainCause::kOther);
+
+// True when records are waiting on this thread: what a NoSync getter checks before answering from
+// its game-side copy rather than from the state the records have yet to change.
+bool Pending() noexcept;
 
 using ReplayFn = void (*)(void* payload);
 
@@ -164,6 +171,19 @@ void DeferOrRun(const uint8_t* bytes, uint32_t size, A... args) {
     Fn(bytes, args...);
 }
 
+// The scalar form of DeferOrRun: the GX part of a self-deferring body whose arguments are all
+// values, for a body that also keeps a game-side copy of what it sets.
+template <auto Fn, typename... A>
+void DeferCall(A... args) {
+    if (TakeSelfDefer()) {
+        if (RecordCall<Fn>(args...)) {
+            return;
+        }
+        Drain(DrainCause::kSelfDefer);
+    }
+    Fn(args...);
+}
+
 template <typename R, typename... A>
 constexpr bool ReturnsVoid(R (*)(A...)) {
     return std::is_void_v<R>;
@@ -197,6 +217,8 @@ inline bool DispatchCall(A... args) {
         SelfDeferScope armed;
         Fn(args...);
         return true;
+    } else if constexpr (kind == Kind::NoSync) {
+        return false;
     } else {
         Drain(Address);
         return false;

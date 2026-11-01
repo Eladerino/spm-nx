@@ -124,6 +124,8 @@ bool CanRecord() noexcept {
     return t_owner && CurrentMode() != Mode::Off && !g_draining && !GxWorkerRecordingBlocked();
 }
 
+bool Pending() noexcept { return t_owner && g_write != 0; }
+
 void Drain(uint32_t cause) {
     if (!t_owner || g_draining || g_write == 0) {
         return;

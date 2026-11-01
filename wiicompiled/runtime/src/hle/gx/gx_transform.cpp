@@ -17,19 +17,35 @@ namespace {
         }
     }
 
-    static void UpdateProjectionVectorFromMatrix(const float* mtxRowMajor, GXProjectionType projType) {
-        g_projectionVector[0] = (projType == GX_PERSPECTIVE) ? 0.0f : 1.0f;
-        g_projectionVector[1] = mtxRowMajor[0];
-        g_projectionVector[3] = mtxRowMajor[5];
-        g_projectionVector[5] = mtxRowMajor[10];
-        g_projectionVector[6] = mtxRowMajor[11];
+    // GXGetProjectionv's vector for a projection matrix, as GXSetProjection keeps it.
+    static void ProjectionVectorFromMatrix(const float* mtxRowMajor, GXProjectionType projType, float* out) {
+        out[0] = (projType == GX_PERSPECTIVE) ? 0.0f : 1.0f;
+        out[1] = mtxRowMajor[0];
+        out[3] = mtxRowMajor[5];
+        out[5] = mtxRowMajor[10];
+        out[6] = mtxRowMajor[11];
         if (projType == GX_PERSPECTIVE) {
-            g_projectionVector[2] = mtxRowMajor[2];
-            g_projectionVector[4] = mtxRowMajor[6];
+            out[2] = mtxRowMajor[2];
+            out[4] = mtxRowMajor[6];
         } else {
-            g_projectionVector[2] = mtxRowMajor[3];
-            g_projectionVector[4] = mtxRowMajor[7];
+            out[2] = mtxRowMajor[3];
+            out[4] = mtxRowMajor[7];
         }
+    }
+
+    static void UpdateProjectionVectorFromMatrix(const float* mtxRowMajor, GXProjectionType projType) {
+        ProjectionVectorFromMatrix(mtxRowMajor, projType, g_projectionVector);
+    }
+
+    // The viewport and projection as the game last set them, for GXGetViewportv and GXGetProjectionv
+    // while GX records are pending (gx_worker.h). g_viewportState and g_projectionVector change when
+    // the records replay, since the bounding box code reads them in step with the vertices it sees.
+    float s_gameViewport[6] = {0.f, 0.f, 1.f, 1.f, 0.f, 1.f};
+    float s_gameProjectionVector[7] = {1.f, 1.f, 0.f, 1.f, 0.f, -1.f, 0.f};
+
+    void SetGameViewport(float l, float t, float w, float h, float nz, float fz) {
+        s_gameViewport[0] = l; s_gameViewport[1] = t; s_gameViewport[2] = w;
+        s_gameViewport[3] = h; s_gameViewport[4] = nz; s_gameViewport[5] = fz;
     }
 
     static void UpdateProjectionVectorFromProjV(const float* projV) {
@@ -45,15 +61,25 @@ namespace {
 // Viewport and scissor go to aurora in guest EFB coordinates, mapped to the active render target
 // exactly once inside gx::map_logical_viewport/map_logical_scissor. A prior VI origin/scale
 // transform double-transformed menu viewports and broke 640x480 overscan, so it was removed.
-extern "C" void GX__SetViewportJitter_80173378(float l, float t, float w, float h, float nz, float fz, uint32_t f) {
+static void SetViewportJitterGx(float l, float t, float w, float h, float nz, float fz, uint32_t f) {
     g_viewportState[0]=l; g_viewportState[1]=t; g_viewportState[2]=w; g_viewportState[3]=h; g_viewportState[4]=nz; g_viewportState[5]=fz;
     GXSetViewportJitter(l, t, w, h, nz, fz, f);
 }
+
+extern "C" void GX__SetViewportJitter_80173378(float l, float t, float w, float h, float nz, float fz, uint32_t f) {
+    SetGameViewport(l, t, w, h, nz, fz);
+    GxWorker::DeferCall<&SetViewportJitterGx>(l, t, w, h, nz, fz, f);
+}
 PPC_NATIVE_OVERRIDE_VOID(80291994, GX__SetViewportJitter_80173378, (float l, float t, float w, float h, float nz, float fz, uint32_t f), (l, t, w, h, nz, fz, f));
 
-extern "C" void GX__SetViewport_801733b4(float l, float t, float w, float h, float nz, float fz) {
+static void SetViewportGx(float l, float t, float w, float h, float nz, float fz) {
     g_viewportState[0]=l; g_viewportState[1]=t; g_viewportState[2]=w; g_viewportState[3]=h; g_viewportState[4]=nz; g_viewportState[5]=fz;
     GXSetViewport(l, t, w, h, nz, fz);
+}
+
+extern "C" void GX__SetViewport_801733b4(float l, float t, float w, float h, float nz, float fz) {
+    SetGameViewport(l, t, w, h, nz, fz);
+    GxWorker::DeferCall<&SetViewportGx>(l, t, w, h, nz, fz);
 }
 PPC_NATIVE_OVERRIDE_VOID(802919d0, GX__SetViewport_801733b4, (float l, float t, float w, float h, float nz, float fz), (l, t, w, h, nz, fz));
 
@@ -68,7 +94,8 @@ extern "C" void GX__GetViewportv_801733e0(uint32_t oa) {
         lastBypassFrame = g_gxFrameCount;
         AssertMkwOffscreenScreenBypass();
     }
-    if (!oa) return; for(int i=0; i<6; ++i) WriteGuestFloat(oa + i*4, g_viewportState[i]);
+    const float* viewport = GxWorker::Pending() ? s_gameViewport : g_viewportState;
+    if (!oa) return; for(int i=0; i<6; ++i) WriteGuestFloat(oa + i*4, viewport[i]);
 }
 PPC_NATIVE_OVERRIDE_VOID(802919fc, GX__GetViewportv_801733e0, (uint32_t oa), (oa));
 
@@ -114,8 +141,9 @@ extern "C" void GX__SetScissor_80173430(uint32_t l, uint32_t t, uint32_t w, uint
     } } catch(...) {}
     // No viewport replay here: aurora recomputes viewport and scissor together
     // on every scissor change (set_logical_scissor -> apply_logical_render_state),
-    // so re-issuing the current viewport would be duplicate work.
-    GXSetScissor(l, t, w, h);
+    // so re-issuing the current viewport would be duplicate work. The __GXData words above are the
+    // game's and are written at the call; Aurora's part can wait as a GX record (gx_worker.h).
+    GxWorker::DeferCall<&GXSetScissor>(l, t, w, h);
 }
 PPC_NATIVE_OVERRIDE_VOID(80291A4C, GX__SetScissor_80173430, (uint32_t l, uint32_t t, uint32_t w, uint32_t h), (l, t, w, h));
 
@@ -176,6 +204,7 @@ extern "C" void GX__SetProjection_8017301c(uint32_t ma, uint32_t pt) {
         const CpuContext* c = TryGetCpuContext();
         RT_LOGF(RT_TAG_GX, "[drawdump] setproj type %u m0 %.4f m5 %.4f m2 %.4f m6 %.4f m10 %.4f m11 %.4f m14 %.4f lr %08X\n", pt, m[0], m[5], m[2], m[6], m[10], m[11], m[14], c ? c->lr : 0);
     }
+    ProjectionVectorFromMatrix(m, (GXProjectionType)pt, s_gameProjectionVector);
     GxWorker::DeferOrRun<&SetProjectionFrom>(reinterpret_cast<const uint8_t*>(raw), 64, pt);
 }
 PPC_NATIVE_OVERRIDE_VOID(80291698, GX__SetProjection_8017301c, (uint32_t ma, uint32_t pt), (ma, pt));
@@ -236,14 +265,16 @@ extern "C" void GX__SetProjectionv_80173080(uint32_t pa) {
         }
     }
     if (SpmDumpFrame()) RT_LOGF(RT_TAG_GX, "[drawdump] setprojv type %d %.4f %.4f %.4f %.4f %.4f %.4f\n", pt == GX_ORTHOGRAPHIC ? 1 : 0, v[1], v[2], v[3], v[4], v[5], v[6]);
+    std::memcpy(s_gameProjectionVector, v, sizeof(s_gameProjectionVector));
     GxWorker::DeferOrRun<&SetProjectionvFrom>(reinterpret_cast<const uint8_t*>(raw), 28);
 }
 PPC_NATIVE_OVERRIDE_VOID(802916FC, GX__SetProjectionv_80173080, (uint32_t pa), (pa));
 
 extern "C" void GX__GetProjectionv_801730cc(uint32_t pa) {
     uint8_t* out = static_cast<uint8_t*>(GuestToHostPtr(pa, 28));
+    const float* vector = GxWorker::Pending() ? s_gameProjectionVector : g_projectionVector;
     for (int i = 0; i < 7; ++i) {
-        BigEndian::WriteFloat32(out + i * sizeof(float), g_projectionVector[i]);
+        BigEndian::WriteFloat32(out + i * sizeof(float), vector[i]);
     }
 }
 PPC_NATIVE_OVERRIDE_VOID(80291748, GX__GetProjectionv_801730cc, (uint32_t pa), (pa));

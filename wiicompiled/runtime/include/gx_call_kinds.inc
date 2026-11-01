@@ -13,13 +13,19 @@
 // SelfDefer: as Queue, except one argument points at a small struct (a colour, a matrix, a light).
 // Its body reads the struct and hands it to GxWorker::DeferOrRun, so the record carries a copy.
 //
-// Not here on purpose, so Inline: getters (GetCullMode, GetProjectionv, Get*), waits (DrawDone,
-// Flush, PixModeSync, SetDrawSync), builders that write guest memory (InitTexObj*, InitTlutObj),
-// LoadTexObj and LoadTlut (they read a host object keyed by the guest address), display list
-// recording, copies, FIFO setup, the indexed matrix loads (they read the matrix array through array
-// state a pending SetArray may still change), setters that write __GXData (SetScissor,
-// SetScissorBoxOffset, SetZScaleOffset), the Poke* calls, list setters (SetVtxDescv,
-// SetVtxAttrFmtv), and the EGG and NSMBW helpers.
+// NoSync: as Inline but without running pending records first, for a call that touches nothing a
+// record changes. The three getters answer from a game-side copy their setters keep at the call
+// while records are pending; InitTexObj only fills in a host texture object and its guest struct,
+// which nothing reads until LoadTexObj (Inline).
+//
+// Not here on purpose, so Inline: the other getters (Get*), waits (DrawDone, Flush, PixModeSync,
+// SetDrawSync), the other builders that write guest memory (InitTexObjCI and friends,
+// InitTlutObj), LoadTexObj and LoadTlut (they read a host object keyed by the guest address),
+// display list recording, copies, FIFO setup, the indexed matrix loads (they read the matrix array
+// through array state a pending SetArray may still change), setters that write __GXData
+// (SetScissorBoxOffset, SetZScaleOffset; SetScissor writes its part at the call and defers the
+// rest), the Poke* calls, list setters (SetVtxDescv, SetVtxAttrFmtv), and the EGG and NSMBW
+// helpers.
 
 #define GX_WORKER_KIND(address, kind) \
     template <> struct KindOf<address> { static constexpr Kind kKind = Kind::kind; }
@@ -51,7 +57,8 @@ GX_WORKER_KIND(0x802909DCu, Queue);      // GXSetDither
 GX_WORKER_KIND(0x80290A08u, Queue);      // GXSetDstAlpha
 GX_WORKER_KIND(0x80290294u, Queue);      // GXSetAlphaCompare
 GX_WORKER_KIND(0x802902CCu, Queue);      // GXSetZTexture
-GX_WORKER_KIND(0x8028D67Cu, Queue);      // GXSetCullMode
+GX_WORKER_KIND(0x8028D67Cu, SelfDefer);  // GXSetCullMode (keeps the game-side mode)
+GX_WORKER_KIND(0x8028D6A4u, NoSync);     // GXGetCullMode
 GX_WORKER_KIND(0x8028D6C0u, Queue);      // GXSetCoPlanar
 GX_WORKER_KIND(0x80291B38u, Queue);      // GXSetClipMode
 GX_WORKER_KIND(0x802904D8u, SelfDefer);  // GXSetFog (GXColor*)
@@ -88,13 +95,19 @@ GX_WORKER_KIND(0x8028FA20u, SelfDefer);  // GXSetIndTexMtx (f32[2][3])
 
 // Transform (gx_transform.cpp)
 GX_WORKER_KIND(0x80291830u, Queue);      // GXSetCurrentMtx
-GX_WORKER_KIND(0x802919D0u, Queue);      // GXSetViewport
-GX_WORKER_KIND(0x80291994u, Queue);      // GXSetViewportJitter
+GX_WORKER_KIND(0x802919D0u, SelfDefer);  // GXSetViewport (keeps the game-side viewport)
+GX_WORKER_KIND(0x80291994u, SelfDefer);  // GXSetViewportJitter (likewise)
+GX_WORKER_KIND(0x802919FCu, NoSync);     // GXGetViewportv
+GX_WORKER_KIND(0x80291A4Cu, SelfDefer);  // GXSetScissor (writes __GXData at the call)
 GX_WORKER_KIND(0x80291788u, SelfDefer);  // GXLoadPosMtxImm (f32[3][4])
 GX_WORKER_KIND(0x802917D8u, SelfDefer);  // GXLoadNrmMtxImm (f32[3][4])
 GX_WORKER_KIND(0x80291850u, SelfDefer);  // GXLoadTexMtxImm (f32[3][4] or [2][4])
 GX_WORKER_KIND(0x80291698u, SelfDefer);  // GXSetProjection (f32[4][4])
 GX_WORKER_KIND(0x802916FCu, SelfDefer);  // GXSetProjectionv (f32[7])
+GX_WORKER_KIND(0x80291748u, NoSync);     // GXGetProjectionv
+
+// Texture (gx_texture.cpp)
+GX_WORKER_KIND(0x8028EA24u, NoSync);     // GXInitTexObj
 
 // Display lists (gx_dl.cpp): the list's bytes are read at replay, as the GPU reads them late on
 // hardware and the decode thread already does.
