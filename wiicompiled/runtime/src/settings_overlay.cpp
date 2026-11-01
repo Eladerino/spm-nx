@@ -2020,7 +2020,11 @@ void DrawStartupScreen() {
                 // button, so it cannot stand in here. Until the pad's style is known, or if the
                 // file is not on the card, the button is named in text instead, so the line
                 // never lays out a blank gap where the icon would sit.
-                const int padStyle = aurora_button_icon_style();
+                // Before a pad has reported its style, assume the Switch's own buttons (the
+                // only style a Switch pad reports), so the icon is there from the first frame
+                // instead of the line starting as text and swapping to the icon later.
+                const int reportedStyle = aurora_button_icon_style();
+                const int padStyle = reportedStyle >= 0 ? reportedStyle : 2;
                 static const char* const kStyleDirs[3] = {"xbox", "playstation", "nintendo"};
                 const auto aIconPath = padStyle >= 0 && padStyle < 3
                     ? RuntimeConfigFile::ApplicationDataDirectory() / "button_icons" /
@@ -2059,15 +2063,22 @@ void DrawStartupScreen() {
                     }
                     GameLayout::DrawText(list, view, *pmFont, u, at, py, fs, 0x3D8BFFFFu, 0x1A3FA0FFu, 1.0f, 0, 1);
                 };
-                outlined(press, x);
-                if (!icon.empty()) {
-                    x += wPress + gap;
-                    // The icon is a white disc with the letter knocked out, drawn for a dark
-                    // background: on the cream card it blends in, so an ink disc sits behind
-                    // it, a touch wider, the same treatment as the Controls panel's icons.
-                    list->AddCircleFilled(S(x + iconSize * 0.5f, py), iconSize * 0.54f * k, IM_COL32(24, 18, 12, 255));
-                    Draw(icon.c_str(), x + iconSize * 0.5f, py, iconSize, 0.0f, false);
-                    outlined(rest, x + iconSize + gap);
+                if (g_strapInputAccepted.load(std::memory_order_relaxed)) {
+                    // Start was pressed; the game is finishing its boot underneath. Say so,
+                    // rather than keep asking for a press that has already been taken.
+                    const auto starting = GameLayout::Utf16("Starting...");
+                    outlined(starting, -GameLayout::MeasureText(*pmFont, starting, fs) * 0.5f);
+                } else {
+                    outlined(press, x);
+                    if (!icon.empty()) {
+                        x += wPress + gap;
+                        // The icon is a white disc with the letter knocked out, drawn for a dark
+                        // background: on the cream card it blends in, so an ink disc sits behind
+                        // it, a touch wider, the same treatment as the Controls panel's icons.
+                        list->AddCircleFilled(S(x + iconSize * 0.5f, py), iconSize * 0.54f * k, IM_COL32(24, 18, 12, 255));
+                        Draw(icon.c_str(), x + iconSize * 0.5f, py, iconSize, 0.0f, false);
+                        outlined(rest, x + iconSize + gap);
+                    }
                 }
             }
             // The heroes flank the card; Peach waves from the hills.
@@ -3148,88 +3159,6 @@ void ReleaseControllers() noexcept {
     // than writing them here, so without this the process dies before the
     // controller ever receives them.
     if (queued) SDL_Delay(120);
-}
-
-// The game's item demos float a 3D Wii Remote in the air and mime pointing it at the TV (the
-// n_controler NPC: the Shooting Star tutorial in 1-4, the Flipside Arcade's how-to). Its
-// textures ship transparent (marker 7 in tools/make-button-icons.py, isolated by differential
-// texture dumps), so the model cannot form; while Aurora reports marker 7 drawn, this draws
-// the port's own prompt in its place instead: a paper chip naming the stick that does the
-// aiming here. Drawn before the Controls panel, so the panel covers it if both ever report.
-void DrawDemoPrompt() {
-    static double firstSeen = -1.0, lastSeen = -1.0;
-    const double now = ImGui::GetTime();
-    if (aurora_button_icon_marker(7)) {
-        if (lastSeen < 0.0 || now - lastSeen > 0.75) firstSeen = now;
-        lastSeen = now;
-    }
-    if (lastSeen < 0.0 || now - lastSeen > 0.75) {
-        firstSeen = lastSeen = -1.0;
-        return;
-    }
-    float alpha = std::min(1.0f, static_cast<float>(now - firstSeen) / 0.2f);  // fade in
-    const double remain = 0.75 - (now - lastSeen);
-    if (remain < 0.25) alpha *= static_cast<float>(remain / 0.25);  // and out
-
-    static const std::shared_ptr<GameLayout::Font> font = GameLayout::LoadFont("papermarioset_US.bfn");
-    const bool gameFont = GameLayout::FontReady(font.get());
-    const GameLayout::View view = GameLayout::GameView();
-    const auto at = [&](float x, float y) { return ImVec2(view.centerX + x * view.gameScaleX, view.centerY - y * view.scale); };
-    const auto a = [&](int v) { return static_cast<int>(v * alpha); };
-    ImDrawList* list = ImGui::GetBackgroundDrawList();
-    const char* const kText = "Aim with the right stick";
-    constexpr float kSize = 19.0f;
-    const float textW = gameFont ? GameLayout::MeasureText(*font, GameLayout::Utf16(kText), kSize)
-                                 : ImGui::CalcTextSize(kText).x / view.scale;
-    constexpr float kIcon = 30.0f, kGap = 10.0f, kPad = 18.0f, kCy = 128.0f;
-    const float w = kPad + kIcon + kGap + textW + kPad, halfH = 27.0f;
-    list->AddRectFilled(at(-w / 2 + 10.0f, kCy + halfH - 10.0f), at(w / 2 + 10.0f, kCy - halfH - 10.0f),
-                        IM_COL32(0, 0, 0, a(90)), 16.0f * view.scale);
-    list->AddRectFilled(at(-w / 2, kCy + halfH), at(w / 2, kCy - halfH), IM_COL32(255, 252, 240, a(255)), 16.0f * view.scale);
-    list->AddRect(at(-w / 2, kCy + halfH), at(w / 2, kCy - halfH), IM_COL32(24, 18, 12, a(255)), 16.0f * view.scale, 0,
-                  3.0f * view.scale);
-    // The stick: the current style's own right-stick picture when its set ships one (the Switch
-    // set does), a drawn stick otherwise.
-    const int style = aurora_button_icon_style();
-    static ImTextureID stickArt[3] = {};
-    static bool stickTried[3] = {};
-    ImTextureID art{};
-    if (style >= 0 && style <= 2) {
-        if (!stickTried[style]) {
-            stickTried[style] = true;
-            static const char* const kNames[3] = {"xbox", "playstation", "nintendo"};
-            const auto path = RuntimeConfigFile::ApplicationDataDirectory() / "button_icons" / kNames[style] / "ui" /
-                              "buttons" / "rightstick.png";
-            uint32_t iw = 0, ih = 0;
-            if (uint8_t* rgba = aurora_load_png_rgba(RuntimeConfigFile::PathToUtf8(path).c_str(), &iw, &ih)) {
-                stickArt[style] = aurora_imgui_add_texture(iw, ih, rgba);
-                std::free(rgba);
-            }
-        }
-        art = stickArt[style];
-    }
-    const float iconCx = -w / 2 + kPad + kIcon / 2;
-    if (art) {
-        // The stick picture is white art (drawn for a dark card), so an ink disc sits behind
-        // it, the same fix as the Controls panel's badges: the art reads on paper.
-        list->AddCircleFilled(at(iconCx, kCy), kIcon * 0.54f * view.scale, IM_COL32(24, 18, 12, a(255)));
-        list->AddImage(art, at(iconCx - kIcon / 2, kCy + kIcon / 2), at(iconCx + kIcon / 2, kCy - kIcon / 2), ImVec2(0, 0),
-                       ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
-    } else {
-        const ImVec2 c = at(iconCx, kCy);
-        const float r = kIcon / 2 * view.scale;
-        list->AddCircleFilled(c, r, IM_COL32(255, 255, 255, a(255)));
-        list->AddCircle(c, r, IM_COL32(24, 18, 12, a(235)), 0, 2.0f * view.scale);
-        list->AddCircleFilled(ImVec2(c.x, c.y - r * 0.25f), r * 0.38f, IM_COL32(24, 18, 12, a(255)));
-    }
-    if (gameFont) {
-        const uint32_t c = 0x18120C00u | static_cast<uint32_t>(a(255));
-        GameLayout::DrawText(list, view, *font, GameLayout::Utf16(kText), iconCx + kIcon / 2 + kGap, kCy, kSize, c, c, 1.0f, 0, 1);
-    } else {
-        const ImVec2 p = at(iconCx + kIcon / 2 + kGap, kCy);
-        list->AddText(ImVec2(p.x, p.y - ImGui::GetTextLineHeight() / 2),
-                      IM_COL32(24, 18, 12, a(255)), kText);
-    }
 }
 
 // New Super Paper Bros.: the game's Controls screen (- button) shows a 3D Wii Remote with bubbles pointing at its
@@ -4662,7 +4591,6 @@ void Draw() noexcept {
     DrawExitPrompt();
     controller_mapping_wizard::Draw();
     ApplyInputBlockState();
-    DrawDemoPrompt();
     DrawControlsPanel();
     DrawOptionsMenu();
     DrawUpdateNotice();
@@ -4688,6 +4616,18 @@ void NotifyStrapInputAccepted() noexcept {
         g_startupDismissFrame.store(g_presentedFrame + kStrapTransitionCoverFrames,
                                     std::memory_order_release);
     }
+}
+
+uint32_t StartupAutoPressBits() noexcept {
+    // The cover's start press reaches the game, but the game's logo sequence (Seq 0) only
+    // skips a stage on a press made while that stage is listening, one stage per press. A
+    // single A therefore did nothing visible: the cover stayed up and the boot ran on to
+    // its own timeout. Once the player has pressed start, tap A and 2 for the game (four
+    // frames down, four up, so each tap is a fresh press) until the sequence reaches the
+    // title. The taps stop the moment Seq leaves 0, so the title screen never sees one.
+    if (!g_strapInputAccepted.load(std::memory_order_acquire) || SpmMapSweep::Seq() != 0) return 0;
+    constexpr uint32_t kWpadA = 0x0800u, kWpadTwo = 0x0100u;
+    return (g_presentedFrame / 4) % 2 == 0 ? (kWpadA | kWpadTwo) : 0u;
 }
 
 void AdvancePresentedFrame() noexcept { ++g_presentedFrame; }
