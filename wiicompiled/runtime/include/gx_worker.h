@@ -53,10 +53,22 @@ void FrameBoundary();
 // replay is running and no display list is being built (GxWorkerRecordingBlocked).
 bool CanRecord() noexcept;
 
+// Why pending records had to run: the guest address of the native that needed them (a call that
+// isn't queued), or one of these. The [gxworker] lines count drains that had work by cause.
+namespace DrainCause {
+constexpr uint32_t kOther = 0;
+constexpr uint32_t kFrame = 1;           // the frame boundary
+constexpr uint32_t kRingFull = 2;        // no room for the next record
+constexpr uint32_t kCommit = 3;          // Immediate mode: every record
+constexpr uint32_t kFifo = 4;            // a guest FIFO store that couldn't be recorded
+constexpr uint32_t kUnnamedNative = 5;   // a native reached without its guest address
+constexpr uint32_t kSelfDefer = 6;       // a self-deferring call that couldn't be recorded
+}
+
 // Runs every pending record, oldest first. A no-op off the owning thread, with nothing pending, and
 // during a replay: a sync point reached from inside a replayed call already has everything recorded
 // before that call applied, which is exactly what it would have seen inline.
-void Drain();
+void Drain(uint32_t cause = DrainCause::kOther);
 
 using ReplayFn = void (*)(void* payload);
 
@@ -71,8 +83,9 @@ void Commit();
 // small records (guest FIFO stores) share one header.
 void* ExtendLast(ReplayFn replay, size_t extra, void** extraOut);
 
-// Counts for the perftimer's [gxworker] line, printed with the [calls] lines.
-void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame);
+// Counts for the perftimer's [gxworker] lines, printed with the [calls] lines. `nameOf` names a
+// cause's guest address (null: printed as hex).
+void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*nameOf)(uint32_t) = nullptr);
 
 template <auto Fn, typename Tuple>
 void ReplayTuple(void* payload) {
@@ -130,7 +143,7 @@ template <auto Fn, typename... A>
 void DeferOrRun(const uint8_t* bytes, uint32_t size, A... args) {
     if (TakeSelfDefer()) {
         if (bytes == nullptr) {
-            Drain();
+            Drain(DrainCause::kSelfDefer);
             Fn(bytes, args...);
             return;
         }
@@ -146,7 +159,7 @@ void DeferOrRun(const uint8_t* bytes, uint32_t size, A... args) {
             Commit();
             return;
         }
-        Drain();
+        Drain(DrainCause::kSelfDefer);
     }
     Fn(bytes, args...);
 }
@@ -174,18 +187,18 @@ inline bool DispatchCall(A... args) {
         if (CanRecord() && RecordCall<Fn>(args...)) {
             return true;
         }
-        Drain();
+        Drain(Address);
         return false;
     } else if constexpr (kind == Kind::SelfDefer) {
         if (!CanRecord()) {
-            Drain();
+            Drain(Address);
             return false;
         }
         SelfDeferScope armed;
         Fn(args...);
         return true;
     } else {
-        Drain();
+        Drain(Address);
         return false;
     }
 }

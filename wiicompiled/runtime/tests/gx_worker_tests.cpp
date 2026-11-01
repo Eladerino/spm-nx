@@ -214,6 +214,22 @@ void TestFrameBoundaryDrains() {
     Check(!GxWorker::Engaged(), "boundary: off after the boundary");
 }
 
+const char* TestName(uint32_t address) { return address == 0x80001234u ? "GXGetTest" : nullptr; }
+
+void TestDrainCausesPrint() {
+    SetMode(GxWorker::Mode::Deferred);
+    GxWorker::PrintPerfWindow(1, 1, &TestName);  // clears what earlier tests counted
+    for (int i = 0; i < 3; ++i) {
+        GxWorker::RecordCall<&Setter>(1u, 1u);
+        GxWorker::Drain(0x80001234u);
+    }
+    GxWorker::RecordCall<&Setter>(1u, 1u);
+    GxWorker::Drain(0x80005678u);
+    GxWorker::Drain(0x80005678u);  // nothing pending: not counted
+    std::fprintf(stderr, "expect: GXGetTest 3.0, 80005678 1.0\n");
+    GxWorker::PrintPerfWindow(1, 1, &TestName);
+}
+
 } // namespace
 
 bool GxWorkerRecordingBlocked() noexcept { return g_blocked; }
@@ -229,6 +245,7 @@ int main() {
     TestExtendLast();
     TestBlocked();
     TestFrameBoundaryDrains();
+    TestDrainCausesPrint();
     if (g_failures != 0) {
         std::fprintf(stderr, "%d failures\n", g_failures);
         return 1;

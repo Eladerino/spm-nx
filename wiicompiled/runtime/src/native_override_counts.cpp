@@ -27,6 +27,12 @@ constexpr size_t kOverrideCountMaxEntries = 60;
 constexpr size_t kOverrideCountPerLine = 6;
 
 // An override's counter has no name of its own: it takes the registered winner's at its address.
+// A guest address's registered name, for the GX worker's drain causes; null when it has none.
+const char* GuestAddressName(uint32_t address) {
+    const TranslatedFunctionInfo* info = TranslatedFunctionRegistry::FindByAddressPtr(address);
+    return (info != nullptr && info->name != nullptr && info->name[0] != '\0') ? info->name : nullptr;
+}
+
 const char* CounterName(NativeOverrideCounter& c) {
     if (c.name == nullptr) {
         const TranslatedFunctionInfo* info = TranslatedFunctionRegistry::FindByAddressPtr(c.address);
@@ -40,7 +46,7 @@ void PrintNativeOverrideCounts(uint64_t firstFrame, uint64_t lastFrame) {
         return;
     }
     // The GX record ring's line (gx_worker.h) shares this hook; it prints nothing while records are off.
-    GxWorker::PrintPerfWindow(firstFrame, lastFrame);
+    GxWorker::PrintPerfWindow(firstFrame, lastFrame, &GuestAddressName);
     const double frames = static_cast<double>(lastFrame - firstFrame + 1);
     std::vector<std::pair<uint64_t, const char*>> ran;
     uint64_t total = 0;
