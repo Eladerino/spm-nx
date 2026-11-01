@@ -2,6 +2,7 @@ extern "C" unsigned g_spmAudit[8];
 extern "C" unsigned g_spmGameClear;
 extern "C" int g_spmSweepDump;
 #include "spm_map_sweep.h"
+#include "spm_prepare_graphics.h"
 #include "abi_bridge.h"
 #include "memory.h"
 #include "mod_runtime.h"
@@ -723,6 +724,7 @@ void Tick(CpuContext* cpu, uint32_t presentedFrames) {
     ServiceWarp(cpu);
     static Sweep sweep;
     sweep.Tick(cpu, presentedFrames);
+    SpmPrepareGraphics::Tick(cpu, presentedFrames);
 }
 void RequestWarp(const char* map, const char* door, const float* arrivalPos) {
     std::lock_guard<std::mutex> lock(g_warpMutex);
