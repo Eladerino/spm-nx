@@ -92,8 +92,8 @@ mapping keeps the same jobs on the Switch buttons:
 |---|---|
 | Left stick or D-pad | D-pad (move) |
 | A or B | 2 (jump) |
-| X | 1 |
-| Y | A |
+| X | A |
+| Y | 1 |
 | Right stick | Pointer (Tippi) |
 | R or ZR | Shake (hold) |
 | + | + |

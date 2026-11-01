@@ -106,15 +106,17 @@ else
         icons_dest=$dest/UserData/button_icons
         if python3 -c 'import PIL' >/dev/null 2>&1 && command -v magick >/dev/null &&
            python3 "$root/tools/make-button-icons.py" --clean --out "$icons_gen"; then
-            mkdir -p "$icons_dest/nintendo/ui" "$icons_dest/nintendo/marker1" \
+            mkdir -p "$icons_dest/nintendo/ui" "$icons_dest/nintendo/ui/buttons" "$icons_dest/nintendo/marker1" \
                      "$icons_dest/nintendo/marker2" "$icons_dest/nintendo/marker3" \
                      "$icons_dest/nintendo/marker4" "$icons_dest/nintendo/marker5" \
                      "$icons_dest/nintendo/marker6"
             cp "$root/tools/button-art/Kenney-License.txt" "$icons_dest/"
-            for f in controller.png panel.txt tex1_464x288_36a6f13147d63352_14.png \
+            for f in controller.png panel.txt buttons.txt tex1_464x288_36a6f13147d63352_14.png \
                      tex1_40x40_21ecf92a70736554_14.png tex1_40x40_db14bc3d6c7b16a5_14.png \
                      tex1_40x40_e73bd2aadadde9d9_14.png tex1_96x40_61b1a30a17d36df5_5.png \
                      ui/move.png ui/flip.png ui/jump.png ui/pixl.png ui/tippi.png ui/stylish.png \
+                     ui/buttons/a.png ui/buttons/x.png ui/buttons/y.png ui/buttons/rightshoulder.png \
+                     ui/buttons/righttrigger.png ui/buttons/leftstick.png ui/buttons/rightstick.png \
                      marker1/tex1_256x64_ddc0097f76e8016b_14.png \
                      marker1/tex1_256x64_a2fd9566973811d6_14.png \
                      marker1/tex1_64x32_3b9919c664469aa9_14.png \
