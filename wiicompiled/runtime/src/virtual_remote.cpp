@@ -67,6 +67,11 @@ struct Intent {
     uint32_t buttons = 0;  // WPAD bits, already in the sideways layout
     bool shake = false;
     float tilt = 0.0f;     // -1 counter-clockwise (left) .. 1 clockwise (right)
+    // Player 1's real accelerometer, when the pad has a live one: the gravity
+    // direction in the sideways remote's frame, in g (rest 0, -1, 0). Filled by
+    // GamepadIntent from the SDL sensor; hasImu false means no live sample.
+    bool hasImu = false;
+    float imu[3] = {0.0f, 0.0f, 0.0f};
 };
 
 struct Motion {
@@ -290,6 +295,31 @@ Intent GamepadIntent() {
         if (kind != WiiRemoteInput::Kind::NotWii && kind != WiiRemoteInput::Kind::WiiUPro) {
             continue;  // a real Wii Remote: the game reads it through KPAD
         }
+        // Real motion, when this pad has an accelerometer: enable it and take the
+        // freshest sample. SDL reports proper acceleration in m/s^2 (x right,
+        // y top, z toward the player); the remote's frame wants the gravity
+        // direction in g, with z along the long axis toward the buttons end, so
+        // each axis is negated and the player's toward/away axis becomes x.
+        if (!intent.hasImu && SDL_GamepadHasSensor(gamepad, SDL_SENSOR_ACCEL)) {
+            SDL_SetGamepadSensorEnabled(gamepad, SDL_SENSOR_ACCEL, true);
+            float data[3];
+            if (SDL_GetGamepadSensorData(gamepad, SDL_SENSOR_ACCEL, data, 3)) {
+                constexpr float kGravityMs2 = 9.80665f;  // SDL_STANDARD_GRAVITY
+                intent.hasImu = true;
+                intent.imu[0] = -data[2] / kGravityMs2;
+                intent.imu[1] = -data[1] / kGravityMs2;
+                intent.imu[2] = -data[0] / kGravityMs2;
+                static bool s_imuLogged = false;
+                if (!s_imuLogged) {
+                    s_imuLogged = true;
+                    RT_LOGF(RT_TAG_CONFIG,
+                            "[motion] IMU live on '%s': sdl accel %.2f %.2f %.2f m/s^2, remote %.2f %.2f %.2f g "
+                            "(rest, held normally, should read near 0 -1 0)\n",
+                            SDL_GetGamepadName(gamepad), data[0], data[1], data[2], intent.imu[0], intent.imu[1],
+                            intent.imu[2]);
+                }
+            }
+        }
         const PadStyle style = StyleFor(gamepad);
         const PadLayout& layout = (*layouts)[style];
         if (firstStyle < 0) firstStyle = style;
@@ -388,6 +418,21 @@ void ApplyMotion(Motion& motion, const Intent& intent, WiiRemoteInput::KpadSampl
     motion.tilt += (intent.tilt - motion.tilt) * kTiltFollow;
     if (std::fabs(motion.tilt) < 0.001f) {
         motion.tilt = 0.0f;
+    }
+    // A live accelerometer wins over everything synthesized: the player's own
+    // shaking, tilting and gravity, straight into the sample. A sample that is
+    // not finite or beyond the sensor's +-8 g range is a glitch; that frame
+    // falls through to the synthesized path below instead.
+    if (intent.hasImu) {
+        const float x = intent.imu[0], y = intent.imu[1], z = intent.imu[2];
+        const float mag2 = x * x + y * y + z * z;
+        if (std::isfinite(mag2) && mag2 <= 64.0f) {
+            sample.acc[0] = x;
+            sample.acc[1] = y;
+            sample.acc[2] = z;
+            motion.shakeFrame = kShakeFrames;  // keep the flick parked while the IMU drives
+            return;
+        }
     }
     const float angle = motion.tilt * kMaxTiltRadians;
     sample.acc[0] = 0.0f;
@@ -556,6 +601,12 @@ bool Sample(uint32_t chan, WiiRemoteInput::KpadSample& sample) {
         intent.shake = intent.shake || other.shake;
         if (other.tilt != 0.0f) {
             intent.tilt = other.tilt;
+        }
+        if (other.hasImu) {
+            intent.hasImu = true;
+            intent.imu[0] = other.imu[0];
+            intent.imu[1] = other.imu[1];
+            intent.imu[2] = other.imu[2];
         }
     };
     if (chan == 0 && !g_keyboardOnAPort) {
