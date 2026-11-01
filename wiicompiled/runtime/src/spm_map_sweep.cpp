@@ -676,6 +676,25 @@ void TrackPlace(CpuContext* cpu, uint32_t presentedFrames) {
     AuroraSetPerfPlace(place);
 }
 
+bool MarioIn3d(CpuContext* cpu) {
+    return cpu && CallGuest(cpu, 0x8012A624, 0) != 0;  // marioCheck3d
+}
+
+int MarioCharacter(CpuContext* cpu) {
+    if (!cpu) return -1;
+    const uint32_t mw = CallGuest(cpu, 0x801214EC, 0);  // marioGetPtr
+    if (!Memory::Contains(mw, 0x40)) return -1;
+    return int8_t(Memory::Read8(mw + 0x38));
+}
+
+bool MarioHasControl(CpuContext* cpu) {
+    if (!cpu) return false;
+    const uint32_t mw = CallGuest(cpu, 0x801214EC, 0);  // marioGetPtr
+    if (!Memory::Contains(mw, 0x40)) return false;
+    // The same pair ServiceWarp's arrival placement waits on before it moves Mario.
+    return Memory::Read8(mw + 0x34) == 0 && Memory::Read8(mw + 0x35) == 0;
+}
+
 void Tick(CpuContext* cpu, uint32_t presentedFrames) {
     TrackPlace(cpu, presentedFrames);
     Assert57SelfTest(cpu);

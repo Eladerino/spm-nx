@@ -3,7 +3,9 @@
 // One state machine on the game thread, driven by SpmMapSweep::Tick: ask for a warp to the next
 // room (SpmMapSweep::RequestWarp, the Debug menu's own warp), wait for the map change to finish,
 // give the room a moment to draw what it draws, then wait until Aurora's pipeline queue has been
-// empty for a second, and go on. The design follows SwitchWaker's Prepare graphics (warp, wait for
+// empty for a second. Then flip Mario to 3D (a synthetic press of Wii A, the button a player
+// flips with) and wait for the queue again, because the flipped view draws through pipelines
+// the 2D view never touches. The design follows SwitchWaker's Prepare graphics (warp, wait for
 // the shader worker to go idle, keep the save safe, resumable, B to stop); the code is this
 // port's own.
 #include "spm_prepare_graphics.h"
@@ -50,9 +52,13 @@ constexpr double kQuiet = 1.0;           // s of an empty pipeline queue that ma
 constexpr double kRoomTimeout = 60.0;    // s at most in one room
 constexpr double kHoldToStop = 1.5;      // s of B held
 constexpr double kWaitForGame = 3.0;     // s in a map before a waiting sweep begins
+constexpr double kFlipTimeout = 1.0;     // s for the game to report 3D after the flip press before the room goes on unflipped
+constexpr double kFlipDrainCap = 5.0;    // s at most draining in 3D: the flip meter runs about 10 s from full, and
+                                         // Mario has been in 2D (where it refills) for the whole visit, so the press
+                                         // poll plus this cap stay inside it without touching the player's cheat setting
 constexpr int kMaxSkipsInARow = 3;       // warps the game would not take, then the sweep stops
 
-enum class Phase { Idle, Waiting, Request, Arrive, Settle, Drain, Finish };
+enum class Phase { Idle, Waiting, Request, Arrive, Settle, Drain, FlipSettle, FlipDrain, Finish };
 
 std::mutex g_mu;  // g_status (read by the UI thread)
 Status g_status;
@@ -65,7 +71,13 @@ size_t g_index = 0;
 size_t g_doneThisRun = 0;
 int g_skipsInARow = 0;
 bool g_sawChange = false;
+bool g_flipTried = false;  // this room's flip press has been sent (or found needless)
 bool g_complete = false;
+// The flip pulse, shared with the KPAD read (another thread): which presented frame it started
+// on, and whether one is armed at all. Tick refreshes g_presented every frame.
+std::atomic<uint32_t> g_presented{0};
+std::atomic<uint32_t> g_flipPulseAt{0};
+std::atomic<bool> g_flipPulse{false};
 Clock::time_point g_phaseAt{}, g_quietSince{}, g_runStart{}, g_inMapSince{}, g_holdSince{}, g_messageAt{};
 
 fs::path Dir() { return RuntimeConfigFile::ApplicationDataDirectory() / "PrepareGraphics"; }
@@ -481,6 +493,18 @@ void BeginRun() {
 bool g_restoreAtTitle = false;
 void EndRun(const char* why, bool complete, bool stuck) {
     Quiet(false);
+    g_flipPulse = false;
+    // The rows this run recorded reach the pipeline database through a queued writer thread,
+    // while the compiled shaders were already written as they compiled: an end that skips the
+    // queue (the restart below, or the process dying) keeps the shaders and loses the rows the
+    // next start would have prewarmed from. Every ending funnels through here, so the queue is
+    // drained here, before anything else in this function can end the process, and the result
+    // is logged either way: a run whose flush failed is not the recording it claims to be.
+    if (aurora_flush_pipeline_cache_writes()) {
+        RT_LOGF(RT_TAG_RUNTIME, "[prepare] pipeline cache flushed\n");
+    } else {
+        RT_LOGF(RT_TAG_RUNTIME, "[prepare] pipeline cache flush failed; some rows from this run may not be recorded\n");
+    }
     RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: %zu rooms this run in %.0f min, next %zu of %zu\n", why, g_doneThisRun,
             Seconds(g_runStart) / 60.0, g_index + 1, g_list.size());
     if (complete) {
@@ -520,7 +544,7 @@ void EndRun(const char* why, bool complete, bool stuck) {
 
 void PublishStatus() {
     std::lock_guard<std::mutex> lock(g_mu);
-    g_status.running = g_phase >= Phase::Request && g_phase <= Phase::Drain;
+    g_status.running = g_phase >= Phase::Request && g_phase <= Phase::FlipDrain;
     g_status.waiting = g_phase == Phase::Waiting;
     g_status.complete = g_complete;
     g_status.total = int(g_list.size());
@@ -535,14 +559,25 @@ void PublishStatus() {
     if (!g_status.message.empty() && !g_status.running && Seconds(g_messageAt) > 15.0) g_status.message.clear();
 }
 
-void Step() {
+// The room is visited in full (both dimensions drained, or the flip settled as far as this
+// room allows): count it and move on. The index is written here, not at the first drain, so a
+// run stopped mid-flip does this room again next time rather than skipping its flipped view.
+void FinishRoom() {
+    g_flipPulse = false;
+    ++g_doneThisRun;
+    ++g_index;
+    WriteIndex(g_index);
+    Enter(Phase::Request);
+}
+
+void Step(CpuContext* cpu) {
     const int seq = SpmMapSweep::Seq();
     if (seq == 2) {
         if (g_inMapSince == Clock::time_point{}) g_inMapSince = Clock::now();
     } else {
         g_inMapSince = {};
     }
-    const bool running = g_phase >= Phase::Request && g_phase <= Phase::Drain;
+    const bool running = g_phase >= Phase::Request && g_phase <= Phase::FlipDrain;
 
     if (g_startRequest.exchange(false) && !running && g_phase != Phase::Finish) Enter(Phase::Waiting);
     if (running && g_stop.exchange(false)) {
@@ -616,10 +651,70 @@ void Step() {
         const bool done = quiet && Seconds(g_quietSince) >= kQuiet;
         if (!done && Seconds(g_phaseAt) < kRoomTimeout) return;
         if (!done) RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: still compiling after %.0f s, going on\n", g_list[g_index]->map, kRoomTimeout);
-        ++g_doneThisRun;
-        ++g_index;
-        WriteIndex(g_index);
-        Enter(Phase::Request);
+        g_flipTried = false;
+        Enter(Phase::FlipSettle);
+        return;
+    }
+    case Phase::FlipSettle: {
+        const Room& r = *g_list[g_index];
+        if (seq != 2) {  // the game left the room mid-visit: nothing to flip here any more
+            RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: flip skipped, the game left the room\n", r.map);
+            FinishRoom();
+            return;
+        }
+        if (SpmMapSweep::MarioIn3d(cpu)) {
+            RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: %s\n", r.map, g_flipTried ? "flipped to 3D" : "already in 3D");
+            g_quietSince = {};
+            Enter(Phase::FlipDrain);
+            return;
+        }
+        if (!g_flipTried) {
+            g_flipTried = true;
+            // The press is only a flip when Mario can take it as one: another character's A is
+            // their ability (Luigi's charged jump can move him), and without control the press
+            // lands in whatever event or message owns him instead. Both are checked with the
+            // game's own state, the same reads the warp service's arrival placement waits on.
+            const int character = SpmMapSweep::MarioCharacter(cpu);
+            if (character < 0) {
+                RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: flip skipped, Mario could not be checked\n", r.map);
+                FinishRoom();
+                return;
+            }
+            if (character != 0) {
+                RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: flip skipped, not playing as Mario\n", r.map);
+                FinishRoom();
+                return;
+            }
+            if (!SpmMapSweep::MarioHasControl(cpu)) {
+                RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: flip skipped, Mario does not have control\n", r.map);
+                FinishRoom();
+                return;
+            }
+            g_flipPulseAt = g_presented.load();
+            g_flipPulse = true;
+            return;
+        }
+        if (Seconds(g_phaseAt) >= kFlipTimeout) {
+            // Locked here, blocked, or the room forbids it: the attempt is the probe, and the
+            // room simply goes on unflipped, at the cost of this timeout only.
+            g_flipPulse = false;
+            RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: flip did not take, going on in 2D\n", r.map);
+            FinishRoom();
+        }
+        return;
+    }
+    case Phase::FlipDrain: {
+        if (seq != 2) {  // the draws queued so far still drain in the background; the room is over either way
+            FinishRoom();
+            return;
+        }
+        const bool quiet = aurora_get_queued_pipeline_count() == 0;
+        if (!quiet) g_quietSince = {};
+        else if (g_quietSince == Clock::time_point{}) g_quietSince = Clock::now();
+        const bool done = quiet && Seconds(g_quietSince) >= kQuiet;
+        if (!done && Seconds(g_phaseAt) < kFlipDrainCap) return;
+        if (!done) RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: still compiling in 3D after %.0f s, going on\n", g_list[g_index]->map, kFlipDrainCap);
+        FinishRoom();
         return;
     }
     case Phase::Finish:
@@ -637,8 +732,9 @@ void Step() {
 
 }  // namespace
 
-void Tick(CpuContext* cpu, uint32_t) {
+void Tick(CpuContext* cpu, uint32_t presentedFrames) {
     if (!cpu) return;
+    g_presented = presentedFrames;
     static bool started = false;
     if (!started) {
         started = true;
@@ -649,8 +745,16 @@ void Tick(CpuContext* cpu, uint32_t) {
         if (RestoreSave(true) == RestoreResult::Restored) RT_LOGF(RT_TAG_RUNTIME, "[prepare] save restored\n");
         if (Exists(Dir() / "resume.txt")) Enter(Phase::Waiting);
     }
-    Step();
+    Step(cpu);
     PublishStatus();
+}
+
+uint32_t FlipAutoPressBits() {
+    if (!g_flipPulse.load()) return 0;
+    // Four presented frames down, then off for good: a tap long enough for the game's own
+    // input reads to catch between frames (the startup cover's auto-press uses the same four),
+    // and a single tap, so a flip the game applies late is never flipped back by a second one.
+    return g_presented.load() - g_flipPulseAt.load() < 4 ? 0x0800u : 0u;
 }
 
 void Start() { g_startRequest = true; }

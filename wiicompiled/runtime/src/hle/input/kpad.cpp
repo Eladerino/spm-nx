@@ -1,4 +1,5 @@
 #include "settings_overlay.h"
+#include "spm_prepare_graphics.h"
 #include "save_state.h"
 #include "netplay_ui.h"
 #include "frame_input.h"
@@ -300,6 +301,10 @@ bool ReadSample(uint32_t chan, WiiRemoteInput::KpadSample& sample) {
         settings_overlay::NotifyStrapInputAccepted();
     }
     sample.hold |= settings_overlay::StartupAutoPressBits();
+    // The Prepare sweep's flip press, added at the same place for the same reason: the menu
+    // filter above zeroes the player's own buttons while a sweep runs, and a press added after
+    // it is the only kind the game can still see.
+    sample.hold |= SpmPrepareGraphics::FlipAutoPressBits();
     if (InputBindings::InputBlocked()) {
         sample.hold = 0;
         sample.clHold = 0;
