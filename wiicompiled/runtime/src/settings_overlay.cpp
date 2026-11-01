@@ -374,6 +374,16 @@ int g_optQuitChoice = 1;          // 0 Quit, 1 Cancel
 uint32_t g_optPrevHold = 0, g_optSuppress = 0;
 Clock::time_point g_optLastToggle{}, g_optOpenedAt{};
 std::array<Clock::time_point, 4> g_optRepeatAt{};
+#if defined(__SWITCH__)
+// Clear shader cache (Developer page) is a two-press action, because one press used to arm a
+// full recompile at the next launch with nothing on screen saying so. 0: idle, the next press
+// arms. 1: armed, a second press on the same still-selected row executes. 2: executed, the
+// sentinel is written and the value column says "Armed for next launch" until this process
+// ends (the cache clear itself happens in shaders_init at that launch, so nothing here needs
+// to clear the state). Moving the selection or closing the menu drops state 1 back to 0.
+int g_clearCacheState = 0;
+int g_clearCacheArmTab = -1, g_clearCacheArmRow = -1;
+#endif
 
 bool OptionsMenuVisible() { return g_optOpen; }
 
@@ -3714,6 +3724,9 @@ void SetOptionsOpen(bool open) {
     g_optOpen = open;
     g_optLastToggle = Clock::now();
     g_optQuitPrompt = false;
+#if defined(__SWITCH__)
+    if (!open && g_clearCacheState == 1) g_clearCacheState = 0;  // closing cancels a pending clear
+#endif
     if (open) {
         g_optOpenedAt = Clock::now();
         g_optRow = 0;
@@ -3776,9 +3789,9 @@ constexpr DiagRow kDiagRows[] = {
      "Stops Aurora from merging compatible draws into one. This can slow rendering, but isolates bugs caused by merging."},
     {"arrayup", "Re-upload vertex arrays (arrayup)", nullptr,
      "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data."},
-    {"picdump", "Dump frame pictures (picdump)", "Dumps and traces",
+    {"picdump", "Log frame brightness (picdump)", "Dumps and traces",
      "At a few presents, reads the picture back and logs sampled brightness, quadrant averages, and the centre pixel. It does not save an image."},
-    {"bufdump", "Dump staged buffers (bufdump)", nullptr,
+    {"bufdump", "Log staged buffers (bufdump)", nullptr,
      "At presents 600, 1800, and 3600, logs each live buffer's size, usage, and non-zero words. It waits for the GPU and can hitch."},
     {"texdump", "Dump textures (texdump)", nullptr,
      "At a few presents, saves the most-sampled textures and every mip level under UserData/Logs, for comparison with what appeared on screen."},
@@ -3803,31 +3816,102 @@ constexpr DiagRow kDiagRows[] = {
 };
 constexpr int kDiagCount = int(std::size(kDiagRows));
 
-// Persists every switch after a Diagnostics flip, grouped under the table's headings, each line
-// "key=0" or "key=1" with the row's name as a comment. device.cpp's diag_init reads it back.
-// The layout also stays readable by builds from before comments were allowed: those took a line
-// naming a key, with "=0" for off, so every line keeps "key=N" unspaced and no comment names a key.
+// One switch's line in dk_diag.txt: "key=0" or "key=1", padded so the row's name sits in a
+// comment at a fixed column. device.cpp's diag_init reads the file back. The layout also stays
+// readable by builds from before comments were allowed: those took a line naming a key, with
+// "=0" for off, so every line keeps "key=N" unspaced and no comment ever names a key.
+std::string FormatDiagLine(const DiagRow& row) {
+    constexpr int kCommentColumn = 16;
+    const char* nameEnd = std::strstr(row.label, " (");
+    const int nameLength = nameEnd ? int(nameEnd - row.label) : int(std::strlen(row.label));
+    const int used = int(std::strlen(row.key)) + 2;
+    char buffer[256];
+    std::snprintf(buffer, sizeof(buffer), "%s=%d%*s# %.*s\n", row.key, swdk::diag_get(row.key) ? 1 : 0,
+                  used < kCommentColumn ? kCommentColumn - used : 1, "", nameLength, row.label);
+    return buffer;
+}
+
+// Persists the switches after a Diagnostics flip. A hand-edited dk_diag.txt is the player's
+// file, not the menu's scratchpad: the old writer truncated it and regenerated the whole
+// template, silently deleting hand comments, the player's own ordering, and any key this
+// build does not know (a newer build's switch vanished the first time an older build's menu
+// flipped anything). Now the existing file is read and only the lines this page owns change:
+// a known key's line is rewritten in place with the live value, in the file's own position;
+// every other line (comments, blank lines, unknown keys) is carried through untouched; known
+// keys the file lacks are appended at the end. Only a missing or empty file gets the full
+// generated template, grouped under the table's headings.
 void WriteDiagFileBack() {
-    FILE* file = std::fopen("/switch/spm-nx/UserData/dk_diag.txt", "w");
+    constexpr const char* kPath = "/switch/spm-nx/UserData/dk_diag.txt";
+    std::string existing;
+    if (FILE* in = std::fopen(kPath, "rb")) {
+        char chunk[4096];
+        size_t got;
+        while ((got = std::fread(chunk, 1, sizeof(chunk), in)) > 0) existing.append(chunk, got);
+        std::fclose(in);
+    }
+
+    std::string out;
+    if (existing.empty()) {
+        out = "# spm-nx diagnostic switches: 1 turns one on, 0 turns it off.\n"
+              "# Read at launch. The Diagnostics page in the settings menu changes them while the\n"
+              "# game runs and writes them back here, keeping your own comments, ordering, and\n"
+              "# any keys it does not know.\n";
+        for (const DiagRow& row : kDiagRows) {
+            if (row.group != nullptr) {
+                out += "\n# ";
+                out += row.group;
+                out += "\n";
+            }
+            out += FormatDiagLine(row);
+        }
+    } else {
+        bool written[kDiagCount] = {};
+        size_t pos = 0;
+        while (pos < existing.size()) {
+            const size_t eol = existing.find('\n', pos);
+            const size_t len = eol == std::string::npos ? existing.size() - pos : eol - pos + 1;
+            const std::string line = existing.substr(pos, len);
+            pos += len;
+            // A line this page owns: optional leading spaces, one of the table's keys, optional
+            // spaces, then '='. Anything else is the player's and passes through as written.
+            int owned = -1;
+            {
+                size_t i = line.find_first_not_of(" \t");
+                if (i != std::string::npos) {
+                    const size_t j = line.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_", i);
+                    const std::string key = line.substr(i, (j == std::string::npos ? line.size() : j) - i);
+                    size_t k = j == std::string::npos ? line.size() : j;
+                    while (k < line.size() && (line[k] == ' ' || line[k] == '\t')) ++k;
+                    if (k < line.size() && line[k] == '=')
+                        for (int n = 0; n < kDiagCount; ++n)
+                            if (key == kDiagRows[n].key) owned = n;
+                }
+            }
+            if (owned >= 0 && !written[owned]) {
+                out += FormatDiagLine(kDiagRows[owned]);
+                written[owned] = true;
+            } else {
+                out += line;
+            }
+        }
+        bool appended = false;
+        for (int n = 0; n < kDiagCount; ++n) {
+            if (written[n]) continue;
+            if (!appended) {
+                if (out.empty() || out.back() != '\n') out += "\n";
+                out += "\n# Added by the Diagnostics page\n";
+                appended = true;
+            }
+            out += FormatDiagLine(kDiagRows[n]);
+        }
+    }
+
+    FILE* file = std::fopen(kPath, "w");
     if (file == nullptr) {
         std::fprintf(stderr, "[diag] menu: could not write back dk_diag.txt\n");
         return;
     }
-    std::fputs("# spm-nx diagnostic switches: 1 turns one on, 0 turns it off.\n"
-               "# Read at launch. The Diagnostics page in the settings menu changes them while the\n"
-               "# game runs and rewrites this file, so edit it with the game closed.\n",
-               file);
-    constexpr int kCommentColumn = 16;
-    for (const DiagRow& row : kDiagRows) {
-        if (row.group != nullptr) {
-            std::fprintf(file, "\n# %s\n", row.group);
-        }
-        const char* nameEnd = std::strstr(row.label, " (");
-        const int nameLength = nameEnd ? int(nameEnd - row.label) : int(std::strlen(row.label));
-        const int used = int(std::strlen(row.key)) + 2;
-        std::fprintf(file, "%s=%d%*s# %.*s\n", row.key, swdk::diag_get(row.key) ? 1 : 0,
-                     used < kCommentColumn ? kCommentColumn - used : 1, "", nameLength, row.label);
-    }
+    std::fwrite(out.data(), 1, out.size(), file);
     std::fclose(file);
 }
 
@@ -3841,6 +3925,32 @@ void SetDiagKey(int n, bool on) {
                  static_cast<unsigned long long>(swdk::diag_present_count()));
     swdk::log_flush();
     WriteDiagFileBack();
+}
+
+void SetDiagKeyByKey(const char* key, bool on) {
+    for (int n = 0; n < kDiagCount; ++n)
+        if (std::strcmp(kDiagRows[n].key, key) == 0) {
+            SetDiagKey(n, on);
+            return;
+        }
+}
+
+// The mode ladder itself, for the Diagnostics page's one GX row: 0 off, 1 records, 2 deferred,
+// 3 threaded (device.cpp's apply_gx_worker_mode reads gxthread over gxdefer over gxworker).
+int GxWorkerMode() {
+    return swdk::diag_get("gxthread") ? 3 : swdk::diag_get("gxdefer") ? 2 : swdk::diag_get("gxworker") ? 1 : 0;
+}
+
+// Picking a rung writes the three keys the way the ladder reads them: exactly the rung's key
+// on, the other two off. Three independent toggles (the old page) let the file say
+// gxthread=1, gxdefer=0, gxworker=0 for a working threaded setup, which reads as broken, and
+// made flipping a weaker switch under a stronger one a visible no-op. Only keys that change
+// are flipped, so moving one rung costs one write-back, not three.
+void SetGxWorkerMode(int mode) {
+    const struct { const char* key; bool on; } want[] = {
+        {"gxworker", mode == 1}, {"gxdefer", mode == 2}, {"gxthread", mode == 3}};
+    for (const auto& w : want)
+        if (swdk::diag_get(w.key) != w.on) SetDiagKeyByKey(w.key, w.on);
 }
 #endif
 
@@ -4003,6 +4113,22 @@ std::vector<OptRow> OptionsRows(int tab) {
                         "No screen tearing. Turn off only if your screen has its own sync (G-Sync, FreeSync)."});
 #endif
         rows.push_back({"FPS counter", OnOff(g_showFps), [](int) { SetShowFps(!g_showFps); }, "Frames per second in the corner."});
+#if defined(__SWITCH__)
+        // Texture replacements lived on the Developer page until Nov 2026. It gates the button
+        // icons and prompt pictures a player sees, so it belongs with the other picture rows;
+        // a player who lost their prompts would look here, not on a page called Developer.
+        // Switch only: on PC the launcher owns this key.
+        const bool texReplacements = RuntimeConfigFile::TextureReplacements(true);
+        rows.push_back({"Texture replacements", OnOff(texReplacements), [texReplacements](int) {
+            // No Set* wrapper exists for this key (the PC launcher owns it
+            // there), so the row does what a setter does: update the live
+            // config, then write the file through WriteSetting. The
+            // replacement index itself is built once at startup, so the
+            // flip only takes effect on the next launch (the row says so).
+            RuntimeConfigFile::Mutable().textureReplacements = !texReplacements;
+            RuntimeConfigFile::WriteSetting("video", "texture_replacements", !texReplacements ? "true" : "false");
+        }, "Enables replacement textures, including button icons, prompt pictures, the Controls panel, and installed texture packs. Applies after a restart."});
+#endif
     } else if (tab == 2) {
         rows.push_back({"Master volume", Percent(g_audioVolumePercent), [](int d) {
             StepVolume(g_audioVolumePercent, d, [](float v) { AudioBackend::Instance().SetMasterVolume(v); },
@@ -4020,6 +4146,19 @@ std::vector<OptRow> OptionsRows(int tab) {
             StepVolume(g_voicesVolumePercent, d, [](float v) { MusicAttenuation::SetVoicesVolume(v); },
                        [](float v) { return RuntimeConfigFile::SetVoicesVolume(v); });
         }});
+#if defined(__SWITCH__)
+        // UI volume lived on the Developer page until Nov 2026; it is a volume like the four
+        // above (same backing value, same Config.toml key), so it belongs with them.
+        const int uiVolume = std::clamp(static_cast<int>(std::lround(RuntimeConfigFile::UiVolume(1.0f) * 100.0f)), 0, 100);
+        rows.push_back({"UI volume", Percent(uiVolume), [uiVolume](int d) {
+            int percent = std::clamp(uiVolume + (d == 0 ? 10 : d * 10), 0, 100);
+            if (d == 0 && percent == 100) percent = 0;
+            // The apply + persist pair is the PC Audio handler's own calls.
+            const float value = static_cast<float>(percent) / 100.0f;
+            MusicAttenuation::SetUiVolume(value);
+            RuntimeConfigFile::SetUiVolume(value);
+        }, "Controls the loudness of menu and interface sounds."});
+#endif
         rows.push_back({"Mute", OnOff(g_audioMuted), [](int) {
             g_audioMuted = !g_audioMuted;
             AudioBackend::Instance().SetMuted(g_audioMuted);
@@ -4142,27 +4281,8 @@ std::vector<OptRow> OptionsRows(int tab) {
             aurora_set_skip_unready_pipelines(!skipDraws);
             RuntimeConfigFile::SetSkipUnreadyPipelines(!skipDraws);
         }, "When a shader is still compiling, skip its draws instead of pausing to wait. This avoids compile hitches, but some effects may be missing briefly."});
-        const bool texReplacements = RuntimeConfigFile::TextureReplacements(true);
-        rows.push_back({"Texture replacements", OnOff(texReplacements), [texReplacements](int) {
-            // No Set* wrapper exists for this key (the PC launcher owns it
-            // there), so the row does what a setter does: update the live
-            // config, then write the file through WriteSetting. The
-            // replacement index itself is built once at startup, so the
-            // flip only takes effect on the next launch (the row says so).
-            RuntimeConfigFile::Mutable().textureReplacements = !texReplacements;
-            RuntimeConfigFile::WriteSetting("video", "texture_replacements", !texReplacements ? "true" : "false");
-        }, "Enables replacement textures, including button icons, prompt pictures, the Controls panel, and installed texture packs. Applies after a restart."});
         rows.push_back({"Frame graph", OnOff(FrameGraph()), [](int) { SetFrameGraph(!FrameGraph()); },
                         "Adds a rolling graph of the last 180 frame times to the FPS overlay, so spikes and uneven pacing are easy to see."});
-        const int uiVolume = std::clamp(static_cast<int>(std::lround(RuntimeConfigFile::UiVolume(1.0f) * 100.0f)), 0, 100);
-        rows.push_back({"UI volume", Percent(uiVolume), [uiVolume](int d) {
-            int percent = std::clamp(uiVolume + (d == 0 ? 10 : d * 10), 0, 100);
-            if (d == 0 && percent == 100) percent = 0;
-            // The apply + persist pair is the PC Audio handler's own calls.
-            const float value = static_cast<float>(percent) / 100.0f;
-            MusicAttenuation::SetUiVolume(value);
-            RuntimeConfigFile::SetUiVolume(value);
-        }, "Controls the loudness of menu and interface sounds."});
         const bool mixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
         rows.push_back({"Audio mix worker", OnOff(mixWorker), [mixWorker](int) {
             AxDspHle::SetMixWorkerEnabled(!mixWorker);
@@ -4177,8 +4297,22 @@ std::vector<OptRow> OptionsRows(int tab) {
             RuntimeConfigFile::Mutable().textureDumps = !texDumps;
             RuntimeConfigFile::WriteSetting("video", "texture_dumps", !texDumps ? "true" : "false");
         }, "Saves textures with no replacement to Cache/texture_dumps under the names a replacement would use, for making new pictures. Applies after a restart."});
-        rows.push_back({"Clear shader cache", "", [](int d) {
+        rows.push_back({"Clear shader cache",
+                        g_clearCacheState == 1 ? "Press again to clear"
+                        : g_clearCacheState == 2 ? "Armed for next launch"
+                                                 : "",
+                        [](int d) {
             if (d != 0) return;
+            if (g_clearCacheState == 2) return;  // already armed; the value column says so
+            if (g_clearCacheState == 0) {
+                // First press only arms. HandleOptionsInput cancels the arm if the selection
+                // moves off this row, and SetOptionsOpen cancels it if the menu closes.
+                g_clearCacheState = 1;
+                g_clearCacheArmTab = 6;
+                g_clearCacheArmRow = g_optRow;
+                return;
+            }
+            g_clearCacheState = 2;
             // The cache cannot be deleted from inside a running session:
             // shaders.cpp appends a record for every shader compiled, all
             // session long, so the next compile would recreate the file (and
@@ -4192,16 +4326,30 @@ std::vector<OptRow> OptionsRows(int tab) {
             } else {
                 std::fprintf(stderr, "[diag] menu: could not write dksh_cache.clear\n");
             }
-        }, "Requests deletion of the compiled shader cache at the next launch. Use it for a cache that has gone wrong; shaders then compile again as needed."});
+        }, "Requests deletion of the compiled shader cache at the next launch. Press once, then again to confirm. Use it for a cache that has gone wrong; shaders then compile again as needed."});
 #endif
     } else if (tab == 7) {
 #if defined(__SWITCH__)
         // The deko renderer's diagnostic switches, then the log actions.
-        // Flipping one persists the whole set back to dk_diag.txt.
+        // Flipping one writes the set back to dk_diag.txt, updating the known keys' lines in
+        // place and leaving the rest of the file (comments, unknown keys) as the player left it.
         for (int n = 0; n < kDiagCount; ++n) {
             const DiagRow& row = kDiagRows[n];
+            // The three GX keys are not rows of their own: they are one ladder (see the
+            // "GX worker mode" row below), and three toggles for one ladder lied twice over,
+            // no-op flips under a stronger rung and a file state that read as broken.
+            if (std::strcmp(row.key, "gxworker") == 0 || std::strcmp(row.key, "gxdefer") == 0 ||
+                std::strcmp(row.key, "gxthread") == 0)
+                continue;
             const bool on = swdk::diag_get(row.key);
             rows.push_back({row.label, OnOff(on), [n, on](int) { SetDiagKey(n, !on); }, row.help});
+        }
+        {
+            static constexpr const char* kGxModes[] = {"Off", "Records", "Deferred", "Threaded"};
+            const int gxMode = GxWorkerMode();
+            rows.push_back({"GX worker mode", kGxModes[gxMode], [gxMode](int d) {
+                SetGxWorkerMode(Cycle(gxMode, d == 0 ? 1 : d, 4));
+            }, "How the game's GX calls reach the renderer. Off: calls run on the game thread as they are made. Records: calls are recorded and replayed straight away; the picture should look exactly the same. Deferred: records wait until the game next needs GX state back (a getter, a wait, the end of the frame). Threaded: records replay on a thread of their own on core 2 while the game thread runs on; experimental. Applies from the next frame. Turn it down a rung if anything draws wrong or the game stalls."});
         }
         rows.push_back({"Flush logs", "", [](int d) {
             if (d == 0) swdk::diag_flush_all("menu");
@@ -4295,35 +4443,206 @@ std::vector<OptRow> OptionsRows(int tab) {
     return rows;
 }
 
+// Splits one notice line into pieces no wider than maxWidth layout units at the given text
+// size, breaking at spaces where it can (a single longer word is cut mid-word). The notices
+// used to size their card from the one measured line, so a long line ran off both edges of
+// the screen: the Prepare banner did exactly that on hardware (Brandon's screenshot, Nov 1).
+std::vector<std::string> WrapNoticeLine(const GameLayout::Font& font, const std::string& line, float size,
+                                        float maxWidth) {
+    auto widthOf = [&](const std::string& s) {
+        return GameLayout::MeasureText(font, GameLayout::Utf16(s), size) * 0.5f;
+    };
+    std::vector<std::string> out;
+    std::string cur;
+    size_t i = 0;
+    while (i < line.size()) {
+        const size_t j = line.find(' ', i);
+        std::string word = line.substr(i, j == std::string::npos ? std::string::npos : j - i);
+        i = j == std::string::npos ? line.size() : j + 1;
+        while (widthOf(word) > maxWidth && word.size() > 1) {  // a word wider than the card
+            size_t cut = word.size() - 1;
+            while (cut > 1 && widthOf(word.substr(0, cut)) > maxWidth) --cut;
+            if (!cur.empty()) {
+                out.push_back(cur);
+                cur.clear();
+            }
+            out.push_back(word.substr(0, cut));
+            word = word.substr(cut);
+        }
+        const std::string joined = cur.empty() ? word : cur + " " + word;
+        if (!cur.empty() && widthOf(joined) > maxWidth) {
+            out.push_back(cur);
+            cur = word;
+        } else {
+            cur = joined;
+        }
+    }
+    if (!cur.empty() || out.empty()) out.push_back(cur);
+    return out;
+}
+
+// The paper banner the title notices share: a cream card with an ink border, centred at
+// yCentre layout units, its width clamped to the picture (half-width at most 310 of the 640
+// layout units across) and its lines wrapped to fit, where the old code measured one line
+// and let the card run as wide as the text. holdFraction > 0 fills that much of the card
+// from the left in yellow (the Prepare hold-to-stop meter).
+void DrawPaperNotice(const GameLayout::Font& font, const std::vector<std::string>& lines, float yCentre,
+                     float holdFraction) {
+    constexpr float kSize = 16.0f, kLineStep = 22.0f, kMaxHalfWidth = 310.0f;
+    std::vector<std::string> wrapped;
+    for (const std::string& line : lines)
+        for (std::string& piece : WrapNoticeLine(font, line, kSize, 2.0f * kMaxHalfWidth - 36.0f))
+            wrapped.push_back(std::move(piece));
+    float textHalf = 0.0f;
+    for (const std::string& piece : wrapped)
+        textHalf = std::max(textHalf, GameLayout::MeasureText(font, GameLayout::Utf16(piece), kSize) * 0.5f);
+    const float w = std::min(textHalf + 18.0f, kMaxHalfWidth);
+    const float halfH = 11.0f * static_cast<float>(wrapped.size()) + 6.0f;
+    ImDrawList* list = ImGui::GetForegroundDrawList();
+    const GameLayout::View view = GameLayout::GameView();
+    const float k = view.scale;
+    const ImVec2 a(view.centerX - w * k, view.centerY - (yCentre + halfH) * k),
+        b(view.centerX + w * k, view.centerY - (yCentre - halfH) * k);
+    list->AddRectFilled(a, b, IM_COL32(255, 252, 240, 240), 10.0f * k);
+    if (holdFraction > 0.0f) {  // the hold meter fills the card from the left
+        list->AddRectFilled(a, ImVec2(a.x + (b.x - a.x) * holdFraction, b.y), IM_COL32(254, 230, 133, 200), 10.0f * k);
+    }
+    list->AddRect(a, b, IM_COL32(24, 18, 12, 255), 10.0f * k, 0, 3.0f * k);
+    float y = yCentre + 11.0f * static_cast<float>(wrapped.size() - 1);
+    for (const std::string& piece : wrapped) {
+        GameLayout::DrawText(list, view, font, GameLayout::Utf16(piece), 0.0f, y, kSize, 0x18120CFFu, 0x18120CFFu,
+                             1.0f, 1, 1);
+        y -= kLineStep;
+    }
+}
+
 // On the title screen, while a newer release is out: where to install it.
 void DrawUpdateNotice() {
     if (g_optOpen || StartupScreenVisible() || Updater::GetState() != Updater::State::Available || SpmMapSweep::Seq() != 1) return;
     static const std::shared_ptr<GameLayout::Font> font = GameLayout::LoadFont("papermarioset_US.bfn");
     if (!GameLayout::FontReady(font.get())) return;
-    ImDrawList* list = ImGui::GetForegroundDrawList();
-    const GameLayout::View view = GameLayout::GameView();
-    const float k = view.scale;
-    const auto u = GameLayout::Utf16("Update " + Updater::Latest() + " is out!  HOME > Options > Game");
-    const float w = GameLayout::MeasureText(*font, u, 18.0f) * 0.5f + 18.0f, y = -200.0f;
-    list->AddRectFilled(ImVec2(view.centerX - w * k, view.centerY - (y + 16) * k), ImVec2(view.centerX + w * k, view.centerY - (y - 16) * k),
-                        IM_COL32(255, 252, 240, 240), 10.0f * k);
-    list->AddRect(ImVec2(view.centerX - w * k, view.centerY - (y + 16) * k), ImVec2(view.centerX + w * k, view.centerY - (y - 16) * k),
-                  IM_COL32(24, 18, 12, 255), 10.0f * k, 0, 3.0f * k);
-    GameLayout::DrawText(list, view, *font, u, 0.0f, y, 18.0f, 0x18120CFFu, 0x18120CFFu, 1.0f, 1, 1);
+    DrawPaperNotice(*font, {"Update " + Updater::Latest() + " is out!  HOME > Options > Game"}, -200.0f, 0.0f);
 }
 
-// Prepare graphics: a card at the bottom of the picture while the sweep runs or waits, its end
-// message for a while after, and, once, on the title screen of an install that never ran it,
-// where to find it. The same paper style as the update notice.
+// The full-screen Prepare card (F6): while a sweep runs, the game has to keep drawing
+// underneath, because its draws are what compile the shaders, but the player never asked to
+// watch 426 warps. So, like SwitchWaker, cover the picture with an opaque card in the port's
+// paper style (the startup screen's full-viewport pattern; cream and ink, the Controls
+// panel's palette) and put the sweep's status on it. The Options menu still opens over it
+// (HOME works during a sweep), and then the card steps aside for the menu.
+void DrawPrepareCard(const SpmPrepareGraphics::Status& pg, bool finished, double elapsedSeconds) {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->Pos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(viewport->Size, ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(1.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(255, 252, 240, 255));
+    ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(24, 18, 12, 255));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoDecoration |
+                                        ImGuiWindowFlags_NoFocusOnAppearing |
+                                        ImGuiWindowFlags_NoInputs |
+                                        ImGuiWindowFlags_NoMove |
+                                        ImGuiWindowFlags_NoNav |
+                                        ImGuiWindowFlags_NoSavedSettings |
+                                        ImGuiWindowFlags_NoBringToFrontOnFocus;
+    if (ImGui::Begin("Prepare Graphics", nullptr, kFlags)) {
+        const float colW = viewport->Size.x * 0.6f;
+        ImGui::SetCursorPos(ImVec2((viewport->Size.x - colW) * 0.5f, viewport->Size.y * 0.30f));
+        ImGui::BeginGroup();
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + colW);
+        ImGui::SetWindowFontScale(1.6f);
+        ImGui::TextUnformatted("Preparing graphics");
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::Spacing();
+        if (finished) {
+            ImGui::TextUnformatted(pg.message.empty() ? "Graphics are ready." : pg.message.c_str());
+            if (pg.total > 0) ImGui::ProgressBar(1.0f, ImVec2(colW, 0.0f), "Done");
+        } else {
+            if (!pg.room.empty()) ImGui::TextUnformatted(pg.room.c_str());
+            const float frac = pg.total > 0 ? static_cast<float>(pg.place) / static_cast<float>(pg.total) : 0.0f;
+            char label[64];
+            std::snprintf(label, sizeof(label), "%d of %d", pg.place, pg.total);
+            ImGui::ProgressBar(frac, ImVec2(colW, 0.0f), label);
+            ImGui::Spacing();
+            char timing[96];
+            const int elapsedMin = static_cast<int>(elapsedSeconds / 60.0);
+            if (pg.minutesLeft > 0)
+                std::snprintf(timing, sizeof(timing), "About %d min left, %d min in", pg.minutesLeft, elapsedMin);
+            else if (elapsedMin > 0)
+                std::snprintf(timing, sizeof(timing), "%d min in, working out how long is left", elapsedMin);
+            else
+                std::snprintf(timing, sizeof(timing), "Working out how long is left");
+            ImGui::TextUnformatted(timing);
+            ImGui::Spacing();
+            ImGui::TextUnformatted("The game is building its effects ahead of play, so they do not "
+                                   "stutter the first time you see them. This runs once; later starts "
+                                   "reuse what it built.");
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Hold B to stop. Progress is kept, and it carries on from here "
+                                   "next time.");
+            if (pg.stopHold > 0.0f) ImGui::ProgressBar(pg.stopHold, ImVec2(colW, 0.0f), "Stopping");
+        }
+        ImGui::PopTextWrapPos();
+        ImGui::EndGroup();
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(2);
+}
+
+// Prepare graphics: while a sweep runs, the opaque full-screen card (DrawPrepareCard); while
+// it waits for a save, a banner at the bottom of the picture; its end message for a while
+// after; and, once, on the title screen of an install that never ran it, where to find it.
+// The banners share the update notice's paper style.
 void DrawPrepareGraphicsNotice() {
-    if (g_optOpen || StartupScreenVisible()) return;
+    if (StartupScreenVisible()) return;
     const SpmPrepareGraphics::Status pg = SpmPrepareGraphics::GetStatus();
-    std::string line;
+
+    // F8: when run 1 finished, the last sweep room stayed drawn over the title screen, and
+    // input did not clear it: a stuck layer on top of the presented picture, not presenter
+    // lag. So when a sweep completes, the card stays up until the title has presented three
+    // clean frames of its own, and only then steps aside. There is no "warp still active"
+    // query to gate on, so the count runs on this function being called once per presented
+    // frame from Draw() (the same assumption g_presentedFrame's consumers make) and on the
+    // sequence having reached the title (SpmMapSweep::Seq() == 1) with the sweep no longer
+    // running; a frame on any other sequence restarts the count.
+    static bool s_wasRunning = false;
+    static bool s_holdFinishCard = false;
+    static int s_cleanPresents = 0;
+    static double s_runStartTime = -1.0;  // ImGui time the current run was first seen (elapsed)
     if (pg.running) {
-        line = "Preparing graphics  " + std::to_string(pg.place) + " / " + std::to_string(pg.total) + "  " + pg.room;
-        if (pg.minutesLeft > 0) line += "  about " + std::to_string(pg.minutesLeft) + " min left";
-        line += "   Hold B to stop";
-    } else if (pg.waiting) {
+        s_wasRunning = true;
+        s_holdFinishCard = false;
+        s_cleanPresents = 0;
+        if (s_runStartTime < 0.0) s_runStartTime = ImGui::GetTime();
+    } else {
+        // pg.complete alone is not the trigger: it stays set after any earlier finished run,
+        // so a later run stopped with B would arm this hold on a flag it did not earn. The
+        // place count says this run itself reached the end.
+        if (s_wasRunning && pg.complete && pg.total > 0 && pg.place >= pg.total) {
+            s_holdFinishCard = true;
+            s_cleanPresents = 0;
+        }
+        s_wasRunning = false;
+        s_runStartTime = -1.0;
+    }
+    if (s_holdFinishCard) {
+        if (SpmMapSweep::Seq() == 1) {
+            if (++s_cleanPresents >= 3) s_holdFinishCard = false;
+        } else {
+            s_cleanPresents = 0;
+        }
+    }
+    const double elapsed = s_runStartTime >= 0.0 ? ImGui::GetTime() - s_runStartTime : 0.0;
+
+    if (!g_optOpen && (pg.running || s_holdFinishCard)) {
+        DrawPrepareCard(pg, s_holdFinishCard && !pg.running, elapsed);
+        return;
+    }
+    if (g_optOpen) return;
+
+    std::string line;
+    if (pg.waiting) {
         line = "Prepare graphics starts once you load a save";
     } else if (!pg.message.empty()) {
         line = pg.message;
@@ -4334,19 +4653,7 @@ void DrawPrepareGraphicsNotice() {
     }
     static const std::shared_ptr<GameLayout::Font> font = GameLayout::LoadFont("papermarioset_US.bfn");
     if (!GameLayout::FontReady(font.get())) return;
-    ImDrawList* list = ImGui::GetForegroundDrawList();
-    const GameLayout::View view = GameLayout::GameView();
-    const float k = view.scale;
-    const auto u = GameLayout::Utf16(line);
-    const float size = 16.0f;
-    const float w = GameLayout::MeasureText(*font, u, size) * 0.5f + 18.0f, y = -150.0f;  // above the update notice
-    const ImVec2 a(view.centerX - w * k, view.centerY - (y + 16) * k), b(view.centerX + w * k, view.centerY - (y - 16) * k);
-    list->AddRectFilled(a, b, IM_COL32(255, 252, 240, 240), 10.0f * k);
-    if (pg.running && pg.stopHold > 0.0f) {  // the hold meter fills the card from the left
-        list->AddRectFilled(a, ImVec2(a.x + (b.x - a.x) * pg.stopHold, b.y), IM_COL32(254, 230, 133, 200), 10.0f * k);
-    }
-    list->AddRect(a, b, IM_COL32(24, 18, 12, 255), 10.0f * k, 0, 3.0f * k);
-    GameLayout::DrawText(list, view, *font, u, 0.0f, y, size, 0x18120CFFu, 0x18120CFFu, 1.0f, 1, 1);
+    DrawPaperNotice(*font, {line}, -150.0f, 0.0f);  // above the update notice
 }
 
 // SPM_TEST_REBIND=1 (tests): a virtual SDL gamepad is plugged in, Options > Controls > "Controller: Jump (2)" is
@@ -4441,6 +4748,14 @@ void HandleOptionsInput() {
         return;
     }
     g_optRow = std::min(g_optRow, count - 1);
+#if defined(__SWITCH__)
+    // A moved selection cancels a pending Clear shader cache confirmation: the second press
+    // only counts while the same row stays selected (closing the menu cancels it too, in
+    // SetOptionsOpen). Runs before the row step below, so the confirming press itself, which
+    // does not move the selection, still lands.
+    if (g_clearCacheState == 1 && (g_optTab != g_clearCacheArmTab || g_optRow != g_clearCacheArmRow))
+        g_clearCacheState = 0;
+#endif
     const OptRow& row = rows[static_cast<size_t>(g_optRow)];
     if (dir != 0 && !row.value.empty()) row.step(dir);
     if (ev & kOptConfirm) row.step(0);
