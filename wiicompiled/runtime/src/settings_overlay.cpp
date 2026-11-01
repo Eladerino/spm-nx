@@ -2056,6 +2056,10 @@ void DrawStartupScreen() {
                 outlined(press, x);
                 if (!icon.empty()) {
                     x += wPress + gap;
+                    // The icon is a white disc with the letter knocked out, drawn for a dark
+                    // background: on the cream card it blends in, so an ink disc sits behind
+                    // it, a touch wider, the same treatment as the Controls panel's icons.
+                    list->AddCircleFilled(S(x + iconSize * 0.5f, py), iconSize * 0.54f * k, IM_COL32(24, 18, 12, 255));
                     Draw(icon.c_str(), x + iconSize * 0.5f, py, iconSize, 0.0f, false);
                     outlined(rest, x + iconSize + gap);
                 }
@@ -3281,13 +3285,17 @@ void DrawControlsPanel() {
     };
 
     // The card, over the whole of the game's screen (its bubbles and remote), with a header.
+    // The paper style of the port's own menus (DrawOptionsMenu): cream card, ink border and
+    // ink text. The first panel kept its dark card through the badge rebuild and only changed
+    // layout, so on the console it read as the old panel; the palette is part of the design.
     const ImVec2 c0 = at(-392.0f, 205.0f), c1 = at(392.0f, -218.0f);
-    list->AddRectFilled(c0, c1, IM_COL32(16, 18, 26, a(255)), 22.0f * view.scale);
-    list->AddRect(c0, c1, IM_COL32(255, 255, 255, a(46)), 22.0f * view.scale, 0, 2.0f * view.scale);
+    list->AddRectFilled(at(-380.0f, 193.0f), at(404.0f, -230.0f), IM_COL32(0, 0, 0, a(90)), 22.0f * view.scale);
+    list->AddRectFilled(c0, c1, IM_COL32(255, 252, 240, a(255)), 22.0f * view.scale);
+    list->AddRect(c0, c1, IM_COL32(24, 18, 12, a(255)), 22.0f * view.scale, 0, 4.0f * view.scale);
     static const char* const kPadNames[3] = {"Xbox controller", "PlayStation controller", "Nintendo Switch controller"};
-    text("Controls", -360.0f, 176.0f, 26.0f, 0xFFFFFFFFu, 0);
-    text(kPadNames[style], 360.0f, 176.0f, 15.0f, 0xA8AEBDFFu, 2);
-    list->AddLine(at(-360.0f, 152.0f), at(360.0f, 152.0f), IM_COL32(255, 255, 255, a(30)), 1.5f * view.scale);
+    text("Controls", -360.0f, 176.0f, 26.0f, 0x18120CFFu, 0);
+    text(kPadNames[style], 360.0f, 176.0f, 15.0f, 0x6A5A48FFu, 2);
+    list->AddLine(at(-360.0f, 152.0f), at(360.0f, 152.0f), IM_COL32(24, 18, 12, a(60)), 1.5f * view.scale);
     // How to close it (the game's - or 1). On the Switch the hint names the Minus action's own
     // bindings; the other styles keep their hand-written hints.
     static const char* const kCloseHint[3] = {"View or LB: close", "Create or L1: close", "- or L: close"};
@@ -3300,7 +3308,7 @@ void DrawControlsPanel() {
             closeHint += ": close";
         }
     }
-    text(closeHint.c_str(), 360.0f, -196.0f, 15.0f, 0xA8AEBDFFu, 2);
+    text(closeHint.c_str(), 360.0f, -196.0f, 15.0f, 0x8A7A68FFu, 2);
 
     // The controller.
     constexpr float kPadW = 300.0f, kPadCX = -28.0f, kPadCY = -18.0f;
@@ -3322,6 +3330,10 @@ void DrawControlsPanel() {
         const float lx = kPadCX - kPadW / 2 + st.buttonSpots[b].x * kPadW;
         const float ly = kPadCY + padH / 2 - st.buttonSpots[b].y * padH;
         if (st.buttonIcons[b].id) {
+            // The icons are white discs with the letter knocked out, drawn for a dark card:
+            // on paper they vanish, so an ink disc sits behind each one, a touch wider. The
+            // letter hole then shows ink, and the disc gets the ink rim the paper menus use.
+            list->AddCircleFilled(at(lx, ly), size * 0.54f * view.scale, IM_COL32(24, 18, 12, a(255)));
             list->AddImage(st.buttonIcons[b].id, at(lx - size / 2, ly + size / 2), at(lx + size / 2, ly - size / 2),
                            ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
         } else {
@@ -3329,9 +3341,9 @@ void DrawControlsPanel() {
             if (label.size() != 1) continue;  // only a single letter fits a badge (the sticks' labels, PlayStation's shapes, do not)
             const ImVec2 c = at(lx, ly);
             const float r = size / 2 * view.scale;
-            list->AddCircleFilled(c, r, IM_COL32(24, 24, 30, a(255)));
-            list->AddCircle(c, r, IM_COL32(255, 255, 255, a(235)), 0, 2.0f * view.scale);
-            text(label.c_str(), lx, ly, 15.0f, 0xFFFFFFFFu, 1);
+            list->AddCircleFilled(c, r, IM_COL32(255, 255, 255, a(255)));
+            list->AddCircle(c, r, IM_COL32(24, 18, 12, a(235)), 0, 2.0f * view.scale);
+            text(label.c_str(), lx, ly, 15.0f, 0x18120CFFu, 1);
         }
     }
 
@@ -3377,21 +3389,24 @@ void DrawControlsPanel() {
             const float edge = right ? 360.0f : -360.0f, icon = 30.0f;
             // icon at the outer edge, text inside it
             const float ix = right ? edge - icon / 2 : edge + icon / 2;
-            if (iconFor[co.m]->id)
+            if (iconFor[co.m]->id) {
+                list->AddCircleFilled(at(ix, y), icon * 0.54f * view.scale, IM_COL32(24, 18, 12, a(255)));
                 list->AddImage(iconFor[co.m]->id, at(ix - icon / 2, y + icon / 2), at(ix + icon / 2, y - icon / 2), ImVec2(0, 0),
                                ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
+            }
             // A second, different binding (Jump's A beside its B) rides at the primary
             // icon's lower outer corner, smaller; the sub-line names it too.
             if (secondaryFor[co.m] && secondaryFor[co.m]->id) {
                 const float icon2 = icon * 0.62f;
                 const float sx = ix + (right ? 1.0f : -1.0f) * icon * 0.36f, sy = y - icon * 0.36f;
+                list->AddCircleFilled(at(sx, sy), icon2 * 0.54f * view.scale, IM_COL32(24, 18, 12, a(255)));
                 list->AddImage(secondaryFor[co.m]->id, at(sx - icon2 / 2, sy + icon2 / 2), at(sx + icon2 / 2, sy - icon2 / 2),
                                ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
             }
             const float tx = right ? edge - icon - 8.0f : edge + icon + 8.0f;
             const bool two = !co.sub.empty();
-            text(co.title, tx, two ? y + 8.0f : y, 17.0f, 0xFFFFFFFFu, right ? 2 : 0);
-            if (two) text(co.sub.c_str(), tx, y - 11.0f, 13.0f, 0xA8AEBDFFu, right ? 2 : 0);
+            text(co.title, tx, two ? y + 8.0f : y, 17.0f, 0x18120CFFu, right ? 2 : 0);
+            if (two) text(co.sub.c_str(), tx, y - 11.0f, 13.0f, 0x5A4A38FFu, right ? 2 : 0);
         }
     };
     callouts(kLeft.data(), kLeft.size(), false);
@@ -3401,16 +3416,18 @@ void DrawControlsPanel() {
     const float fy = -190.0f, icon = 24.0f, plus = 16.0f, gap = 10.0f;
     float x = -(icon * 2 + plus + gap + textWidth("Quick menu", 15.0f)) / 2;
     const auto footerIcon = [&](int m) {
-        if (iconFor[m]->id)
+        if (iconFor[m]->id) {
+            list->AddCircleFilled(at(x + icon / 2, fy), icon * 0.54f * view.scale, IM_COL32(24, 18, 12, a(255)));
             list->AddImage(iconFor[m]->id, at(x, fy + icon / 2), at(x + icon, fy - icon / 2), ImVec2(0, 0), ImVec2(1, 1),
                            IM_COL32(255, 255, 255, a(255)));
+        }
         x += icon;
     };
     footerIcon(5);
-    text("+", x + plus / 2, fy, 15.0f, 0xA8AEBDFFu, 1);
+    text("+", x + plus / 2, fy, 15.0f, 0x5A4A38FFu, 1);
     x += plus;
     footerIcon(4);
-    text("Quick menu", x + gap, fy, 15.0f, 0xFFFFFFFFu, 0);
+    text("Quick menu", x + gap, fy, 15.0f, 0x18120CFFu, 0);
 }
 
 // New Super Paper Bros.: the boot screen "Hold the Wii Remote sideways." takes its line from a table in main.dol (one
