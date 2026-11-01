@@ -1,5 +1,11 @@
 # gn3_12 to 60 fps: Aurora per-draw CPU plan
 
+> **Archived plan (PC profile, October 2026).** The profile below is a PC sweep, not a
+> Switch measurement. Its three patches have landed in substance: contended-only timing in
+> `command_processor.cpp`, the lazy vertex-state snapshot in `gx_dl.cpp`, and the partial
+> pipeline-config hash in `command_processor.cpp`. The measurement scripts and patch files
+> it references were upstream session files and are not in this repo. Kept as history.
+
 ## Source data
 - Profile: `autotest\map-sweep-20261016-170916\Play\profile_stacks.txt` (12000 samples, gn3_12). It was resolved
   against the exe copy in that same Play folder, so the RVAs match. That run is the post-scan-cache-fix build:

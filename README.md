@@ -6,11 +6,14 @@ spm-nx runs the New Super Paper Bros recomp as a homebrew NRO on a modded Ninten
 
 The port tracks upstream closely: release v1.0.6 of the PC project is merged in wholesale, and upstream's in-game Options menu is the port's menu (hold Minus to open it), bringing save anywhere, fast-forward, character switch, cheats and Gecko codes, and data mods. Player 1 remapping lives in that menu's Controls page, and the port's own developer tools live on two pages this port adds to that menu, Developer and Diagnostics. Performance in heavy areas is the port's known open problem.
 
+> [!TIP]
+> **First session tip:** a new install builds its shader caches as effects first appear, which can stutter. **Options > Game > Prepare graphics** walks every room once, on your own console and from your own copy of the game, and builds them ahead of play. It takes roughly half an hour to an hour, it is resumable, and it is new and still being tested, so back up your save first. Details are in [`switch/README.md`](switch/README.md).
+
 Installing and building the Switch version are documented in [`switch/README.md`](switch/README.md). Full credits are in the [Credits](#credits) section below.
 
 ## Nintendo Switch port
 
-The easy path is the release: download it, copy it to the SD card, add the files from your own disc, and launch. There is no launcher on the Switch; the NRO boots by title takeover to a startup screen. Fresh installs start from Switch defaults: 1.5x rendering (the 720p screen's native size), 16:9 and frame interpolation off. The European disc (R8PP01) is PC-only for now, because only the USA game has been translated for the Switch.
+The easy path is the release: download it, copy it to the SD card (merging, never deleting and replacing the `spm-nx` folder: your saves and caches live in it), add the files from your own disc, and launch. There is no launcher on the Switch; the NRO boots by title takeover to a startup screen, where one press of A starts the game. Fresh installs start from Switch defaults: 1.5x rendering (the 720p screen's native size), 16:9 and frame interpolation off. The European disc (R8PP01) is PC-only for now, because only the USA game has been translated for the Switch.
 
 **Adding the game files.** The NRO reads the game's files extracted; it will not read a
 disc image directly. Your image can be `.iso`, `.wbfs` or `.ciso`. The easy way to extract
@@ -38,6 +41,10 @@ sdmc:/switch/spm-nx/
 
 The full install (everything else the release puts on the card, launching, settings and
 troubleshooting) is in [`switch/README.md`](switch/README.md).
+
+One signpost for readers browsing the tree: `wiicompiled/README.md` is the NSMB Wii
+project's own readme, kept verbatim from upstream, not this game's. This page and
+`switch/README.md` are the spm-nx documentation.
 
 ## Upstream PC version
 

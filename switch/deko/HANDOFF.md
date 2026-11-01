@@ -5,7 +5,8 @@
 The renderer is wired into the build and runs on hardware: the game boots, plays, and presents
 through the deko3d swapchain. The large doors' open animation, previously the standing open
 defect, is fixed. Performance is CPU-bound in the guest execution on the game thread, not
-in this replay. Changes land as direct pushes to main.
+in this replay. Changes land on main, some as direct pushes and some through pull requests
+(the recent GX record series, PRs #11 to #20, came in that way).
 
 ## What it is
 
@@ -45,11 +46,13 @@ serial), barriers and serials.
 - Upstream files keep their original commentary; only this folder's own files carry the project's
   comments, and they are written as maintained documentation, not session notes.
 - Diagnostics follow one pattern: a switch in `UserData/dk_diag.txt`, read once at renderer init
-  (see `dk.h`). No file means a normal build. Every switch is off by default except `cpthread`
-  (Aurora's GX decode thread), which is on, so `cpthread=0` is the one line that moves a build
-  away from normal.
-- Changes land as direct pushes to main, with the commit message stating what was actually
-  compiled and tested.
+  (see `dk.h`), then flippable at runtime from the Options menu's Diagnostics page and the
+  `UserData/dk_cmd.txt` command channel. A flip in the menu writes all eighteen switches back
+  to `dk_diag.txt`. No file means a normal build. Every switch is off by default except
+  `cpthread` (Aurora's GX decode thread, core 1), which is on. The lines that move a build
+  away from normal are the ones to name in a test report: `cpthread=0`, and the experimental
+  GX record switches `gxworker=1`, `gxdefer=1`, `gxthread=1` (records replay on core 2).
+- Changes land on main with the commit message stating what was actually compiled and tested.
 
 ## Known limitations
 

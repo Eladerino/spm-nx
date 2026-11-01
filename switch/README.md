@@ -9,6 +9,18 @@ the recompiled program, and the game's files are read from your own extracted co
 which you place on the SD card yourself. If you build from source, the translator runs on your
 own PC against your own disc image, and only its generated C++ is compiled here.
 
+## At a glance
+
+| | |
+|---|---|
+| **Runs on** | A modded Nintendo Switch (Atmosphère), handheld or docked, launched by title takeover |
+| **You supply** | Your own USA disc of Super Paper Mario (R8PE01, revision 0), extracted to `game/` |
+| **Output** | 1280x720 in both modes, for now |
+| **Settings** | The game's own Options menu: hold `-` for half a second, or press HOME |
+| **Saves, settings, caches** | `sdmc:/switch/spm-nx/UserData/`, created at runtime, yours to keep |
+| **First session tip** | Run **Options > Game > Prepare graphics** once to build the shader caches ahead of play (see "Prepare graphics" below) |
+| **Known open problem** | Performance in heavy 3D areas (see "Known issues and performance") |
+
 ## Status
 
 The game boots and plays on Switch hardware, handheld and docked, and saves work. Output is
@@ -65,19 +77,33 @@ European disc (R8PP01) does not work with the Switch build yet.
 4. Put the SD card back in the Switch and launch by title takeover: hold R while starting any
    game, then run `spm-nx.nro` from the homebrew menu. Do not launch it from the album (applet
    mode): the applet does not get enough memory.
-5. First launch: a startup screen appears (it says "Hold - = Options"); press A to start.
-   The first session builds the shader and pipeline caches as new effects appear, so it can
-   hitch in places the second session does not. Nothing is wrong when that happens.
+5. First launch: a startup screen appears (it says "Hold - = Options"). The card holds for a
+   few seconds, then shows its prompt; **one press of A starts the game** (the port keeps
+   tapping A through the logo sequence for you, and the card reads "Starting..." while it
+   does). The first session builds the shader and pipeline caches as new effects appear, so
+   it can hitch in places the second session does not. Nothing is wrong when that happens,
+   and you can build those caches ahead of play instead: see "Prepare graphics" below.
 
 Settings, saves and caches live in `sdmc:/switch/spm-nx/UserData/` beside the NRO (the
 package seeds it with `button_icons/`; the game creates the rest on the first run). Do not
 delete that folder to "clean up": your saves and the caches that make later launches fast
 are in it.
 
-**Updating:** unzip the new release over the old `switch/spm-nx/` folder, replacing the NRO and
-its companion files. `UserData/` and `game/` are yours and carry over, saves, settings and
-caches included; the one release-owned corner is `UserData/button_icons/`, which the unzip
-refreshes so a stale icon set cannot win over the current one. One catch: the game never rewrites an existing
+**Updating:** unzip the new release over the old `switch/spm-nx/` folder, **merging**, and
+replace the NRO and its companion files. Never delete the `spm-nx` folder and replace it:
+`UserData/` and `game/` are yours and must carry over, saves, settings and caches included,
+and a fresh folder starts with none of them. The one release-owned corner is
+`UserData/button_icons/`, which the unzip refreshes so a stale icon set cannot win over the
+current one.
+
+> [!IMPORTANT]
+> **One manual step when updating from a build that had the tutorial prompt experiment:**
+> if `UserData/button_icons/nintendo/marker7` exists on your card, delete that folder by
+> hand. Unzipping a release cannot delete files, so without this step the old marker files
+> stay live: the Shooting Star aiming cursor stays hidden and they can misfire elsewhere.
+> Current builds stage no marker7 at all.
+
+One catch: the game never rewrites an existing
 `UserData/Config.toml`, so an install that started on an older release keeps the settings it
 already has (including the old PC-style defaults, if it has them) until you change them in the
 settings menu. Fresh installs get the current Switch defaults.
@@ -103,27 +129,33 @@ Two of those deserve a line each:
 
 - **Shake:** hold R or ZR. The game receives repeated shake flicks for as long as you hold the
   button, which is what charging (for example a Thunder Rage) and breaking free use.
-- **Tippi's pointer:** push the right stick to raise the pointer and aim with it; press Y while
-  it is up to use it (WPAD A). Centre the stick and the pointer goes away again after a couple
-  of seconds.
+- **Tippi's pointer:** push the right stick to raise the pointer and aim with it; press X while
+  it is up to use it (the Flip / Use Tippi button, WPAD A, with the default bindings). Centre
+  the stick and the pointer goes away again after a couple of seconds.
 
 ## Settings
 
 Holding `-` for about half a second opens the game's Options menu (upstream's, since
-v1.0.6); a short press is still the game's `-`, and opens the game's Controls screen. It
+v1.0.6); a short press is still the game's `-`, and opens the game's Controls screen.
+The HOME button opens the same menu, which is why the game's own on-screen hints point
+you at "HOME > Options". It
 has eight pages: Game, Display, Sound, Controls, Cheats, Mods, and this port's own
 Developer and Diagnostics pages. Move with the D-pad or the left stick, switch pages with
-L and R, select or adjust with B (A and Y select too), and close the menu with X. Those
-buttons follow the Controls page bindings: select sits on the buttons bound to jump and
-A, and back sits on the button bound to 1. While the menu is open the game pauses and does
+L and R, select or adjust with A, B or X, and close the menu with Y or HOME. Those
+buttons follow the Controls page bindings (select sits on the buttons bound to Jump and
+to A, back sits on the button bound to 1), so remapping those actions remaps the menu
+with them. While the menu is open the game pauses and does
 not receive pad input, so nothing moves behind it. Rows that do not apply on the Switch are not shown: there are no keyboard
 bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
 
-- **Controls** remaps the gamepad. The page's lower block, labelled "Gamepad:", binds
-  player 1's twelve actions (two slots each): highlight a slot, press A, then press the
-  button or push the stick direction to bind; changes apply immediately, no restart. The
-  page's own Controller rows above it drive players 2 to 4 (unused by this single-player
-  game) and its vibration setting.
+- **Game** holds the port's **Prepare graphics** row, covered in its own section below.
+- **Controls** remaps the gamepad, and holds the vibration setting. The block labelled
+  "Gamepad:" binds player 1's actions, two slots each: ten actions are shown (the config
+  table has twelve; the Tilt left/right pair is not shown, because the main game never
+  reads tilt, and the reset row still covers them). Highlight a slot, select it, then
+  press the button or push the stick direction to bind; changes apply immediately, no
+  restart. The PC build's separate Controller rows for players 2 to 4 are not shown on
+  Switch: this game is single-player, and player 1 is the Gamepad block.
 - **Developer** and **Diagnostics** are this port's own two pages, added after upstream's
   six (they replaced a separate Developer shell, which has been retired). Developer holds
   Bloom, Disable copy filter, Skip draws while shaders compile, Texture replacements (the
@@ -132,22 +164,78 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   dumps switch (writes every unmatched texture to `Cache/texture_dumps` under the name a
   replacement would use, for making new replacement pictures; takes effect after a restart),
   and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
-  recovery step for a cache that has gone wrong). Diagnostics holds the renderer's fifteen
-  diagnostic switches (each one also writes back to `UserData/dk_diag.txt`, the file the
-  same switches are read from at boot) and Flush logs and Mark log rows for test runs. All
-  of them start off except the GX decode thread, which is on unless turned off there.
+  recovery step for a cache that has gone wrong). Diagnostics holds the renderer's
+  eighteen diagnostic switches (each flip also writes all of them back to
+  `UserData/dk_diag.txt`, the file the same switches are read from at boot) and Flush logs
+  and Mark log rows for test runs. All of them start off except the GX decode thread
+  (cpthread, on core 1), which is on unless turned off there. Three of them are the
+  experimental GX call-record switches, all off by default and best left off for play:
+
+  | Switch | What it does |
+  |---|---|
+  | `gxworker` | Records the game's GX calls and replays each one straight away. The picture should not change. |
+  | `gxdefer` | As gxworker, but the records wait for the next sync point instead of replaying at once. |
+  | `gxthread` | As gxdefer, but the records replay on their own thread on core 2. Experimental. |
+
   Diagnostics can hurt performance or distort the picture; they are for bug reports, not
-  for play.
+  for play. If anything draws wrong with one of the GX switches on, turn it off and say
+  which one in the bug report.
 
 Fresh installs start at Resolution 1.5x (a 1280x720 render, the screen's native size in
-handheld), Aspect 16:9 and frame rate 60. If you upgraded from an older release and the
+handheld), Aspect 16:9 and frame interpolation off; the output itself is a fixed 60 Hz,
+there is no frame rate setting on Switch. If you upgraded from an older release and the
 menu shows 2.25x and cinematic aspect, that is your old config file being kept, as
 promised above: set Resolution and Aspect here once and it stays.
+
+## Prepare graphics
+
+> [!NOTE]
+> **New, and still being tested.** Prepare graphics shipped recently and its first full
+> runs are still being evaluated. It is optional, nothing about normal play depends on
+> it, and the caution under "Before you run it" below is worth the minute it takes.
+
+A new install ships with no shader or pipeline cache (see
+[`PROVENANCE.md`](../PROVENANCE.md): the old seed was removed on purpose), so every effect
+compiles the first time it appears, and that first appearance can stutter. **Prepare
+graphics** does that compiling ahead of play, on your own console, from your own copy of
+the game:
+
+1. Load a save and open **Options > Game > Prepare graphics** (hold `-`, or press HOME).
+   The title screen also points at the row, once, on an install that has never run it.
+2. The port copies your save folder to `UserData/PrepareGraphics/save` first. The sweep
+   itself never saves, and the copy is put back when it ends.
+3. It then visits every room in the game (426 of them), one warp at a time, and waits in
+   each room until the shader pipeline queue has drained: 2 seconds for the room to draw,
+   then a second of quiet queue. Mario's HP is kept full while it runs, and the console
+   is kept awake.
+4. Everything compiled lands in the caches already kept in `UserData/`, so the next
+   launches prewarm it and the effects are ready when you meet them in play.
+
+**Time and stopping.** Expect roughly half an hour to an hour, once. The card on screen
+shows the room, how many are done, and an estimate of the minutes left once the pace is
+known. To stop, **hold B for a second or so**: progress is kept in
+`UserData/PrepareGraphics/state.txt`, and the row reads "Continue" next time, picking up
+from the next room. A room that will not load is skipped; if warps stop being taken, the
+sweep stops and carries on from the next room on a later run.
+
+**Before you run it.** Back up your save first: copy the `UserData` folder (or at least
+its save data) somewhere off the card. The sweep is built to leave your save exactly as
+it found it, but it is new code walking every room in the game, and a backup turns any
+surprise into a non-event. Keep the console charged or docked, too: it stays awake for
+the whole run.
 
 ## Known issues and performance
 
 - **Button icons.** Not every button prompt has a replacement picture yet, so some prompts
   still show the original icons.
+- **The tutorial Wii Remote.** The floating Wii Remote the game shows while teaching
+  pointing (the Shooting Star tutorial, the arcade how-to) is still the game's own model:
+  no route that hides it without also hiding things it should not is in the current
+  build, so it stays visible for now. The game's own instruction line already reads
+  "Aim with the right stick!".
+- **Stale marker files after an update.** If the Shooting Star aiming cursor is missing,
+  check for `UserData/button_icons/nintendo/marker7` on the card and delete that folder
+  (see the Updating note above); it is left over from an older build, not part of this one.
 - **The pointer during flips.** The Wii Remote pointer (Tippi) is blocked out during the
   flip transition between 2D and 3D; it comes back once the flip finishes.
 - **Performance.** The port is CPU-bound on the guest side: the translated game code, not the
@@ -161,7 +249,8 @@ promised above: set Resolution and Aspect here once and it stays.
   (https://github.com/Horizon-OC/Horizon-OC/releases).
 - **First launch after installing** builds the shader and pipeline caches and can hitch (see
   step 5 of the install). Warm launches are fast. The caches live in `UserData/`; deleting
-  that folder brings the slow first launch back, along with deleting your saves.
+  that folder brings the slow first launch back, along with deleting your saves. To build
+  the caches ahead of play instead, run **Prepare graphics** once (see its section above).
 - **Docked output** is 1280x720, the same as handheld, for now.
 
 ## Building from source
@@ -209,8 +298,12 @@ machine), plus a few GB of disk for the copied sources and build output under `~
 
 After a full build the script also stages the SD card layout for you: under WSL it lands in the
 Windows profile's `Downloads\spm-nx-sd\switch\spm-nx\` (the NRO plus `dsp_coef.bin`,
-`cacert.pem`, `wii_bootstrap/` and a `licenses/` folder). Drag that
-`switch` folder onto the SD card. (`--out DIR` chooses the staging folder, `--out none` skips
+`cacert.pem`, `wii_bootstrap/`, a `licenses/` folder and `UserData/button_icons/`). Copy
+that staging `switch` folder over the SD card's, **merging**: do not delete the card's
+`spm-nx` folder first, because its `UserData/` (saves, settings, caches) and `game/` are
+not in the staging folder and a replace wipes them. For a dev build where only the code
+changed, copying just `spm-nx.nro` over is enough (plus `UserData/button_icons/` when the
+icons changed). (`--out DIR` chooses the staging folder, `--out none` skips
 it; without staging, copy those files from `~/spm-switch/build/` to `sdmc:/switch/spm-nx/` by
 hand.) Put your extracted disc (`Disc\DATA`, the folder with `files` and `sys`) in
 `sdmc:/switch/spm-nx/game/`. Launch it with title takeover (hold R while starting a game), not
@@ -219,7 +312,9 @@ from the album: the applet doesn't get enough memory. Logs land in
 
 The package ships no prebuilt shader or pipeline cache. On the first run the port builds both
 as new effects appear, so the first session can stutter in places; the caches it builds are
-kept in `UserData/` on the SD card and reused, so later runs do not repeat it.
+kept in `UserData/` on the SD card and reused, so later runs do not repeat it. The
+**Prepare graphics** row (Options > Game) builds them ahead of play instead, on the
+player's own console; see its section above.
 
 ## Troubleshooting
 
@@ -352,12 +447,15 @@ The button prompt icons staged into `UserData/button_icons/` are "Input Prompts"
 Only the files drawn from that CC0 art alone ship, plus fully transparent marker files: the
 game reports when a marker texture is drawn, which is how the replacement Controls panel knows
 the game's own controls screen is up, and the panel then draws the controller and its labels
-itself, with the buttons from the mapping table above. The generator's other outputs composite
-the glyphs into the HD texture pack's redrawn game textures, and those are never staged. The
+itself, with the buttons from the mapping table above. The
 prompt pictures that can be drawn from scratch do ship: the small button glyphs inside text
 boxes and the shake prompt's icon show Switch buttons in the package. The bigger prompt
-pictures (the round button pictures in signs and tutorials, the 3D buttons' faces, the Use
-Tippi picture) composite into the pack's artwork, so those stay Wii in the package. The full
+pictures split in two at runtime: the round button pictures in signs and tutorials and the
+3D buttons' faces are composited by the port itself, drawing the Switch glyph over the
+game's own texture when it appears, so those show Switch buttons with no texture pack at
+all. The Use Tippi picture is the exception: it is only covered by compositing the glyphs
+into the HD texture pack's redrawn game textures, and those composited results are never
+staged, so without the pack that one picture stays Wii in the package. The full
 set (every prompt picture replaced) stays a do-it-yourself drop-in: run
 `tools/make-button-icons.py` against your own copy of the HD pack and copy the resulting
 `button_icons/` into `UserData/`.
