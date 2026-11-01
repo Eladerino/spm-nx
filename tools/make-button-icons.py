@@ -82,24 +82,9 @@ TEXTURES = [
 # Marker numbers (button_icons/<style>/marker<N>): the game reports whether these are drawn. 1 = the Controls screen's
 # 3D Wii Remote (hidden): with a controller in use the game shows its own controls panel there (settings_overlay.cpp);
 # 2-6 = that screen's Move, Flip, Jump, Use a Pixl, Use Tippi bubbles: the panel lists the actions the game shows.
-# 7 = the demo Wii Remote (the n_controler NPC the game floats up when it teaches pointing, e.g. the Shooting Star
-# tutorial in 1-4 and the Flipside Arcade's how-to): hidden the same way, and settings_overlay.cpp draws its own
-# right-stick prompt while marker 7 reports. The hashes were isolated by differential texture dumps of the arcade
-# room with the demo down and up (Nov 1, 2026) and then cut down to the model's own on hardware evidence: the
-# pointing glove, the target ring and the two 16x16 specks from the same diff are the pointer's and the game's
-# generic art (hiding them took the arcade's aiming cursor with them and kept the prompt tripped outside the
-# demo), so they stay visible. What remains here: the button faces, the D-pad, the battery strip, the big
-# gesture hand, and three greyscale pieces (a body sliver, a quarter disc and a corner arc) that shade the body.
-# The A, B, 1 and 2 faces have no texture of their own in the set.
 MARKERS = {"tex1_248x184_fd844c6227d275cf_5.png": 2, "tex1_248x200_55ef64a9d7e806f7_5.png": 2,
            "tex1_152x144_eba7359cd27cf8b6_5.png": 3, "tex1_176x168_6208c1ec2d692b4f_5.png": 4,
-           "tex1_200x152_8394740b60e9c228_5.png": 5, "tex1_168x136_42b4c0a037f4bbee_5.png": 6,
-           "tex1_40x40_1d6fdad80b7dcd8a_14.png": 7, "tex1_40x40_ba5a00dad5242ff6_14.png": 7,
-           "tex1_40x40_cbfb60592791075d_14.png": 7, "tex1_40x40_f5cacaa9307af129_14.png": 7,
-           "tex1_64x64_9e627a1a399a4c12_14.png": 7, "tex1_8x40_c50770f50b582d49_5.png": 7,
-           "tex1_16x64_3e38070014458ae9_0.png": 7,
-           "tex1_128x128_5ba2d8b06b8af6e5_0.png": 7, "tex1_40x40_598499bc2848b57b_5.png": 7,
-           "tex1_132x132_35b17425ddd47d4d_14.png": 7}
+           "tex1_200x152_8394740b60e9c228_5.png": 5, "tex1_168x136_42b4c0a037f4bbee_5.png": 6}
 
 # Prompt textures whose render never reads the pack artwork it replaces: "glyph" paints the whole
 # texture white before drawing, "shake" builds a new transparent picture, "plaindisc" redraws its
