@@ -110,10 +110,13 @@ Two of those deserve a line each:
 ## Settings
 
 Holding `-` for about half a second opens the game's Options menu (upstream's, since
-v1.0.6); a short press is still the game's `-`. It has eight pages: Game, Display, Sound,
-Controls, Cheats, Mods, and this port's own Developer and Diagnostics pages. Use the D-pad or left stick to move, A to select or adjust, and B
-to close. While the menu is open the game pauses and does not receive pad input, so nothing
-moves behind it. Rows that do not apply on the Switch are not shown: there are no keyboard
+v1.0.6); a short press is still the game's `-`, and opens the game's Controls screen. It
+has eight pages: Game, Display, Sound, Controls, Cheats, Mods, and this port's own
+Developer and Diagnostics pages. Move with the D-pad or the left stick, switch pages with
+L and R, select or adjust with B (A and Y select too), and close the menu with X. Those
+buttons follow the Controls page bindings: select sits on the buttons bound to jump and
+A, and back sits on the button bound to 1. While the menu is open the game pauses and does
+not receive pad input, so nothing moves behind it. Rows that do not apply on the Switch are not shown: there are no keyboard
 bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
 
 - **Controls** remaps the gamepad. The page's lower block, labelled "Gamepad:", binds
