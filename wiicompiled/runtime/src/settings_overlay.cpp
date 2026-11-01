@@ -3450,7 +3450,9 @@ void DrawControlsPanel() {
         return s;
     };
     const std::vector<Callout> kLeft = {{2, "Move", sub(2, "Speak, interact")}};
-    const std::vector<Callout> kRight = {{7, "Shake", sub(7, kShakeButtons[style])}, {3, "Flip", sub(3, "")},
+    // Shake's base line names both shoulder buttons itself, so it skips sub()'s "also" append:
+    // with it, the line double-named ZR and wrapped to a lone "ZR" crowding the next callout.
+    const std::vector<Callout> kRight = {{7, "Shake", std::string(kShakeButtons[style])}, {3, "Flip", sub(3, "")},
                                          {5, "Use a Pixl", sub(5, "Cancel")}, {4, "Jump", sub(4, "Confirm")},
                                          {6, "Use Tippi", sub(6, "")}};
     const auto callouts = [&](const Callout* items, size_t count, bool right) {
