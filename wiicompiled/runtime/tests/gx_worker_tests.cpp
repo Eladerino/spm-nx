@@ -13,6 +13,10 @@
 #include <string>
 #include <vector>
 
+// Two test addresses with kinds of their own, as gx_call_kinds.inc gives the real ones.
+template <> struct GxWorker::KindOf<0x80000010u> { static constexpr Kind kKind = Kind::NoSync; };
+template <> struct GxWorker::KindOf<0x80000020u> { static constexpr Kind kKind = Kind::SelfDefer; };
+
 namespace {
 
 bool g_blocked = false;
@@ -214,6 +218,29 @@ void TestFrameBoundaryDrains() {
     Check(!GxWorker::Engaged(), "boundary: off after the boundary");
 }
 
+uint32_t g_gameValue = 0;
+void SetValueGx(uint32_t v) { g_log.push_back("value " + std::to_string(v)); }
+void SetValue(uint32_t v) {
+    // A self-deferring scalar setter that keeps a game-side copy, like GXSetCullMode.
+    g_gameValue = v;
+    GxWorker::DeferCall<&SetValueGx>(v);
+}
+void GetValue() { g_log.push_back("get " + std::to_string(g_gameValue)); }
+
+void TestNoSyncAndDeferCall() {
+    SetMode(GxWorker::Mode::Deferred);
+    g_log.clear();
+    Check(!GxWorker::Pending(), "nosync: nothing pending at the start");
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(7u), "nosync: the setter defers itself");
+    Check(GxWorker::Pending(), "nosync: the setter's record is pending");
+    // A NoSync call runs in place (the caller runs it) and leaves the record pending.
+    Check(!GxWorker::DispatchCall<0x80000010u, &GetValue>(), "nosync: the caller runs it");
+    GetValue();
+    Check(GxWorker::Pending(), "nosync: still pending after the getter");
+    GxWorker::Drain();
+    Check(Same({"get 7", "value 7"}), "nosync: the getter saw the game-side value before the replay");
+}
+
 const char* TestName(uint32_t address) { return address == 0x80001234u ? "GXGetTest" : nullptr; }
 
 void TestDrainCausesPrint() {
@@ -246,6 +273,7 @@ int main() {
     TestBlocked();
     TestFrameBoundaryDrains();
     TestDrainCausesPrint();
+    TestNoSyncAndDeferCall();
     if (g_failures != 0) {
         std::fprintf(stderr, "%d failures\n", g_failures);
         return 1;
