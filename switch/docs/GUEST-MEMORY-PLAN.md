@@ -1,5 +1,9 @@
 # Horizon guest memory: plan
 
+> **Status: implemented.** Phase 2 (the flat window) is the default on Switch and phase 1
+> remains as a build option; the port has since merged upstream v1.0.6, and phase 2 survived
+> that merge. Read the "plan" below as the design record it was written as.
+
 Based on upstream NewSuperPaperBros at `46343ab`:
 `wiicompiled/runtime/include/guest_flat_memory.h`, `src/guest_flat_memory.cpp`
 (Windows + Linux), `src/guest_flat_memory_macos.cpp`, `src/memory.cpp`.
