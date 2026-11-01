@@ -7,8 +7,10 @@
 # SDL/ImGui header downloads): the quick check after an upstream merge.
 # Sources are copied to ~/spm-switch first. Output: ~/spm-switch/build/spm-nx.nro
 # After a good build the NRO and its companion files are also copied, laid out like the SD card, to
-# <DIR>/switch/spm-nx/; DIR defaults to Downloads\spm-nx-sd in your Windows profile under WSL. Drag
-# that switch folder onto the card. --out none skips the copy.
+# <DIR>/switch/spm-nx/; DIR defaults to Downloads\spm-nx-sd in your Windows profile under WSL.
+# Copy the NRO onto the card from there (plus UserData/button_icons when the icons changed),
+# merging: do not replace the whole spm-nx folder, because the card's UserData also holds
+# saves, settings and caches that the staging folder does not have. --out none skips the copy.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -166,7 +168,7 @@ else
             echo "WARNING: button icons not staged (generation needs python3 + Pillow + ImageMagick 'magick' on the host)" >&2
         fi
         echo "COPIED to $dest ($(date -r "$dest/spm-nx.nro" '+%Y-%m-%d %H:%M'))"
-        echo "drag its switch folder onto the SD card, then launch with title takeover"
+        echo "copy the NRO onto the SD card, merging (do not replace the spm-nx folder: its UserData holds your saves), then launch with title takeover"
     elif [[ $out != none ]]; then
         echo "copy $work/build/spm-nx.nro to sdmc:/switch/spm-nx/, then launch with title takeover"
     fi
