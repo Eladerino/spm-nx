@@ -816,12 +816,12 @@ static void ReplayFifoBurst(void* payload) {
 
 static bool RecordFifoBurst(const uint8_t* data, uint32_t sizeBytes) {
     if (!GxWorker::CanRecord()) {
-        GxWorker::Drain();
+        GxWorker::Drain(GxWorker::DrainCause::kFifo);
         return false;
     }
     void* payload = GxWorker::Reserve(&ReplayFifoBurst, sizeof(FifoBurstRecord) + sizeBytes, alignof(FifoBurstRecord));
     if (payload == nullptr) {
-        GxWorker::Drain();
+        GxWorker::Drain(GxWorker::DrainCause::kFifo);
         return false;
     }
     FifoBurstRecord* record = new (payload) FifoBurstRecord{sizeBytes, 0};
