@@ -3119,7 +3119,9 @@ void ReleaseControllers() noexcept {
 
 // New Super Paper Bros.: the game's Controls screen (- button) shows a 3D Wii Remote with bubbles pointing at its
 // buttons. With a controller in use, this draws a controls panel over it instead: a picture of that controller with a
-// callout for each action the game's screen is showing, in the game's own font. The remote's textures are hidden and
+// badge at every button seat and a callout for each action the game's screen is showing, in the game's own font.
+// The badges are the buttons' own letters and never move; the callouts follow the player's live bindings.
+// The remote's textures are hidden and
 // Aurora reports which of that screen's parts are drawn (UserData/button_icons/<style>/marker<N>,
 // tools/make-button-icons.py): marker 1 = the remote (the screen is up), 2-6 = the Move, Flip, Jump, Use a Pixl and
 // Use Tippi bubbles.
@@ -3157,10 +3159,10 @@ void DrawControlsPanel() {
     struct Style {
         bool loaded = false;
         Sprite pad, icons[8];
-        ImVec2 spots[8];  // panel.txt: where each action's button is on the picture (fractions)
-        // Per-button art for the dynamic callouts: ui/buttons/<SDL name>.png and buttons.txt
-        // (where each named button sits on the picture). Only the generated Switch set ships
-        // these; other styles keep the per-action icons for every callout.
+        // Per-button art: ui/buttons/<SDL name>.png and buttons.txt (where each named button
+        // sits on the picture). The badges pinned on the picture and the dynamic callouts
+        // both read these. Only the generated Switch set ships them; other styles keep the
+        // per-action icons for every callout.
         Sprite buttonIcons[8];
         ImVec2 buttonSpots[8];
         bool buttonSpotLoaded[8] = {};
@@ -3186,14 +3188,10 @@ void DrawControlsPanel() {
         };
         st.pad = load(dir / "controller.png");
         for (int m = 2; m <= 7; ++m) st.icons[m] = load(dir / "ui" / (std::string(kActions[m]) + ".png"));
-        std::ifstream panel(dir / "panel.txt");
-        std::string name;
-        float fx = 0.0f, fy = 0.0f;
-        while (panel >> name >> fx >> fy)
-            for (int m = 2; m <= 7; ++m)
-                if (name == kActions[m]) st.spots[m] = ImVec2(fx, fy);
         for (int b = 0; b < 8; ++b)
             st.buttonIcons[b] = load(dir / "ui" / "buttons" / (std::string(kButtonNames[b]) + ".png"));
+        std::string name;
+        float fx = 0.0f, fy = 0.0f;
         std::ifstream buttons(dir / "buttons.txt");
         while (buttons >> name >> fx >> fy)
             for (int b = 0; b < 8; ++b)
@@ -3205,17 +3203,22 @@ void DrawControlsPanel() {
     if (!st.pad.id) return;
 
     // Dynamic callouts: Flip, Jump, Use a Pixl and Shake follow the player's own bindings for
-    // this style. The primary binding's button supplies the icon and the picture spot when the
-    // set ships per-button art for it, and a second, different binding is named in the sub-line.
-    // Anything else (Move, Use Tippi, a binding with no per-button art) keeps the per-action
-    // art, so the defaults draw exactly as the shipped set drew them.
+    // this style, resolved from GamepadBindingNames at draw time. The primary binding's
+    // button supplies the callout's icon, the spot its label sits level with, and a smaller
+    // second icon when a second, different binding exists (that binding is also named in the
+    // sub-line). No association here reads the default table: a callout whose binding has no
+    // per-button art keeps the per-action icon, and one with no per-button spot stacks in its
+    // column instead of sitting level with the button the defaults would have used. Move and
+    // Use Tippi have no gamepad action to resolve (kMarkerAction < 0): per-action art, stacked.
     static const int kMarkerAction[8] = {-1, -1, -1, 6, 4, 5, -1, 7};  // gamepad action per marker
     const Sprite* iconFor[8];
+    const Sprite* secondaryFor[8];
     ImVec2 spotFor[8];
+    bool spotLive[8] = {};
     std::string alsoFor[8];
     for (int m = 0; m < 8; ++m) {
         iconFor[m] = &st.icons[m];
-        spotFor[m] = st.spots[m];
+        secondaryFor[m] = nullptr;
     }
     for (int m = 2; m <= 7; ++m) {
         const int action = kMarkerAction[m];
@@ -3225,10 +3228,17 @@ void DrawControlsPanel() {
         for (int b = 0; b < 8; ++b) {
             if (names[0] != kButtonNames[b]) continue;
             if (st.buttonIcons[b].id) iconFor[m] = &st.buttonIcons[b];
-            if (st.buttonSpotLoaded[b]) spotFor[m] = st.buttonSpots[b];
+            if (st.buttonSpotLoaded[b]) {
+                spotFor[m] = st.buttonSpots[b];
+                spotLive[m] = true;
+            }
             break;
         }
-        if (names.size() > 1 && names[1] != names[0]) alsoFor[m] = "also " + GamepadBindingLabel(names[1], style);
+        if (names.size() > 1 && names[1] != names[0]) {
+            alsoFor[m] = "also " + GamepadBindingLabel(names[1], style);
+            for (int b = 0; b < 8; ++b)
+                if (names[1] == kButtonNames[b] && st.buttonIcons[b].id) secondaryFor[m] = &st.buttonIcons[b];
+        }
     }
 
     static const std::shared_ptr<GameLayout::Font> font = GameLayout::LoadFont("papermarioset_US.bfn");
@@ -3281,8 +3291,36 @@ void DrawControlsPanel() {
     const ImVec2 p0 = at(kPadCX - kPadW / 2, kPadCY + padH / 2), p1 = at(kPadCX + kPadW / 2, kPadCY - padH / 2);
     list->AddImage(st.pad.id, p0, p1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
 
-    // Callouts: Move on the left, the face buttons and the right stick on the right, each in the order of its button
-    // from top to bottom, with a leader line to the button.
+    // Badges pinned on the picture, one per seat: both sticks and the four face buttons, at
+    // the seats buttons.txt names. A badge is the button's own identity (the letter printed
+    // at that seat), never an action's, so the badges stay fixed while the callouts beside
+    // the picture follow the bindings. A seat whose set ships the spot but no picture (the
+    // Switch A seat: the vendored Kenney set has no A button) gets a drawn disc with the
+    // seat's letter until the picture exists, so no seat is ever blank.
+    static const int kSeatButtons[6] = {6, 7, 3, 2, 0, 1};  // left stick, right stick, y, x, a, b (SDL names, positional)
+    for (int s = 0; s < 6; ++s) {
+        const int b = kSeatButtons[s];
+        if (!st.buttonSpotLoaded[b]) continue;
+        const float size = b >= 6 ? 40.0f : 34.0f;  // the sticks are the wider seats
+        const float lx = kPadCX - kPadW / 2 + st.buttonSpots[b].x * kPadW;
+        const float ly = kPadCY + padH / 2 - st.buttonSpots[b].y * padH;
+        if (st.buttonIcons[b].id) {
+            list->AddImage(st.buttonIcons[b].id, at(lx - size / 2, ly + size / 2), at(lx + size / 2, ly - size / 2),
+                           ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
+        } else {
+            const std::string label = GamepadBindingLabel(kButtonNames[b], style);
+            if (label.size() != 1) continue;  // only a single letter fits a badge (the sticks' labels, PlayStation's shapes, do not)
+            const ImVec2 c = at(lx, ly);
+            const float r = size / 2 * view.scale;
+            list->AddCircleFilled(c, r, IM_COL32(24, 24, 30, a(255)));
+            list->AddCircle(c, r, IM_COL32(255, 255, 255, a(235)), 0, 2.0f * view.scale);
+            text(label.c_str(), lx, ly, 15.0f, 0xFFFFFFFFu, 1);
+        }
+    }
+
+    // Callouts: Move on the left, the rest on the right, ordered by the height of the button
+    // each one follows and sitting level with it where its spot is known. No lines point at
+    // the picture: the pinned badges already say where every button is.
     struct Callout { int m; const char* title; std::string sub; };
     static const char* const kShakeButtons[3] = {"RB or RT: stylish moves, break free", "R1 or R2: stylish moves, break free",
                                                  "Shake the controller, or hold R or ZR: stylish moves, break free"};
@@ -3302,11 +3340,18 @@ void DrawControlsPanel() {
         std::vector<const Callout*> shown;
         for (size_t i = 0; i < count; ++i)
             if (seen[items[i].m]) shown.push_back(&items[i]);
-        std::sort(shown.begin(), shown.end(), [&](const Callout* l, const Callout* r) { return spotFor[l->m].y < spotFor[r->m].y; });
-        // Each label level with its button, pushed apart where they would touch, so the leaders run nearly level.
-        std::vector<float> ys;
-        for (const Callout* co : shown) ys.push_back(kPadCY + padH / 2 - spotFor[co->m].y * padH);
+        std::stable_sort(shown.begin(), shown.end(), [&](const Callout* l, const Callout* r) {
+            const float ly = spotLive[l->m] ? spotFor[l->m].y : 10.0f;  // no live spot: after the spotted ones
+            const float ry = spotLive[r->m] ? spotFor[r->m].y : 10.0f;
+            return ly < ry;
+        });
+        // Each label level with the button its live binding points at, pushed apart where
+        // they would touch; a callout with no live spot starts at the top and the same
+        // passes push it into the stack.
         constexpr float kSpacing = 50.0f, kTop = 120.0f, kBottom = -150.0f;
+        std::vector<float> ys;
+        for (const Callout* co : shown)
+            ys.push_back(spotLive[co->m] ? kPadCY + padH / 2 - spotFor[co->m].y * padH : kTop);
         for (size_t i = 0; i < ys.size(); ++i) ys[i] = std::min(ys[i], i == 0 ? kTop : ys[i - 1] - kSpacing);
         for (size_t i = ys.size(); i-- > 0;) ys[i] = std::max(ys[i], i + 1 == ys.size() ? kBottom : ys[i + 1] + kSpacing);
         for (size_t i = 0; i < shown.size(); ++i) {
@@ -3318,17 +3363,18 @@ void DrawControlsPanel() {
             if (iconFor[co.m]->id)
                 list->AddImage(iconFor[co.m]->id, at(ix - icon / 2, y + icon / 2), at(ix + icon / 2, y - icon / 2), ImVec2(0, 0),
                                ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
+            // A second, different binding (Jump's A beside its B) rides at the primary
+            // icon's lower outer corner, smaller; the sub-line names it too.
+            if (secondaryFor[co.m] && secondaryFor[co.m]->id) {
+                const float icon2 = icon * 0.62f;
+                const float sx = ix + (right ? 1.0f : -1.0f) * icon * 0.36f, sy = y - icon * 0.36f;
+                list->AddImage(secondaryFor[co.m]->id, at(sx - icon2 / 2, sy + icon2 / 2), at(sx + icon2 / 2, sy - icon2 / 2),
+                               ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, a(255)));
+            }
             const float tx = right ? edge - icon - 8.0f : edge + icon + 8.0f;
             const bool two = !co.sub.empty();
             text(co.title, tx, two ? y + 8.0f : y, 17.0f, 0xFFFFFFFFu, right ? 2 : 0);
             if (two) text(co.sub.c_str(), tx, y - 11.0f, 13.0f, 0xA8AEBDFFu, right ? 2 : 0);
-            // leader: from just past the text toward the button, ending on it with a dot
-            const float tw = std::max(textWidth(co.title, 17.0f), two ? textWidth(co.sub.c_str(), 13.0f) : 0.0f);
-            const ImVec2 from = at(right ? tx - tw - 10.0f : tx + tw + 10.0f, y);
-            const ImVec2 to(p0.x + spotFor[co.m].x * (p1.x - p0.x), p0.y + spotFor[co.m].y * (p1.y - p0.y));
-            list->AddLine(from, to, IM_COL32(255, 255, 255, a(150)), 1.6f * view.scale);
-            list->AddCircleFilled(to, 4.0f * view.scale, IM_COL32(255, 255, 255, a(235)));
-            list->AddCircleFilled(from, 2.2f * view.scale, IM_COL32(255, 255, 255, a(150)));
         }
     };
     callouts(kLeft.data(), kLeft.size(), false);
