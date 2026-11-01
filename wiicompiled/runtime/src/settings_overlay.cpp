@@ -64,6 +64,7 @@ extern "C" void PAD_HLE_SetRumbleEnabled(bool enabled);
 #include <aurora/aurora.h>
 #include <aurora/gfx.h>
 #include "spm_map_sweep.h"
+#include "spm_prepare_graphics.h"
 #include "updater.h"
 #include "mod_install.h"
 #include "mod_runtime.h"
@@ -3894,6 +3895,35 @@ std::vector<OptRow> OptionsRows(int tab) {
                 Updater::SetCheckEnabled(!Updater::CheckEnabled());
             }, "Look for a new version each time the game starts."});
         }
+        {
+            // Prepare graphics: the console builds every room's shaders once, ahead of play
+            // (spm_prepare_graphics.cpp). The row reads what the sweep is doing.
+            const SpmPrepareGraphics::Status pg = SpmPrepareGraphics::GetStatus();
+            std::string value;
+            if (pg.running) {
+                value = "Stop (" + std::to_string(pg.place) + " of " + std::to_string(pg.total) + ")";
+            } else if (pg.waiting) {
+                value = "Starts when a save is loaded - cancel";
+            } else if (pg.complete) {
+                value = "Done - run again";
+            } else if (pg.place > 1) {
+                value = "Continue (" + std::to_string(pg.place) + " of " + std::to_string(pg.total) + ")";
+            } else {
+                value = "Start";
+            }
+            const bool active = pg.running || pg.waiting;
+            rows.push_back({"Prepare graphics", value, [active](int d) {
+                if (d != 0) return;
+                if (active) {
+                    SpmPrepareGraphics::Stop();
+                } else {
+                    SpmPrepareGraphics::MarkOffered();
+                    SpmPrepareGraphics::Start();
+                    SetOptionsOpen(false);
+                }
+            }, active ? "Visits every room so the effects compile now instead of while you play. Hold B to stop; it carries on later from where it was."
+                      : "Takes 30 to 60 minutes once. Visits every room with your save loaded so effects don't stutter the first time you see them. Your save is copied first and put back after."});
+        }
         rows.push_back({"Return to title screen", "", [](int d) {
             if (d != 0) return;
             SpmMapSweep::ReturnToTitle();
@@ -4280,6 +4310,43 @@ void DrawUpdateNotice() {
     GameLayout::DrawText(list, view, *font, u, 0.0f, y, 18.0f, 0x18120CFFu, 0x18120CFFu, 1.0f, 1, 1);
 }
 
+// Prepare graphics: a card at the bottom of the picture while the sweep runs or waits, its end
+// message for a while after, and, once, on the title screen of an install that never ran it,
+// where to find it. The same paper style as the update notice.
+void DrawPrepareGraphicsNotice() {
+    if (g_optOpen || StartupScreenVisible()) return;
+    const SpmPrepareGraphics::Status pg = SpmPrepareGraphics::GetStatus();
+    std::string line;
+    if (pg.running) {
+        line = "Preparing graphics  " + std::to_string(pg.place) + " / " + std::to_string(pg.total) + "  " + pg.room;
+        if (pg.minutesLeft > 0) line += "  about " + std::to_string(pg.minutesLeft) + " min left";
+        line += "   Hold B to stop";
+    } else if (pg.waiting) {
+        line = "Prepare graphics starts once you load a save";
+    } else if (!pg.message.empty()) {
+        line = pg.message;
+    } else if (SpmMapSweep::Seq() == 1 && SpmPrepareGraphics::ShouldOffer()) {
+        line = "First time here?  HOME > Options > Game > Prepare graphics builds the effects ahead of play";
+    } else {
+        return;
+    }
+    static const std::shared_ptr<GameLayout::Font> font = GameLayout::LoadFont("papermarioset_US.bfn");
+    if (!GameLayout::FontReady(font.get())) return;
+    ImDrawList* list = ImGui::GetForegroundDrawList();
+    const GameLayout::View view = GameLayout::GameView();
+    const float k = view.scale;
+    const auto u = GameLayout::Utf16(line);
+    const float size = 16.0f;
+    const float w = GameLayout::MeasureText(*font, u, size) * 0.5f + 18.0f, y = -150.0f;  // above the update notice
+    const ImVec2 a(view.centerX - w * k, view.centerY - (y + 16) * k), b(view.centerX + w * k, view.centerY - (y - 16) * k);
+    list->AddRectFilled(a, b, IM_COL32(255, 252, 240, 240), 10.0f * k);
+    if (pg.running && pg.stopHold > 0.0f) {  // the hold meter fills the card from the left
+        list->AddRectFilled(a, ImVec2(a.x + (b.x - a.x) * pg.stopHold, b.y), IM_COL32(254, 230, 133, 200), 10.0f * k);
+    }
+    list->AddRect(a, b, IM_COL32(24, 18, 12, 255), 10.0f * k, 0, 3.0f * k);
+    GameLayout::DrawText(list, view, *font, u, 0.0f, y, size, 0x18120CFFu, 0x18120CFFu, 1.0f, 1, 1);
+}
+
 // SPM_TEST_REBIND=1 (tests): a virtual SDL gamepad is plugged in, Options > Controls > "Controller: Jump (2)" is
 // selected, the pad's West button is pressed, and the new binding (shown and saved) is checked.
 void RebindSelfTest() {
@@ -4532,6 +4599,20 @@ void FilterMenuInput(uint32_t chan, WiiRemoteInput::KpadSample& sample) noexcept
         RequestOptionsToggle();
         g_optSuppress |= kHome;
     }
+    {
+        // Prepare graphics runs the game by itself: a held B stops it (the hold meter is on the
+        // status card), HOME still opens Options, and nothing else reaches the game.
+        const SpmPrepareGraphics::Status pg = SpmPrepareGraphics::GetStatus();
+        if (pg.running) {
+            SpmPrepareGraphics::NoteStopButton((hold & kB) != 0);
+            if (!g_optOpen) {
+                sample.hold = 0;
+                return;
+            }
+        } else {
+            SpmPrepareGraphics::NoteStopButton(false);
+        }
+    }
     if (g_optOpen) {
         const bool upright = sample.hasNunchuk;
         const uint32_t dirs[4] = {upright ? kLeft : kUp, upright ? kRight : kDown, upright ? kUp : kRight,
@@ -4592,6 +4673,7 @@ void Draw() noexcept {
     DrawControlsPanel();
     DrawOptionsMenu();
     DrawUpdateNotice();
+    DrawPrepareGraphicsNotice();
     DrawStartupScreen();
 }
 
