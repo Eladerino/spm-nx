@@ -164,12 +164,15 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   dumps switch (writes every unmatched texture to `Cache/texture_dumps` under the name a
   replacement would use, for making new replacement pictures; takes effect after a restart),
   and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
-  recovery step for a cache that has gone wrong). Diagnostics holds the renderer's
-  nineteen diagnostic switches (each flip also writes all of them back to
+  recovery step for a cache that has gone wrong). Diagnostics holds nineteen of the
+  renderer's diagnostic switches (each flip also writes all of them back to
   `UserData/dk_diag.txt`, the file the same switches are read from at boot) and Flush logs
-  and Mark log rows for test runs. All of them start off except the GX decode thread
-  (cpthread, on core 1), which is on unless turned off there. Three of them are the
-  experimental GX call-record switches, all off by default and best left off for play:
+  and Mark log rows for test runs. Three more switches (dkcmd, zcull, guestcore) are
+  boot-time only, set in dk_diag.txt itself, so the file knows twenty-two keys in all.
+  All of the page's switches start off except the GX decode thread (cpthread, on core 1)
+  and the GX worker thread (gxthread), which are on unless turned off there; zcull also
+  starts on. Three of them are the
+  experimental GX call-record switches, best left as they are for play:
 
   | Switch | What it does |
   |---|---|
