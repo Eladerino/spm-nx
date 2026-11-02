@@ -4089,6 +4089,12 @@ void SetGxWorkerMode(int mode) {
 std::vector<OptRow> OptionsRows(int tab) {
     std::vector<OptRow> rows;
     if (tab == 0) {
+#if defined(__SWITCH__)
+        rows.push_back(SectionHeading("Speed"));
+        const char* ffButtonHelp = "Click the right stick.";
+#else
+        const char* ffButtonHelp = "Keyboard: F.  Controller: click the right stick.";
+#endif
         rows.push_back({"Fast-forward speed", std::to_string(g_ffSpeed) + "x", [](int d) {
             g_ffSpeed = d == 0 ? (g_ffSpeed >= 8 ? 2 : g_ffSpeed + 1) : std::clamp(g_ffSpeed + d, 2, 8);
             RuntimeConfigFile::SetFastForwardSpeed(g_ffSpeed);
@@ -4096,11 +4102,14 @@ std::vector<OptRow> OptionsRows(int tab) {
         rows.push_back({"Fast-forward button", g_ffToggleMode ? "Press to toggle" : "Hold", [](int) {
             g_ffToggleMode = !g_ffToggleMode;
             RuntimeConfigFile::SetFastForwardToggle(g_ffToggleMode);
-        }, "Keyboard: F.  Controller: click the right stick."});
+        }, ffButtonHelp});
         rows.push_back({"Faster menus and loading", OnOff(g_fasterMenus), [](int) {
             g_fasterMenus = !g_fasterMenus;
             RuntimeConfigFile::SetFasterMenus(g_fasterMenus);
         }, "The pause menu, room changes and file loading run at double speed."});
+#if defined(__SWITCH__)
+        rows.push_back(SectionHeading("Saving"));
+#endif
         rows.push_back({"Save anywhere", OnOff(g_saveAnywhere), [](int) {
             g_saveAnywhere = !g_saveAnywhere;
             RuntimeConfigFile::SetSaveAnywhere(g_saveAnywhere);
@@ -4111,18 +4120,37 @@ std::vector<OptRow> OptionsRows(int tab) {
                 if (d == 0 && SpmMapSweep::SaveStatus() != 1) SpmMapSweep::SaveGame();
             }, "Saves to the file you are playing, like a Save Block. Loading it puts you right here."});
         }
+#if defined(__SWITCH__)
+        // The rows from here on (language, updates, Prepare graphics, return
+        // to title) sit under one System heading; which of them exist
+        // depends on the build and the install, so the heading is emitted
+        // by the first of them that shows up.
+        bool systemHeadingShown = false;
+        const auto showSystemHeading = [&rows, &systemHeadingShown] {
+            if (!systemHeadingShown) {
+                rows.push_back(SectionHeading("System"));
+                systemHeadingShown = true;
+            }
+        };
+#endif
 #if SPM_REGION_PAL
         {
             // The Wii system language the European disc reads (SC codes 1 en, 2 de, 3 fr, 4 es, 5 it).
             static constexpr const char* kCodes[] = {"en", "de", "fr", "es", "it"};
             static constexpr const char* kNames[] = {"English", "Deutsch", "Francais", "Espanol", "Italiano"};
             const int cur = std::clamp(int(RuntimeConfigFile::Language()) - 1, 0, 4);
+#if defined(__SWITCH__)
+            showSystemHeading();
+#endif
             rows.push_back({"Language", kNames[cur], [cur](int d) {
                 RuntimeConfigFile::SetLanguage(kCodes[Cycle(cur, d == 0 ? 1 : d, 5)]);
             }, "Takes effect the next time the game starts."});
         }
 #endif
         if (!Updater::Current().empty()) {
+#if defined(__SWITCH__)
+            showSystemHeading();
+#endif
             using S = Updater::State;
             const S st = Updater::GetState();
             const std::string value = st == S::Available ? Updater::Latest() + " - install"
@@ -4139,6 +4167,9 @@ std::vector<OptRow> OptionsRows(int tab) {
                 Updater::SetCheckEnabled(!Updater::CheckEnabled());
             }, "Look for a new version each time the game starts."});
         }
+#if defined(__SWITCH__)
+        showSystemHeading();
+#endif
         {
             // Prepare graphics: the console builds every room's shaders once, ahead of play
             // (spm_prepare_graphics.cpp). The row reads what the sweep is doing.
@@ -4297,6 +4328,9 @@ std::vector<OptRow> OptionsRows(int tab) {
             RuntimeConfigFile::SetAudioMuted(g_audioMuted);
         }, "The \\ key mutes and unmutes at any time."});
     } else if (tab == 4) {
+#if defined(__SWITCH__)
+        rows.push_back(SectionHeading("Player"));
+#endif
         rows.push_back({"Infinite HP", OnOff(g_cheatHp), [](int) { SpmMapSweep::SetInfiniteHp(g_cheatHp = !g_cheatHp); },
                         "Your HP stays full."});
         rows.push_back({"999 coins", OnOff(g_cheatCoins), [](int) { SpmMapSweep::SetMaxCoins(g_cheatCoins = !g_cheatCoins); },
@@ -4317,6 +4351,9 @@ std::vector<OptRow> OptionsRows(int tab) {
                         "Mario can stay flipped into 3D as long as he likes."});
         rows.push_back({"9999 arcade tokens", OnOff(s_tokens), [](int) { SpmMapSweep::SetMaxArcadeTokens(s_tokens = !s_tokens); },
                         "For Mr. Game Guy's arcade in Flipside."});
+#if defined(__SWITCH__)
+        rows.push_back(SectionHeading("Stats and items"));
+#endif
         rows.push_back({"Score +10,000", "", [](int d) { if (d == 0) SpmMapSweep::AddScore(10000); },
                         "Adds 10,000 points to your score; levels go up as the game counts them."});
         rows.push_back({"Attack +1", "", [](int d) { if (d == 0) SpmMapSweep::AddAttack(1); }, "Stronger stomps and hits. Saved with your game."});
@@ -4350,6 +4387,9 @@ std::vector<OptRow> OptionsRows(int tab) {
         for (const auto& room : kWarpRooms)
             if (std::strcmp(room.group, groups[static_cast<size_t>(g_warpGroup)]) == 0) rooms.push_back(&room);
         g_warpRoom = std::clamp(g_warpRoom, 0, std::max(0, int(rooms.size()) - 1));
+#if defined(__SWITCH__)
+        rows.push_back(SectionHeading("Warp"));
+#endif
         rows.push_back({"Warp: area", groups[static_cast<size_t>(g_warpGroup)], [](int d) {
             g_warpGroup = Cycle(g_warpGroup, d == 0 ? 1 : d, int(groups.size()));
             g_warpRoom = 0;
@@ -4365,6 +4405,9 @@ std::vector<OptRow> OptionsRows(int tab) {
         // Gecko codes (Dolphin .ini files in the cheats folder or a mod): each one on or off.
         static std::vector<ModRuntime::CheatCode> codes;
         codes = ModRuntime::CheatCodes();
+#if defined(__SWITCH__)
+        if (!codes.empty()) rows.push_back(SectionHeading("Codes"));
+#endif
         for (const auto& code : codes) {
             const std::string name = code.name;
             const bool on = code.enabled;
@@ -4378,12 +4421,21 @@ std::vector<OptRow> OptionsRows(int tab) {
         }, "Put Gecko codes here as a Dolphin game .ini file (R8PE01.ini); they show up after a restart."});
 #endif
     } else if (tab == 5) {
-        for (const ModInstall::Mod& mod : ModInstall::List()) {
+        const std::vector<ModInstall::Mod> mods = ModInstall::List();
+        for (const ModInstall::Mod& mod : mods) {
             const std::string name = mod.name;
             const bool on = mod.enabled;
             rows.push_back({name, OnOff(on), [name, on](int) { ModInstall::SetEnabled(name, !on); },
                             "Changes apply the next time the game starts."});
         }
+#if defined(__SWITCH__)
+        // The folder row that explains this page on PC is not shown on
+        // Switch, so with no mods installed the page would be empty.
+        if (mods.empty()) {
+            rows.push_back({"No mods installed", "", [](int) {},
+                            "Put a mod's .zip (or its folder) in the mods folder; it is installed the next time the game starts and then shows up here."});
+        }
+#endif
 #if !defined(__SWITCH__)
         rows.push_back({"Open the mods folder", "", [](int d) {
             if (d != 0) return;
@@ -4396,6 +4448,7 @@ std::vector<OptRow> OptionsRows(int tab) {
 #if defined(__SWITCH__)
         // This port's own page: the Developer shell's renderer and audio
         // rows, with the shell's labels and the same getter / apply calls.
+        rows.push_back(SectionHeading("Picture"));
         rows.push_back({"Bloom", OnOff((RuntimeConfigFile::DisabledPostProcessingPaths(0) & 0x10u) == 0), [](int) {
             // Bloom is bit 0x10 of the disable mask; the row is ON when the bit is CLEAR.
             const uint32_t paths = RuntimeConfigFile::DisabledPostProcessingPaths(0);
@@ -4415,11 +4468,13 @@ std::vector<OptRow> OptionsRows(int tab) {
         }, "When a shader is still compiling, skip its draws instead of pausing to wait. This avoids compile hitches, but some effects may be missing briefly."});
         rows.push_back({"Frame graph", OnOff(FrameGraph()), [](int) { SetFrameGraph(!FrameGraph()); },
                         "Adds a rolling graph of the last 180 frame times to the FPS overlay, so spikes and uneven pacing are easy to see."});
+        rows.push_back(SectionHeading("Audio"));
         const bool mixWorker = RuntimeConfigFile::AudioMixWorkerEnabled(true);
         rows.push_back({"Audio mix worker", OnOff(mixWorker), [mixWorker](int) {
             AxDspHle::SetMixWorkerEnabled(!mixWorker);
             RuntimeConfigFile::SetAudioMixWorker(!mixWorker);
         }, "Runs the AX/DSP voice mix on a worker thread instead of inline. Turn it off if you suspect an audio problem."});
+        rows.push_back(SectionHeading("Textures and cache"));
         rows.push_back({"Spinning coins", OnOff(SpinningCoins()), [](int) { SetSpinningCoins(!SpinningCoins()); },
                         "Enables Aurora's animated tile texture patches, including spinning coins and ? blocks. Turn it off if a patched tile looks wrong."});
         const bool texDumps = RuntimeConfigFile::TextureDumps(false);
