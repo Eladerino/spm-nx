@@ -27,6 +27,10 @@ namespace GuestProfiler {
 void SetSwitchProfileEnabled(bool enabled);
 }
 
+// The runtime's anim pose log hook (spm_map_sweep.cpp), declared here the same way:
+// diag_init and diag_set forward the "poselog" switch to it.
+extern "C" void spm_pose_log_set(bool enabled);
+
 // The runtime's GX record ring (gx_worker.h), declared here the same way: the gxworker, gxdefer and gxthread
 // switches pick its mode, which it applies at the next frame boundary.
 namespace GxWorker {
@@ -53,6 +57,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"uvlog", &Diag::uvLog},          {"mtxlog", &Diag::mtxLog},        {"perftimer", &Diag::perfTimer},
     {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"cpthread", &Diag::cpThread},
     {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},
+    {"poselog", &Diag::poseLog},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -152,6 +157,9 @@ void diag_init() {
     // about the early start hurts attribution. The clean session is still the menu toggle:
     // on when the heavy scene is on screen, off when it is done.
     if (g_diag.profile) GuestProfiler::SetSwitchProfileEnabled(true);
+    // A poselog=1 in dk_diag.txt arms the runtime's anim pose log from the start, so the
+    // session covers the poses drawn during boot and the title as well.
+    if (g_diag.poseLog) spm_pose_log_set(true);
 }
 
 // diag_set (dk.h): the runtime path for the same switches. Every switch stores its field, which
@@ -170,6 +178,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "perftimer")) aurora::gfx::stage_timers_set_enabled(on);
     else if (!std::strcmp(key, "arrayup")) aurora::gx::fifo::nsmbw_set_array_reupload(on);
     else if (!std::strcmp(key, "profile")) GuestProfiler::SetSwitchProfileEnabled(on);
+    else if (!std::strcmp(key, "poselog")) spm_pose_log_set(on);
     else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
     else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer") || !std::strcmp(key, "gxthread"))
         apply_gx_worker_mode();

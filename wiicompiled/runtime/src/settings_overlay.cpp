@@ -3801,6 +3801,8 @@ constexpr DiagRow kDiagRows[] = {
      "Logs staged textures whose texture-coordinate scale and size disagree. For tracing textures that sample the wrong place."},
     {"mtxlog", "Matrix trace (mtxlog)", nullptr,
      "Logs the texture matrices Aurora stages for each draw. For tracing draws that transform or sample textures incorrectly; output can be large."},
+    {"poselog", "Anim pose log (poselog)", nullptr,
+     "Logs the archive, group and pose of each n_controler pose drawn, once per distinct combination, with the map and sequence it was seen in. For naming the demo Wii Remote's teaching poses before any draw is ever skipped; it changes nothing on screen."},
     {"perftimer", "Performance timers (perftimer)", "Performance",
      "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log, plus the decode thread's time and what the game waited on it for. Use it to measure where frame time goes."},
     {"profile", "Guest profiler (profile)", nullptr,
