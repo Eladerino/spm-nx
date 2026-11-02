@@ -2,7 +2,10 @@
 # Switch build of New Super Paper Bros. Run on Linux or in WSL with docker or podman, after
 # tools\build-spm.ps1 has translated the game on Windows: like tools/build-linux.sh, this reuses that
 # output (wiicompiled\generated) and only compiles it, here for Horizon inside switch/scripts/Containerfile.
-#   bash switch/scripts/build-switch.sh [--jobs N] [--audit] [--out DIR|none]
+#   bash switch/scripts/build-switch.sh [--jobs N] [--audit] [--out DIR|none] [--variant NAME]
+# --variant NAME builds into build-NAME with that variant's CMake options and stages the NRO as
+# spm-nx-NAME.nro: hotcold (SPM_HOTCOLD), o3 (SPM_O3_SHARDS), hotcold-o3 (both), pgo
+# (SPM_PGO_INSTRUMENT + SPM_PGO_ALL, the PGO capture build: never quote its frame rates).
 # --audit compiles only the runtime's sources for the Switch (no game, no Dawn, no network beyond the
 # SDL/ImGui header downloads): the quick check after an upstream merge.
 # Sources are copied to ~/spm-switch first. Output: ~/spm-switch/build/spm-nx.nro
@@ -17,11 +20,13 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 jobs=6   # translated shards need ~1 GB each
 audit=0
 out=auto
+variant=
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --jobs) jobs=$2; shift ;;
         --audit) audit=1 ;;
         --out) out=$2; shift ;;
+        --variant) variant=$2; shift ;;
         *) echo "unknown argument $1" >&2; exit 1 ;;
     esac
     shift
@@ -65,6 +70,21 @@ products=ON; target=WiiCompiled_nro; build=build; extra=(-DSPM_SWITCH_AUDIT=OFF)
 if [[ $audit == 1 ]]; then
     products=OFF; target=mkw_switch_audit; build=build-audit; extra=(-DSPM_SWITCH_AUDIT=ON)
 fi
+# A variant gets its own build folder (CMake caches options per folder, so sharing one would
+# silently keep the first variant's flags) and its own staged NRO name, so the A/B set can sit
+# on the card side by side (test build spec D0).
+nro_name=spm-nx.nro
+if [[ -n $variant ]]; then
+    build=build-$variant
+    nro_name=spm-nx-$variant.nro
+    case "$variant" in
+        hotcold) extra+=(-DSPM_HOTCOLD=ON) ;;
+        o3) extra+=(-DSPM_O3_SHARDS=ON) ;;
+        hotcold-o3) extra+=(-DSPM_HOTCOLD=ON -DSPM_O3_SHARDS=ON) ;;
+        pgo) extra+=(-DSPM_PGO_INSTRUMENT=ON -DSPM_PGO_ALL=ON) ;;
+        *) echo "unknown variant $variant (hotcold|o3|hotcold-o3|pgo)" >&2; exit 1 ;;
+    esac
+fi
 
 "$engine" run --rm -v "$work:/work" -w /work "$image" bash -c "
     set -e
@@ -76,7 +96,7 @@ fi
 if [[ $audit == 1 ]]; then
     echo "DONE: runtime compiles for Horizon"
 else
-    echo "DONE: $work/build/spm-nx.nro"
+    echo "DONE: $work/$build/spm-nx.nro (staged as $nro_name)"
     if [[ $out == auto ]]; then
         out=
         if command -v wslpath >/dev/null && command -v cmd.exe >/dev/null; then
@@ -87,9 +107,9 @@ else
     if [[ -n $out && $out != none ]]; then
         dest=$out/switch/spm-nx
         mkdir -p "$dest"
-        cp "$work/build/spm-nx.nro" "$work/build/dsp_coef.bin" \
-            "$work/build/cacert.pem" "$dest/"
-        cp -r "$work/build/wii_bootstrap" "$dest/"
+        cp "$work/$build/spm-nx.nro" "$dest/$nro_name"
+        cp "$work/$build/dsp_coef.bin" "$work/$build/cacert.pem" "$dest/"
+        cp -r "$work/$build/wii_bootstrap" "$dest/"
         # The license pack travels with the binary: the root LICENSE (GPLv3), the third-party
         # notices, the upstream credits and the Switch layer's own notices and license texts.
         mkdir -p "$dest/licenses"
