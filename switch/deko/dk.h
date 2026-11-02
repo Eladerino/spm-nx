@@ -179,6 +179,7 @@ bool env_flag(const char* name, bool def);
 struct Diag {
     std::atomic<bool> depthOff = false;  // depth/stencil test and write forced off at every pipeline bind
     std::atomic<bool> cullOff = false;   // rasterizer cull mode forced to None at every pipeline bind
+    std::atomic<bool> zcull = true;      // the queue's zcull (early depth rejection). On in this test build: SwitchWakerHD fixed the depth-biased decal loss that turned it off here (bias invalidate in wgpu_encode.cpp) and measured +6 fps GPU-bound at stock; "zcull=0" restores the old queue exactly. Creation-time only: read once at queue creation, no menu row
     std::atomic<bool> magenta = false;   // the swapchain image is cleared magenta before every present blit
     std::atomic<bool> picDump = false;   // the picture is read back at a few presents and its content logged
     std::atomic<bool> efbClear = false;  // colour clears of passes with a depth target (the EFB) are magenta

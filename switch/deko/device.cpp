@@ -58,7 +58,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"cpthread", &Diag::cpThread},
     {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},
     {"poselog", &Diag::poseLog},
-    {"dkcmd", &Diag::dkCmd},
+    {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -401,9 +401,11 @@ extern "C" void aurora_switch_dk_init(void) {
 
     DkQueueMaker qm;
     dkQueueMakerDefaults(&qm, R.device);
-    // zcull off: SwitchWakerHD saw depth-biased decals lose whole tiles with it. Compute stays on:
-    // Aurora's depth peek (GXPeekZ) is a compute pass.
-    qm.flags = DkQueueFlags_Graphics | DkQueueFlags_Compute | DkQueueFlags_MediumPrio | DkQueueFlags_DisableZcull;
+    // zcull per the diag switch (default on in this test build): SwitchWakerHD's old decal
+    // finding is fixed by the depth-bias invalidate at the pipeline bind (wgpu_encode.cpp).
+    // Compute stays on: Aurora's depth peek (GXPeekZ) is a compute pass.
+    qm.flags = DkQueueFlags_Graphics | DkQueueFlags_Compute | DkQueueFlags_MediumPrio |
+               (g_diag.zcull ? DkQueueFlags_EnableZcull : DkQueueFlags_DisableZcull);
     qm.commandMemorySize = kQueueCommandMemory;
     qm.flushThreshold = qm.commandMemorySize / 8;
     dklog("creating the queue");
