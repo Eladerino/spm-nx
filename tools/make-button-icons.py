@@ -17,9 +17,9 @@ The game picks the set for the controller in use (aurora texture_replacement.cpp
         Only the Switch package's set: the nintendo files that come from the vendored CC0 art alone
         (controller.png, ui/, panel.txt, the sideways boot texture), plus the Controls screen's
         marker textures as transparent files (a marker only reports that the game drew it; the
-        Controls panel draws the labels itself), and the prompt textures whose pictures are drawn
-        from scratch: the text-box glyphs and the shake icon. No HD pack is needed and the
-        composites into the pack's artwork are never made in this mode.
+        Controls panel draws the labels itself), and the prompt texture whose picture is drawn
+        from scratch: the shake icon (the text-box glyphs ride the compositor like the discs).
+        No HD pack is needed and the composites into the pack's artwork are never made in this mode.
 Needs ImageMagick (magick) to render the SVGs.
 """
 import argparse
@@ -88,12 +88,14 @@ MARKERS = {"tex1_248x184_fd844c6227d275cf_5.png": 2, "tex1_248x200_55ef64a9d7e80
 
 # Prompt textures whose render never reads the pack artwork it replaces: "glyph" paints the whole
 # texture white before drawing, "shake" builds a new transparent picture, "plaindisc" redraws its
-# white disc whole, so all three come out the same from a blank canvas at the pack's size, and the
-# clean set can ship them. Every other kind draws
-# on the artwork itself (disc, face, tippi) or is the artwork (none), so those stay full-set only.
-# None of these four is a marker texture: the full set saves them at the style's root, and so does
-# the clean set.
-PROMPT_CLEAN_KINDS = ("glyph", "shake", "plaindisc")
+# white disc whole, so all three come out the same from a blank canvas at the pack's size. Of
+# these only "shake" still ships as a finished picture in the clean set: its picture has to
+# *replace* the Wii Remote pictogram (an overlay can only draw over the base, never erase it),
+# so it stays a static file, correct for the default bindings. The glyphs and plaindiscs ship as
+# compositor overlays instead (COMPOSITE_KINDS), so the runtime can draw their letters from the
+# player's live bindings. Every other kind draws on the artwork itself (disc, face, tippi) or is
+# the artwork (none), so those stay full-set only.
+PROMPT_CLEAN_KINDS = ("shake",)
 
 # Where each action's button is on the controller picture (fractions of controller.png): Move = left stick, Flip = top
 # face button, Jump = bottom, Use a Pixl = the 1 button's, Use Tippi = right stick. The panel's callouts point there.
@@ -309,7 +311,20 @@ def render(src, kind, buttons, style, names=None):
 # game draws it over the texture it already has. "tippi" is not one of them: tippi() covers the TV
 # and the remote with tape sampled from the picture itself, so the cover is the game's own art,
 # which no shipped overlay may carry (and a static picture cannot express "copy this part there").
-COMPOSITE_KINDS = ("disc", "face")
+# "glyph" and "plaindisc" ride it too: their overlays are drawn whole (an opaque white square for
+# a glyph, a full disc for a plaindisc), which covers the guest's own glyph/disc underneath.
+COMPOSITE_KINDS = ("disc", "face", "glyph", "plaindisc")
+
+# Per-button art the runtime compositor draws letters from, so a prompt can show the button the
+# action is *currently* bound to instead of the default baked into an overlay: for each SDL
+# gamepad token (positional names, the panel's ui/buttons set), the Kenney file whose printed
+# letter sits at that seat on a Nintendo pad. letters/ holds the letter fitted the discs' way
+# (letter_image); faces/ holds the whole icon's holes, the face prompts' symbol. A binding whose
+# primary token has no entry here (a stick direction, L, ZL, a stick click) keeps the baked
+# overlay, which is the default binding's letter.
+COMPOSITE_TOKENS = {"a": "switch_button_b", "b": "switch_button_a", "x": "switch_button_y",
+                    "y": "switch_button_x", "rightshoulder": "switch_button_r",
+                    "righttrigger": "switch_button_r"}
 
 
 def render_overlay(kind, buttons, style, w, h):
@@ -347,14 +362,38 @@ def render_overlay(kind, buttons, style, w, h):
             sym = holes(render_svg(style, name, size))
             img.alpha_composite(solid((46, 46, 46, 255), sym),
                                 (int(fx * w - sym.width / 2), int(fy * h - sym.height / 2)))
+        elif kind == "glyph":
+            # The whole texture is the glyph's white box: paint it opaque, then the letter
+            # in ink fitted the discs' way, exactly as render()'s glyph path draws it.
+            img = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+            letter = letter_image(style, name, w * LETTER_FRACTION)
+            img.alpha_composite(solid((20, 20, 20, 255), letter),
+                                ((w - letter.width) // 2, (h - letter.height) // 2))
+        elif kind == "plaindisc":
+            # render()'s plaindisc redraw at the texture's own size: ink ring, white face,
+            # the letter in ink fitted to LETTER_FRACTION of the disc.
+            d = ImageDraw.Draw(img)
+            m = w * 0.04
+            ring = w * 0.085
+            d.ellipse([m, m, w - m, h - m], fill="#141414")
+            d.ellipse([m + ring, m + ring, w - m - ring, h - m - ring], fill="#FFFFFF")
+            letter = letter_image(style, name, (w - 2 * m) * LETTER_FRACTION)
+            img.alpha_composite(solid((20, 20, 20, 255), letter),
+                                ((w - letter.width) // 2, (h - letter.height) // 2))
         drew = True
     return img if drew else None
 
 
 def build_composites(out):
-    """<out>/composite/: one overlay per disc/face prompt texture, plus composite.txt (one line per
-    texture: its filename and kind), for the runtime compositor. Drawn from the vendored Kenney art
-    alone, like the clean set, so the Switch package ships them and no HD pack is involved."""
+    """<out>/composite/: one overlay per prompt texture in COMPOSITE_KINDS, plus composite.txt,
+    for the runtime compositor. Each manifest line is the filename, the kind, and one
+    <button>:<cx>:<cy>:<radius> spec per button the texture holds (fractions, from TEXTURES):
+    the runtime compositor (texture_replacement.cpp) reads the specs to draw that button's
+    letter from the player's live bindings, falling back to the shipped overlay (drawn here
+    with the default bindings) when a binding has no per-button art. letters/ and faces/ hold
+    the per-token masks it draws from (COMPOSITE_TOKENS), white with the mask in alpha.
+    Drawn from the vendored Kenney art alone, like the clean set, so the Switch package ships
+    them and no HD pack is involved."""
     style = "nintendo"
     comp = os.path.join(out, "composite")
     os.makedirs(comp, exist_ok=True)
@@ -367,10 +406,20 @@ def build_composites(out):
         if img is None:
             continue
         img.save(os.path.join(comp, name))
-        lines.append(f"{name} {kind}")
+        specs = " ".join(f"{b}:{fx:g}:{fy:g}:{fr:g}" for b, fx, fy, fr in buttons if b)
+        lines.append(f"{name} {kind}" + (f" {specs}" if specs else ""))
     with open(os.path.join(comp, "composite.txt"), "w", encoding="ascii") as f:
         for line in lines:
             print(line, file=f)
+    for sub, mask in (("letters", lambda n: letter_image(style, n, 96)),
+                      ("faces", lambda n: holes(render_svg(style, n, 128)))):
+        folder = os.path.join(comp, sub)
+        os.makedirs(folder, exist_ok=True)
+        for token, name in COMPOSITE_TOKENS.items():
+            m = mask(name)
+            art = Image.new("RGBA", m.size, (255, 255, 255, 255))
+            art.putalpha(m)
+            art.save(os.path.join(folder, token + ".png"))
     print(f"{style} (composite): {len(lines)} overlays -> {comp}")
 
 
@@ -427,7 +476,7 @@ def build_clean(out_root):
     markers 2-6 report that screen's action bubbles, and the Controls panel's own files are in
     place, so the panel opens over the screen and lists the actions itself. It also buys
     the in-game prompt textures whose renders never touch the pack artwork (PROMPT_CLEAN_KINDS:
-    the text-box glyphs and the shake icon), so those prompts show Switch buttons.
+    the shake icon), so those prompts show Switch buttons.
 
     The marker textures ship transparent because a marker is only a trip signal: the game draws
     the texture on the Controls screen, Aurora reports that it was drawn, and the panel then
@@ -457,10 +506,10 @@ def build_clean(out_root):
     panel_and_ui(out, style)
     # The pack-independent prompt textures (PROMPT_CLEAN_KINDS): rendered from a blank canvas at
     # the pack's 8x size and saved at 4x under their own names, like the full set, so the in-game
-    # prompts they belong to (the button glyphs inside text boxes, the shake prompt's icon) show
-    # Switch buttons in the package too. The glyphs' pictures follow STYLES directly, which
-    # follows virtual_remote.cpp's Nintendo defaults (Wii 1 = north, printed X; Wii A = west,
-    # printed Y), while the pad layer reports buttons by position underneath either way.
+    # prompts they belong to (the shake prompt's icon) show Switch buttons in the package too.
+    # Its picture follows STYLES directly, which follows virtual_remote.cpp's Nintendo defaults
+    # (Wii 1 = north, printed X; Wii A = west, printed Y), while the pad layer reports buttons
+    # by position underneath either way.
     for name, kind, buttons in TEXTURES:
         if kind not in PROMPT_CLEAN_KINDS:
             continue
@@ -471,9 +520,10 @@ def build_clean(out_root):
             img = render(blank, kind, buttons, style)
         img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
         img.save(os.path.join(out, name))
-    # The disc and face prompts still cannot ship as pictures (their renders draw on the pack's
-    # artwork), so they ship as overlays for the runtime compositor instead: composite/ holds
-    # only the new buttons, and the game draws them over its own textures at runtime.
+    # The disc, face, glyph and plaindisc prompts still cannot ship as pictures (their renders
+    # draw on the pack's artwork, or must follow the player's bindings), so they ship as
+    # overlays for the runtime compositor instead: composite/ holds only the new buttons, and
+    # the game draws them over its own textures at runtime.
     build_composites(out)
     print(f"{style} (clean): -> {out}")
 
