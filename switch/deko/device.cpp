@@ -58,7 +58,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"cpthread", &Diag::cpThread},
     {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},
     {"poselog", &Diag::poseLog},
-    {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},
+    {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},
 };
 
 const DiagKey* find_diag_key(const char* name) {
