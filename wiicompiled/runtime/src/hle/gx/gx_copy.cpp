@@ -140,7 +140,9 @@ PPC_NATIVE_OVERRIDE_VOID(8028df8c, GX__SetDispCopyGamma_8016fc24, (uint32_t g), 
 // ============================================================================
 
 // Time the game spent at the end of its frames waiting for the render worker (vi.cpp's frame log).
-std::atomic<uint64_t> g_copyDispWorkerWaitNanos{0};
+// Plain, not atomic (test build spec A3): GX__CopyDisp is the only writer and vi.cpp's frame
+// log the only reader, both on the guest thread.
+uint64_t g_copyDispWorkerWaitNanos = 0;
 
 extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
     EnsureAuroraFrameActive();
@@ -161,9 +163,8 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
     // Aurora's render worker, replay during encode; aurora_end_frame would join here anyway.
     const auto waitStart = std::chrono::steady_clock::now();
     aurora_wait_for_frame_worker();
-    g_copyDispWorkerWaitNanos.fetch_add(
-        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart).count()),
-        std::memory_order_relaxed);
+    g_copyDispWorkerWaitNanos +=
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart).count());
     settings_overlay::Draw();
     // Seal, pace to the VI retrace boundary (Aurora renders the sealed frame
     // during the wait), and pre-warm the next frame.

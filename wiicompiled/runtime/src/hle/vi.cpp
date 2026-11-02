@@ -521,9 +521,11 @@ static std::atomic<bool> s_presentSequenceActive{false};
 // NSMBW bring-up: frames the guest actually handed to the presenter (an XFB was ready), and a one-shot
 // watchdog that dumps every guest thread's state if none arrived after 12 s and again after 30 s, so
 // a boot that stalls in a wait loop shows where each thread is parked.
-static std::atomic<uint32_t> s_presentedXfbFrames{0};
+// Plain, not atomic (test build spec A3): the only writer is the present path below, on the
+// guest thread; every reader is the same thread or a same-frame read of a diagnostic counter.
+static uint32_t s_presentedXfbFrames = 0;
 extern "C" { extern int g_spmDrawDump; extern int g_spmCullOff; extern int g_spmSweepDump; extern unsigned g_spmDrawIdx; extern unsigned g_spmDrawLimit; }  // aurora command_processor (SPM bring-up diagnostics)
-static uint32_t SpmPresentedFramesLocal() { return s_presentedXfbFrames.load(std::memory_order_relaxed); }
+static uint32_t SpmPresentedFramesLocal() { return s_presentedXfbFrames; }
 static uint32_t (*const g_spmFramesFn)() = &SpmPresentedFramesLocal;
 
 void StartStallWatchdogOnce() {
@@ -549,7 +551,7 @@ void StartStallWatchdogOnce() {
             for (const int seconds : {12, 30, extra ? std::atoi(extra) : 0}) {
                 if (seconds == 0) break;
                 std::this_thread::sleep_until(start + std::chrono::seconds(seconds));
-                const uint32_t frames = s_presentedXfbFrames.load(std::memory_order_relaxed);
+                const uint32_t frames = s_presentedXfbFrames;
                 const bool black = g_vi.black;  // racy read; diagnostics only
                 RT_LOGF(RT_TAG_VI, "[watchdog] %d s: %u guest frame(s) presented, VI black=%d\n", seconds, frames,
                         black ? 1 : 0);
@@ -627,7 +629,7 @@ void LogSceneChanges() {
     s_last = key;
     const auto name = [](uint32_t v) { return v < 6 ? kSeqNames[v] : "none"; };
     RT_LOGF(RT_TAG_VI, "seq -> %s (next %s) stage %u (frame %u)\n", name(now), name(next), stage,
-            s_presentedXfbFrames.load(std::memory_order_relaxed));
+            s_presentedXfbFrames);
 }
 
 void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool serviceAurora) {
@@ -639,7 +641,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
     StartStallWatchdogOnce();
     LogGuestModulesOnce();
     LogSceneChanges();
-    SpmMapSweep::Tick(ctx, s_presentedXfbFrames.load(std::memory_order_relaxed));
+    SpmMapSweep::Tick(ctx, s_presentedXfbFrames);
 
     uint32_t preCb = 0;
     uint32_t postCb = 0;
@@ -972,7 +974,7 @@ static bool LogFpsEnabled() {
 
 // dvd.cpp: time in the game's disc reads since start, and their count.
 uint64_t DvdReadNanosTotal();
-extern std::atomic<uint64_t> g_copyDispWorkerWaitNanos;  // gx_copy.cpp
+extern uint64_t g_copyDispWorkerWaitNanos;  // gx_copy.cpp
 uint32_t DvdReadCount();
 
 void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
@@ -1002,7 +1004,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
             // The draw-dump and draw-limit counters below are Aurora's decoder's: with its decode
             // thread on, let it finish the frame first (GXCopyDisp usually has already).
             AuroraGxSync();
-            const uint32_t pf = s_presentedXfbFrames.fetch_add(1, std::memory_order_relaxed) + 1;
+            const uint32_t pf = ++s_presentedXfbFrames;
             static const int32_t dumpTarget = [] { std::ifstream in("drawdump.txt"); int32_t f = -1; in >> f; return f; }();
             static const bool cullTest = std::ifstream("depth_test.txt").good();
             g_spmDrawDump = ((dumpTarget >= 0 && pf == static_cast<uint32_t>(dumpTarget)) || g_spmSweepDump) ? 1 : 0;
@@ -1014,7 +1016,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         }
         // SPM bring-up: with drawdump.txt present, report any guest write into the DOL's
         // read-only sections (.rodata/.sdata2) once the game has been running a while.
-        if (s_presentedXfbFrames.load(std::memory_order_relaxed) == 3000u && std::ifstream("drawdump.txt").good()) {
+        if (s_presentedXfbFrames == 3000u && std::ifstream("drawdump.txt").good()) {
             std::ifstream dol(RuntimeConfigFile::ResolvedDvdRoot() / "sys" / "main.dol", std::ios::binary);
             std::vector<uint8_t> d((std::istreambuf_iterator<char>(dol)), {});
             auto be = [&](size_t o) { return (uint32_t(d[o]) << 24) | (uint32_t(d[o + 1]) << 16) | (uint32_t(d[o + 2]) << 8) | d[o + 3]; };
@@ -1122,7 +1124,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         const uint64_t gxTotal = AuroraGxProcessNanosTotal();
         const double gxMs = (gxTotal - s_lastGx) / 1e6;
         s_lastGx = gxTotal;
-        const uint64_t workerTotal = g_copyDispWorkerWaitNanos.load(std::memory_order_relaxed);
+        const uint64_t workerTotal = g_copyDispWorkerWaitNanos;
         const double workerMs = (workerTotal - s_lastWorker) / 1e6;
         s_lastWorker = workerTotal;
         const uint64_t dvdTotal = DvdReadNanosTotal();
@@ -1180,7 +1182,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
             uint64_t copies = 0, creates = 0;
             AuroraTakeCopyStats(&copies, &creates);
             static uint64_t s_lastWorkerWait = 0;
-            const uint64_t workerTotal = g_copyDispWorkerWaitNanos.load(std::memory_order_relaxed);
+            const uint64_t workerTotal = g_copyDispWorkerWaitNanos;
             const uint64_t workerWait = workerTotal - s_lastWorkerWait;
             s_lastWorkerWait = workerTotal;
             RT_LOGF(RT_TAG_VI,
