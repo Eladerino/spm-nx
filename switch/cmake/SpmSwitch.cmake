@@ -125,6 +125,13 @@ add_compile_definitions(SPM_SWITCH_LAUNCHER_REV=2)
 # access checked against the page tables. Slower, but it needs none of the window's SVCs and reports
 # a bad guest access with the guest's CPU state instead of a data abort.
 option(SPM_SWITCH_CHECKED_GUEST_MEMORY "Switch: check every guest memory access (no flat window)" OFF)
+
+# Instrumented-PGO capture build (test build spec E): the translated shards (and, with
+# SPM_PGO_ALL, the runtime and Aurora too) count every block they run, and
+# switch/source/pgo_instr_switch.c writes the counts to UserData/pgo. A capture build only:
+# its frame rates are never quoted, and no profile is used in this change.
+option(SPM_PGO_INSTRUMENT "Switch: instrumented PGO capture build (counts to UserData/pgo)" OFF)
+option(SPM_PGO_ALL "Switch: with SPM_PGO_INSTRUMENT, also instrument the runtime and Aurora" OFF)
 if(SPM_SWITCH_CHECKED_GUEST_MEMORY)
     add_compile_definitions(SPM_SWITCH_CHECKED_GUEST_MEMORY=1)
 endif()
@@ -282,6 +289,37 @@ function(spm_switch_configure_products)
             target_compile_options(${_spm_visibility_target} PRIVATE -fvisibility=hidden)
         endif()
     endforeach()
+    # Instrumented PGO (spec E3): flags verbatim from KartPadNX's FullApp, whose capture build
+    # runs on this same toolchain family. Counter promotion stays off: it goes superlinear on
+    # translated loop nests. Game+runtime from day one (SPM_PGO_ALL): WakerHD priced a
+    # game-only profile at +0.11 fps against +1.95 for game+runtime. Never spm_deko, Dawn,
+    # deko3d or uam: they compile in GCC scope before the clang launcher is set and cannot
+    # take Clang PGO.
+    if(SPM_PGO_INSTRUMENT)
+        set(_spm_pgo_flags -fprofile-generate
+            "SHELL:-mllvm -disable-vp=true"
+            "SHELL:-mllvm -static-func-full-module-prefix=false"
+            "SHELL:-mllvm -do-counter-promotion=false")
+        foreach(_spm_pgo_target IN ITEMS
+                mkw_base_shared mkw_base_sensitive mkw_retro_sensitive mkw_retro_rewind_functions)
+            if(TARGET ${_spm_pgo_target})
+                target_compile_options(${_spm_pgo_target} PRIVATE ${_spm_pgo_flags})
+            endif()
+        endforeach()
+        if(SPM_PGO_ALL)
+            foreach(_spm_pgo_target IN ITEMS
+                    mkw_runtime_common WiiCompiled RetroRewind
+                    aurora_core aurora_gx aurora_pad aurora_si aurora_mtx aurora_vi aurora_main)
+                if(TARGET ${_spm_pgo_target})
+                    target_compile_options(${_spm_pgo_target} PRIVATE ${_spm_pgo_flags})
+                endif()
+            endforeach()
+        endif()
+        target_sources(WiiCompiled PRIVATE "${SPM_SWITCH_DIR}/source/pgo_instr_switch.c")
+        set_source_files_properties("${SPM_SWITCH_DIR}/source/pgo_instr_switch.c"
+            PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
+        message(STATUS "spm-nx: instrumented PGO capture build (SPM_PGO_ALL=${SPM_PGO_ALL})")
+    endif()
     set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME "${SPM_SWITCH_NRO_NAME}" SUFFIX ".elf")
     # The game links the vendored deko3d (through spm_deko) instead of devkitPro's libdeko3d.
     target_link_libraries(WiiCompiled PRIVATE SDL3::SDL3-static spm_deko deko3d_release nx)
