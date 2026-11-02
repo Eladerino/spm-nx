@@ -17,14 +17,19 @@
 #include <atomic>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <optional>
+#include <sstream>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "png_io.hpp"
 #include "../fs_helper.hpp"
@@ -87,9 +92,34 @@ std::array<absl::flat_hash_map<RuntimeTextureKey, ReplacementIndexEntry>, 4> s_b
 // them as replacement files, because their pictures live on the artwork they would replace.
 struct CompositeIndexEntry {
   std::filesystem::path path;
-  std::string kind; // the generator's word for the prompt (disc, face); kept for log lines
+  std::string kind; // the generator's word for the prompt (disc, face, glyph, plaindisc); kept for log lines
+  // The buttons the prompt holds, from the manifest's <button>:<cx>:<cy>:<radius> specs:
+  // the gamepad action each Wii button routes to (Keybinds order, the runtime's table) and
+  // where it sits, as fractions of the texture. With these the overlay's letters can be
+  // drawn from the player's live bindings instead of the shipped picture's defaults.
+  struct Button {
+    int action = -1;
+    float fx = 0.0f;
+    float fy = 0.0f;
+    float fr = 0.0f;
+  };
+  std::vector<Button> buttons;
 };
 std::array<absl::flat_hash_map<RuntimeTextureKey, CompositeIndexEntry>, 4> s_compositeIndex;
+// Per-button masks the compositor draws a bound button's letter from (composite/letters and
+// composite/faces, generated beside the overlays): white pictures, the mask in alpha, keyed
+// by SDL gamepad token (a, b, x, y, rightshoulder, ...). A token with no mask has no
+// per-button art, and its prompts keep the shipped overlay.
+std::array<absl::flat_hash_map<std::string, ConvertedTexture>, 4> s_letterMasks;
+std::array<absl::flat_hash_map<std::string, ConvertedTexture>, 4> s_faceMasks;
+// The primary gamepad input each action currently answers to, per pad style, as SDL tokens:
+// fed by the runtime from the same parsed binding tables the Controls panel reads, so a
+// prompt and the panel can never disagree. Guarded by the mutex; the change flag is taken
+// on the renderer's thread, which drops the cached composites (the disk cache keys on the
+// bindings too, see composite_cache_path).
+std::array<std::array<std::string, 12>, 3> s_gamepadBindings;
+std::mutex s_gamepadBindingsMutex;
+std::atomic<bool> s_gamepadBindingsChanged{false};
 std::atomic<int> s_buttonIconStyle{-1};
 std::atomic<bool> s_buttonIconStyleChanged{false};
 int s_appliedButtonIconStyle = -1;
@@ -616,7 +646,9 @@ void build_index() noexcept {
 
   // The compositor's overlays: only the files composite.txt lists are indexed (the manifest is
   // the generator's word for which prompts have one), under the same texture keys as everything
-  // else. The composite/ folder itself is never scanned for replacements.
+  // else. The composite/ folder itself is never scanned for replacements. A manifest line is
+  // the filename, the kind, and one <button>:<cx>:<cy>:<radius> spec per button the prompt
+  // holds (older manifests have no specs: those overlays are only ever drawn as shipped).
   for (size_t style = 0; style < s_compositeIndex.size(); ++style) {
     const auto dir = userPath / "button_icons" / kButtonIconStyles[style] / "composite";
     std::ifstream manifest(dir / "composite.txt");
@@ -627,12 +659,60 @@ void build_index() noexcept {
         continue;
       }
       const auto filename = line.substr(0, sep);
-      if (const auto parsed = parse_replacement_filename(filename); parsed.has_value()) {
-        s_compositeIndex[style].try_emplace(*parsed, CompositeIndexEntry{dir / filename, line.substr(sep + 1)});
+      const auto parsed = parse_replacement_filename(filename);
+      if (!parsed.has_value()) {
+        continue;
       }
+      CompositeIndexEntry entry;
+      entry.path = dir / filename;
+      std::istringstream rest(line.substr(sep + 1));
+      rest >> entry.kind;
+      std::string spec;
+      while (rest >> spec) {
+        // <Wii button>:<cx>:<cy>:<radius>; the button names its gamepad action (Keybinds
+        // order in the runtime's binding tables): 2 = jump, 1 = run (Use a Pixl), A = the
+        // A action (Flip / Use Tippi), + = plus, - = minus, shake = shake.
+        std::array<std::string_view, 4> parts{};
+        size_t partCount = 0;
+        size_t offset = 0;
+        std::string_view view = spec;
+        while (offset <= view.size() && partCount < parts.size()) {
+          const size_t next = view.find(':', offset);
+          parts[partCount++] = view.substr(offset, next == std::string_view::npos ? view.size() - offset : next - offset);
+          if (next == std::string_view::npos) break;
+          offset = next + 1;
+        }
+        if (partCount != parts.size()) continue;
+        int action = -1;
+        if (parts[0] == "2") action = 4;
+        else if (parts[0] == "1") action = 5;
+        else if (parts[0] == "A") action = 6;
+        else if (parts[0] == "shake") action = 7;
+        else if (parts[0] == "+") action = 10;
+        else if (parts[0] == "-") action = 11;
+        if (action < 0) continue;
+        entry.buttons.push_back(CompositeIndexEntry::Button{
+            .action = action,
+            .fx = std::strtof(std::string(parts[1]).c_str(), nullptr),
+            .fy = std::strtof(std::string(parts[2]).c_str(), nullptr),
+            .fr = std::strtof(std::string(parts[3]).c_str(), nullptr),
+        });
+      }
+      s_compositeIndex[style].try_emplace(*parsed, std::move(entry));
     }
     if (!s_compositeIndex[style].empty()) {
       Log.info("Button icon composites '{}': {} overlays", kButtonIconStyles[style], s_compositeIndex[style].size());
+    }
+    // The per-button masks for binding-true letters, keyed by SDL token (the file's stem).
+    for (const auto [sub, masks] : {std::pair{"letters", &s_letterMasks}, std::pair{"faces", &s_faceMasks}}) {
+      for (const auto& file : std::filesystem::directory_iterator(dir / sub, ec)) {
+        if (!file.is_regular_file(ec) || file.path().extension() != ".png") continue;
+        if (auto mask = load_texture_file(file.path());
+            mask.has_value() && mask->format == wgpu::TextureFormat::RGBA8Unorm) {
+          (*masks)[style].try_emplace(fs_path_to_string(file.path().stem()), std::move(*mask));
+        }
+      }
+      ec.clear();
     }
   }
   // SPM_BUTTON_ICONS=xbox|playstation|nintendo pins a set (tests; scripted input never reaches the gamepad code).
@@ -807,10 +887,203 @@ void composite_overlay_onto(ConvertedTexture& base, const ConvertedTexture& over
   }
 }
 
+// The applied style's current bindings as a cache tag: composited results are only the
+// same while the bindings are, so the disk cache lives under a folder named by them. "default"
+// covers no fed bindings (the shipped overlays' own bindings) and the common set.
+std::string composite_bindings_tag() noexcept {
+  const int style = s_appliedButtonIconStyle;
+  if (style < 0 || style >= kCommonIcons) {
+    return "default";
+  }
+  std::array<std::string, 12> tokens;
+  {
+    std::lock_guard lock(s_gamepadBindingsMutex);
+    tokens = s_gamepadBindings[style];
+  }
+  bool any = false;
+  std::string joined;
+  for (const auto& token : tokens) {
+    if (!token.empty()) any = true;
+    joined += token;
+    joined += ',';
+  }
+  if (!any) {
+    return "default";
+  }
+  return fmt::format("{:016x}", XXH64(joined.data(), joined.size(), 0));
+}
+
 std::filesystem::path composite_cache_path(const RuntimeTextureKey& key, bool packBase) noexcept {
   const char* styleName = s_appliedButtonIconStyle >= 0 ? kButtonIconStyles[s_appliedButtonIconStyle] : "common";
-  auto dir = s_compositeCacheRoot / styleName / (packBase ? "pack" : "guest");
+  auto dir = s_compositeCacheRoot / (std::string(styleName) + "-" + composite_bindings_tag()) / (packBase ? "pack" : "guest");
   return dir / format_replacement_filename(key);
+}
+
+// Binding-true overlay drawing: the same pictures render_overlay() in the generator draws,
+// rebuilt at resolve time with the letter of the button each action is currently bound to.
+// The geometry constants mirror the generator's (LETTER_FRACTION and the per-kind recipes);
+// the shipped overlay stays the fallback for any button whose binding has no mask.
+constexpr float kCompositeLetterFraction = 0.47f; // LETTER_FRACTION in make-button-icons.py
+
+void overlay_fill_ellipse(ConvertedTexture& img, float cx, float cy, float rx, float ry,
+                          uint8_t red, uint8_t green, uint8_t blue) noexcept {
+  if (rx <= 0.0f || ry <= 0.0f) {
+    return;
+  }
+  const int bw = static_cast<int>(img.width);
+  const int bh = static_cast<int>(img.height);
+  const int x0 = std::max(0, static_cast<int>(std::floor(cx - rx)));
+  const int x1 = std::min(bw - 1, static_cast<int>(std::ceil(cx + rx)));
+  const int y0 = std::max(0, static_cast<int>(std::floor(cy - ry)));
+  const int y1 = std::min(bh - 1, static_cast<int>(std::ceil(cy + ry)));
+  uint8_t* const dst = img.data.data();
+  for (int y = y0; y <= y1; ++y) {
+    for (int x = x0; x <= x1; ++x) {
+      const float nx = (static_cast<float>(x) + 0.5f - cx) / rx;
+      const float ny = (static_cast<float>(y) + 0.5f - cy) / ry;
+      if (nx * nx + ny * ny > 1.0f) {
+        continue;
+      }
+      uint8_t* const d = dst + (y * bw + x) * 4;
+      d[0] = red;
+      d[1] = green;
+      d[2] = blue;
+      d[3] = 255;
+    }
+  }
+}
+
+// A mask (white picture, coverage in alpha) tinted and drawn over the canvas at (dx, dy,
+// dw, dh), sampled bilinearly like composite_overlay_onto samples its overlays.
+void overlay_draw_mask(ConvertedTexture& img, const ConvertedTexture& mask, float dx, float dy, float dw, float dh,
+                       uint8_t red, uint8_t green, uint8_t blue) noexcept {
+  if (dw <= 0.0f || dh <= 0.0f || mask.width == 0 || mask.height == 0) {
+    return;
+  }
+  const int bw = static_cast<int>(img.width);
+  const int bh = static_cast<int>(img.height);
+  const int mw = static_cast<int>(mask.width);
+  const int mh = static_cast<int>(mask.height);
+  const uint8_t* const src = mask.data.data();
+  uint8_t* const dst = img.data.data();
+  const int x0 = std::max(0, static_cast<int>(std::floor(dx)));
+  const int x1 = std::min(bw - 1, static_cast<int>(std::ceil(dx + dw)));
+  const int y0 = std::max(0, static_cast<int>(std::floor(dy)));
+  const int y1 = std::min(bh - 1, static_cast<int>(std::ceil(dy + dh)));
+  for (int y = y0; y <= y1; ++y) {
+    const float gy = (static_cast<float>(y) + 0.5f - dy) * static_cast<float>(mh) / dh - 0.5f;
+    const int my = static_cast<int>(std::floor(gy));
+    const float fy = gy - static_cast<float>(my);
+    const int ya = std::clamp(my, 0, mh - 1);
+    const int yb = std::clamp(my + 1, 0, mh - 1);
+    for (int x = x0; x <= x1; ++x) {
+      const float gx = (static_cast<float>(x) + 0.5f - dx) * static_cast<float>(mw) / dw - 0.5f;
+      const int mx = static_cast<int>(std::floor(gx));
+      const float fx = gx - static_cast<float>(mx);
+      const int xa = std::clamp(mx, 0, mw - 1);
+      const int xb = std::clamp(mx + 1, 0, mw - 1);
+      const float top = static_cast<float>(src[(ya * mw + xa) * 4 + 3]) * (1.0f - fx) +
+                        static_cast<float>(src[(ya * mw + xb) * 4 + 3]) * fx;
+      const float bottom = static_cast<float>(src[(yb * mw + xa) * 4 + 3]) * (1.0f - fx) +
+                           static_cast<float>(src[(yb * mw + xb) * 4 + 3]) * fx;
+      const float oa = (top * (1.0f - fy) + bottom * fy) / 255.0f;
+      if (oa <= 0.0f) {
+        continue;
+      }
+      uint8_t* const d = dst + (y * bw + x) * 4;
+      const float da = static_cast<float>(d[3]) / 255.0f;
+      const float outA = oa + da * (1.0f - oa);
+      if (outA <= 0.0f) {
+        d[0] = d[1] = d[2] = d[3] = 0;
+        continue;
+      }
+      const float sr = static_cast<float>(red), sg = static_cast<float>(green), sb = static_cast<float>(blue);
+      d[0] = static_cast<uint8_t>((sr * oa + static_cast<float>(d[0]) * da * (1.0f - oa)) / outA + 0.5f);
+      d[1] = static_cast<uint8_t>((sg * oa + static_cast<float>(d[1]) * da * (1.0f - oa)) / outA + 0.5f);
+      d[2] = static_cast<uint8_t>((sb * oa + static_cast<float>(d[2]) * da * (1.0f - oa)) / outA + 0.5f);
+      d[3] = static_cast<uint8_t>(outA * 255.0f + 0.5f);
+    }
+  }
+}
+
+// The overlay for one prompt with its letters drawn from the applied style's live bindings,
+// at the texture's own size. Nullopt when the entry carries no button specs, no bindings
+// were fed for the style, or any button's binding has no mask: the caller then draws the
+// shipped overlay, so a prompt never mixes live and default letters.
+std::optional<ConvertedTexture> build_dynamic_overlay(const CompositeIndexEntry& entry, uint32_t width,
+                                                      uint32_t height) noexcept {
+  const int style = s_appliedButtonIconStyle;
+  if (entry.buttons.empty() || style < 0 || style >= kCommonIcons || width == 0 || height == 0) {
+    return std::nullopt;
+  }
+  std::array<std::string, 12> tokens;
+  {
+    std::lock_guard lock(s_gamepadBindingsMutex);
+    tokens = s_gamepadBindings[style];
+  }
+  const auto& letters = s_letterMasks[style];
+  const auto& faces = s_faceMasks[style];
+  std::vector<const ConvertedTexture*> masks;
+  masks.reserve(entry.buttons.size());
+  for (const auto& button : entry.buttons) {
+    if (button.action < 0 || button.action >= static_cast<int>(tokens.size())) {
+      return std::nullopt;
+    }
+    const auto& token = tokens[button.action];
+    const auto& set = entry.kind == "face" ? faces : letters;
+    const auto it = token.empty() ? set.end() : set.find(token);
+    if (it == set.end()) {
+      return std::nullopt;
+    }
+    masks.push_back(&it->second);
+  }
+
+  ConvertedTexture img{
+      .format = wgpu::TextureFormat::RGBA8Unorm,
+      .width = width,
+      .height = height,
+      .mips = 1,
+      .data = ByteBuffer{static_cast<size_t>(width) * height * 4},
+  };
+  const float w = static_cast<float>(width);
+  const float h = static_cast<float>(height);
+  if (entry.kind == "glyph") {
+    // The glyph's white box, painted whole like the generator's glyph overlay.
+    std::fill(img.data.data(), img.data.data() + img.data.size(), uint8_t{255});
+  }
+  for (size_t i = 0; i < entry.buttons.size(); ++i) {
+    const auto& button = entry.buttons[i];
+    const ConvertedTexture& mask = *masks[i];
+    const float maskAspect = static_cast<float>(mask.width) / static_cast<float>(mask.height);
+    if (entry.kind == "disc") {
+      const float r = button.fr * std::max(w, h);
+      const float cx = button.fx * w, cy = button.fy * h;
+      overlay_fill_ellipse(img, cx, cy, r, r, 20, 20, 20);
+      const float inner = r - 2.0f * r * 0.085f;
+      overlay_fill_ellipse(img, cx, cy, inner, inner, 255, 255, 255);
+      const float letterH = 2.0f * r * kCompositeLetterFraction;
+      overlay_draw_mask(img, mask, cx - letterH * maskAspect / 2.0f, cy - letterH / 2.0f, letterH * maskAspect,
+                        letterH, 20, 20, 20);
+    } else if (entry.kind == "plaindisc") {
+      const float m = w * 0.04f;
+      const float ring = w * 0.085f;
+      overlay_fill_ellipse(img, w / 2.0f, h / 2.0f, w / 2.0f - m, h / 2.0f - m, 20, 20, 20);
+      overlay_fill_ellipse(img, w / 2.0f, h / 2.0f, w / 2.0f - m - ring, h / 2.0f - m - ring, 255, 255, 255);
+      const float letterH = (w - 2.0f * m) * kCompositeLetterFraction;
+      overlay_draw_mask(img, mask, w / 2.0f - letterH * maskAspect / 2.0f, h / 2.0f - letterH / 2.0f,
+                        letterH * maskAspect, letterH, 20, 20, 20);
+    } else if (entry.kind == "glyph") {
+      const float letterH = w * kCompositeLetterFraction;
+      overlay_draw_mask(img, mask, w / 2.0f - letterH * maskAspect / 2.0f, h / 2.0f - letterH / 2.0f,
+                        letterH * maskAspect, letterH, 20, 20, 20);
+    } else if (entry.kind == "face") {
+      const float size = 3.0f * button.fr * std::max(w, h);
+      overlay_draw_mask(img, mask, button.fx * w - size / 2.0f, button.fy * h - size / 2.0f, size, size, 46, 46, 46);
+    } else {
+      return std::nullopt;
+    }
+  }
+  return img;
 }
 
 // The texture with the overlay drawn over the effective picture: the full replacement when there
@@ -847,7 +1120,12 @@ gfx::TextureHandle load_composited_texture(const RuntimeTextureKey& key, const G
     }
   }
 
-  auto overlay = load_texture_file(overlayEntry.path);
+  // The overlay: drawn from the live bindings when the entry's buttons all resolve to a
+  // bound button with per-button art, else the shipped picture (the default bindings).
+  auto overlay = build_dynamic_overlay(overlayEntry, key.width, key.height);
+  if (!overlay.has_value()) {
+    overlay = load_texture_file(overlayEntry.path);
+  }
   if (!overlay.has_value() || overlay->format != wgpu::TextureFormat::RGBA8Unorm) {
     Log.warn("texture_replacement: failed to load composite overlay {}", fs_path_to_string(overlayEntry.path));
     if (entry == nullptr) {
@@ -920,6 +1198,13 @@ void shutdown() noexcept {
   s_replacementIndex.clear();
   for (auto& icons : s_buttonIconIndex) icons.clear();
   for (auto& overlays : s_compositeIndex) overlays.clear();
+  for (auto& masks : s_letterMasks) masks.clear();
+  for (auto& masks : s_faceMasks) masks.clear();
+  {
+    std::lock_guard lock(s_gamepadBindingsMutex);
+    for (auto& tokens : s_gamepadBindings) tokens = {};
+  }
+  s_gamepadBindingsChanged.store(false);
   s_replacementCache.clear();
   s_failedKeys.clear();
   s_reportedMisses.clear();
@@ -1079,6 +1364,39 @@ void set_button_icon_style(int style) noexcept {
   if (s_buttonIconForced >= 0) style = s_buttonIconForced;
   if (style < -1 || style >= kCommonIcons) style = -1;
   if (s_buttonIconStyle.exchange(style) != style) s_buttonIconStyleChanged.store(true);
+}
+
+// Fed by the runtime whenever it (re)builds its pad layouts and on the frame loop: the
+// primary input token of every action for one pad style, from the same binding tables the
+// Controls panel resolves at draw time. A change flags the cached composites stale; the
+// disk cache needs no clearing because its folder is named by the bindings themselves.
+void set_gamepad_bindings(int style, const std::array<std::string, 12>& primaryTokens) noexcept {
+  if (style < 0 || style >= kCommonIcons) {
+    return;
+  }
+  std::lock_guard lock(s_gamepadBindingsMutex);
+  if (s_gamepadBindings[style] == primaryTokens) {
+    return;
+  }
+  s_gamepadBindings[style] = primaryTokens;
+  s_gamepadBindingsChanged.store(true);
+}
+
+// Called on the renderer's thread like take_button_icon_style_change: drops the cached
+// composited textures, whose letters belong to the previous bindings.
+bool take_gamepad_bindings_change() noexcept {
+  if (!s_gamepadBindingsChanged.exchange(false)) return false;
+  for (const auto& overlays : s_compositeIndex) {
+    for (const auto& [key, _] : overlays) {
+      if (const auto it = s_replacementCache.find(key); it != s_replacementCache.end()) {
+        s_replacementLru.erase(it->second.lruIt);
+        s_replacementCacheBytes -= it->second.bytes;
+        s_replacementCache.erase(it);
+      }
+      s_failedKeys.erase(key);
+    }
+  }
+  return true;
 }
 
 // Called on the renderer's thread before textures are resolved: drops the cached icon textures of the old style.

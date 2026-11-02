@@ -184,6 +184,10 @@ bool aurora_flush_efb_copies_to_ram();
 bool aurora_flush_efb_copy_to_ram(void* dest);
 // Button prompt textures for the controller in use: 0 xbox, 1 playstation, 2 nintendo, -1 the game's own.
 void aurora_set_button_icon_style(int style);
+// The primary gamepad input token (SDL's positional names: a, b, x, y, rightshoulder, ...)
+// of each of the 12 gamepad actions for one pad style, from the runtime's live binding
+// tables: prompt letters are drawn from these, so they follow the player's own bindings.
+void aurora_set_gamepad_bindings(int style, const char* const* primaryTokens, int count);
 // The icon set in use (-1 = the game's own), and whether a texture from button_icons/<style>/marker<id> was drawn
 // in the last couple of frames.
 int aurora_button_icon_style();
