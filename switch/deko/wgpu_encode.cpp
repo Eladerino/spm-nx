@@ -206,9 +206,12 @@ void work_begin() {
 
 struct Stats {
     uint64_t submits = 0, passes = 0, draws = 0, skippedDraws = 0, dispatches = 0, copies = 0, writes = 0,
-             writeBytes = 0;
+             writeBytes = 0, biasedBinds = 0;
 };
 Stats g_stats;  // under queue_mutex()
+// Whether the last pipeline bind on this queue carried a depth bias: the zcull invalidate at
+// the bind fires on the rising edge into a run of biased binds only (wgpu_encode draw path).
+bool g_lastBiasOn = false;
 
 // CPU time of the queue's work since the last pacing line (any thread): the wait for queue_mutex,
 // our replay and flush, and Dawn's own submit after it
@@ -464,8 +467,23 @@ private:
             } else {
                 dkCmdBufBindDepthStencilState(R.cmd, &m_pipe->ds);
             }
-            if (m_pipe->rs.depthBiasEnableMask)
-                dkCmdBufSetDepthBias(R.cmd, m_pipe->depthBias[0], m_pipe->depthBias[1], m_pipe->depthBias[2]);
+            {
+                // Zcull's per-tile depth range comes from draws without the bias, so a
+                // depth-biased decal can lose whole tiles with zcull on: drop the zcull data
+                // on the rising edge into a run of biased binds (SwitchWakerHD's fix, their
+                // draw.cpp). The counter proves whether SPM ever binds a biased pipeline at
+                // all: no Aurora pipeline creator fills a depth bias today, so this may be
+                // inert insurance; the present summary prints the count (test build spec B1).
+                const bool biasOn = m_pipe->rs.depthBiasEnableMask != 0;
+                if (biasOn) {
+                    ++g_stats.biasedBinds;
+                    if (g_diag.zcull && !g_lastBiasOn)
+                        dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Zcull);
+                }
+                g_lastBiasOn = biasOn;
+                if (biasOn)
+                    dkCmdBufSetDepthBias(R.cmd, m_pipe->depthBias[0], m_pipe->depthBias[1], m_pipe->depthBias[2]);
+            }
             dkCmdBufBindVtxAttribState(R.cmd, m_pipe->attribs, m_pipe->attribCount);
             dkCmdBufBindVtxBufferState(R.cmd, m_pipe->buffers, m_pipe->bufferCount);
             if (!m_pipe->strip) dkCmdBufSetPrimitiveRestart(R.cmd, false, 0);
