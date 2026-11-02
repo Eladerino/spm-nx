@@ -3901,17 +3901,17 @@ struct DiagRow {
 };
 constexpr DiagRow kDiagRows[] = {
     {"depth_off", "Depth test off (depth_off)", "Rendering checks",
-     "Forces depth and stencil tests and depth writes off for every pipeline. Geometry can show through other geometry; for isolating depth problems."},
+     "Forces depth and stencil tests and depth writes off for every pipeline. Geometry can show through other geometry; for isolating depth problems. Takes effect at once."},
     {"cull_off", "Face culling off (cull_off)", nullptr,
-     "Forces back-face culling off for every pipeline, so faces that would normally be hidden are drawn. For checking geometry that vanishes."},
+     "Forces back-face culling off for every pipeline, so faces that would normally be hidden are drawn. For checking geometry that vanishes. Takes effect at once."},
     {"magenta", "Magenta behind the picture (magenta)", nullptr,
-     "Clears the screen magenta before the finished picture is copied over it. Magenta left visible marks pixels the copy did not cover."},
+     "Clears the screen magenta before the finished picture is copied over it. Magenta left visible marks pixels the copy did not cover. Takes effect at once."},
     {"efbclear", "Clear the EFB each pass (efbclear)", nullptr,
-     "Clears colour to magenta on EFB passes that have a depth target. If the result reaches the screen, those passes are reaching the picture."},
+     "Clears colour to magenta on EFB passes that have a depth target. If the result reaches the screen, those passes are reaching the picture. Takes effect at once."},
     {"nomerge", "No draw merging (nomerge)", nullptr,
-     "Stops Aurora from merging compatible draws into one. This can slow rendering, but isolates bugs caused by merging."},
+     "Stops Aurora from merging compatible draws into one. This can slow rendering, but isolates bugs caused by merging. Takes effect at once."},
     {"arrayup", "Re-upload vertex arrays (arrayup)", nullptr,
-     "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data."},
+     "Uploads every draw's vertex arrays again instead of trusting Aurora's cached copies. Slower; it tests for stale vertex data. Takes effect at once."},
     {"picdump", "Log frame brightness (picdump)", "Dumps and traces",
      "At a few presents, reads the picture back and logs sampled brightness, quadrant averages, and the centre pixel. It does not save an image."},
     {"bufdump", "Log staged buffers (bufdump)", nullptr,
@@ -4275,7 +4275,7 @@ std::vector<OptRow> OptionsRows(int tab) {
         rows.push_back({"V-Sync", OnOff(g_vsync.load()), [](int) { SetVSync(!g_vsync.load()); },
                         "No screen tearing. Turn off only if your screen has its own sync (G-Sync, FreeSync)."});
 #endif
-        rows.push_back({"FPS counter", OnOff(g_showFps), [](int) { SetShowFps(!g_showFps); }, "Frames per second in the corner."});
+        rows.push_back({"FPS counter", OnOff(g_showFps), [](int) { SetShowFps(!g_showFps); }, "Shows the frame rate in the corner of the screen. Applies at once."});
 #if defined(__SWITCH__)
         // Texture replacements lived on the Developer page until Nov 2026. It gates the button
         // icons and prompt pictures a player sees, so it belongs with the other picture rows;
@@ -4296,19 +4296,19 @@ std::vector<OptRow> OptionsRows(int tab) {
         rows.push_back({"Master volume", Percent(g_audioVolumePercent), [](int d) {
             StepVolume(g_audioVolumePercent, d, [](float v) { AudioBackend::Instance().SetMasterVolume(v); },
                        [](float v) { return RuntimeConfigFile::SetAudioVolume(v); });
-        }});
+        }, "The overall loudness of all sound. Applies at once."});
         rows.push_back({"Music", Percent(g_musicVolumePercent), [](int d) {
             StepVolume(g_musicVolumePercent, d, [](float v) { MusicAttenuation::SetMusicVolume(v); },
                        [](float v) { return RuntimeConfigFile::SetMusicVolume(v); });
-        }});
+        }, "How loud the music is. Applies at once."});
         rows.push_back({"Sound effects", Percent(g_soundEffectsVolumePercent), [](int d) {
             StepVolume(g_soundEffectsVolumePercent, d, [](float v) { MusicAttenuation::SetSoundEffectsVolume(v); },
                        [](float v) { return RuntimeConfigFile::SetSoundEffectsVolume(v); });
-        }});
+        }, "How loud sound effects are. Applies at once."});
         rows.push_back({"Voices", Percent(g_voicesVolumePercent), [](int d) {
             StepVolume(g_voicesVolumePercent, d, [](float v) { MusicAttenuation::SetVoicesVolume(v); },
                        [](float v) { return RuntimeConfigFile::SetVoicesVolume(v); });
-        }});
+        }, "How loud voices are. Applies at once."});
 #if defined(__SWITCH__)
         // UI volume lived on the Developer page until Nov 2026; it is a volume like the four
         // above (same backing value, same Config.toml key), so it belongs with them.
@@ -4322,11 +4322,16 @@ std::vector<OptRow> OptionsRows(int tab) {
             RuntimeConfigFile::SetUiVolume(value);
         }, "Controls the loudness of menu and interface sounds."});
 #endif
+#if defined(__SWITCH__)
+        const char* muteHelp = "Silences all sound at once. The volumes above keep their levels for when you turn it back off.";
+#else
+        const char* muteHelp = "The \\ key mutes and unmutes at any time.";
+#endif
         rows.push_back({"Mute", OnOff(g_audioMuted), [](int) {
             g_audioMuted = !g_audioMuted;
             AudioBackend::Instance().SetMuted(g_audioMuted);
             RuntimeConfigFile::SetAudioMuted(g_audioMuted);
-        }, "The \\ key mutes and unmutes at any time."});
+        }, muteHelp});
     } else if (tab == 4) {
 #if defined(__SWITCH__)
         rows.push_back(SectionHeading("Player"));
