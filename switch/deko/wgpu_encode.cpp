@@ -1386,11 +1386,20 @@ bool aurora_switch_dk_present(void* texture) {
     // buffer maps' waits for the GPU (wgpu_objects.cpp)
     static uint64_t s_lastPresentNs = 0, s_gapMaxNs = 0, s_gapSlow = 0, s_acquireNs = 0, s_acquireMaxNs = 0;
     static uint64_t s_windowStartNs = 0, s_windowDraws = 0;
+    static uint64_t s_hold1 = 0, s_hold2 = 0, s_hold3p = 0, s_lastBiasedBinds = 0;
     const uint64_t nowNs = now_ns();
     if (s_lastPresentNs) {
         const uint64_t gap = nowNs - s_lastPresentNs;
         s_gapMaxNs = std::max(s_gapMaxNs, gap);
         if (gap > 20'000'000) s_gapSlow++;  // a frame missed (60 Hz: 16.7 ms)
+        // Inferred vblank holds (test build spec C1): each present gap quantised to the
+        // nearest panel vblank. These are CPU-side present-to-present gaps stamped just after
+        // the present is queued, not scanout truth: the histogram shows the 1/2/3 quantisation
+        // and any systematic 3s in a clean-30 stretch, which is the pacing question being asked.
+        const uint64_t holds = (gap + 8'333'333) / 16'666'667;
+        if (holds <= 1) ++s_hold1;
+        else if (holds == 2) ++s_hold2;
+        else ++s_hold3p;
     }
     s_lastPresentNs = nowNs;
     s_acquireNs += acquireNs;
@@ -1410,11 +1419,15 @@ bool aurora_switch_dk_present(void* texture) {
         s_windowDraws = g_stats.draws;
         s_windowStartNs = nowNs;
         dklog("pacing, presents %llu-%llu: %llu over 20 ms (longest %.1f ms); acquire %.1f ms avg, %.1f max; "
-              "%llu map waits, %.1f ms total, %.1f max",
+              "%llu map waits, %.1f ms total, %.1f max; vblank holds 1/2/3+ %llu/%llu/%llu; %llu biased binds",
               (unsigned long long)(R.presents - 599), (unsigned long long)R.presents, (unsigned long long)s_gapSlow,
               double(s_gapMaxNs) / 1e6, double(s_acquireNs) / 600e6, double(s_acquireMaxNs) / 1e6,
-              (unsigned long long)mw.count, double(mw.totalNs) / 1e6, double(mw.maxNs) / 1e6);
+              (unsigned long long)mw.count, double(mw.totalNs) / 1e6, double(mw.maxNs) / 1e6,
+              (unsigned long long)s_hold1, (unsigned long long)s_hold2, (unsigned long long)s_hold3p,
+              (unsigned long long)(g_stats.biasedBinds - s_lastBiasedBinds));
+        s_lastBiasedBinds = g_stats.biasedBinds;
         s_gapMaxNs = s_gapSlow = s_acquireNs = s_acquireMaxNs = 0;
+        s_hold1 = s_hold2 = s_hold3p = 0;
     }
     if (R.presents == 1 || R.presents % 3600 == 0) {
         const MemoryStats m = memory_stats();
