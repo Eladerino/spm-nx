@@ -3398,7 +3398,19 @@ void DrawControlsPanel() {
     const std::vector<Callout> kLeft = {{2, "Move", sub(2, "Speak, interact")}};
     // Shake's base line names both shoulder buttons itself, so it skips sub()'s "also" append:
     // with it, the line double-named ZR and wrapped to a lone "ZR" crowding the next callout.
-    const std::vector<Callout> kRight = {{7, "Shake", std::string(kShakeButtons[style])}, {3, "Flip", sub(3, "")},
+    // On the Nintendo style the line is composed from the Shake action's live bindings, like
+    // the callout icons: at the defaults it comes out exactly the hand-written line.
+    std::string shakeText = kShakeButtons[style];
+    if (style == 2) {
+        const std::vector<std::string> shakeNames = GamepadBindingNames(style, 7); // the Shake action
+        if (!shakeNames.empty()) {
+            shakeText = "Shake the controller, or hold " + GamepadBindingLabel(shakeNames[0], style);
+            if (shakeNames.size() > 1 && shakeNames[1] != shakeNames[0])
+                shakeText += " or " + GamepadBindingLabel(shakeNames[1], style);
+            shakeText += ": stylish moves, break free";
+        }
+    }
+    const std::vector<Callout> kRight = {{7, "Shake", shakeText}, {3, "Flip", sub(3, "")},
                                          {5, "Use a Pixl", sub(5, "Cancel")}, {4, "Jump", sub(4, "Confirm")},
                                          {6, "Use Tippi", sub(6, "")}};
     const auto callouts = [&](const Callout* items, size_t count, bool right) {
@@ -3540,8 +3552,10 @@ void PatchBootStrings() {
 // and the rest of the span is padded with spaces, never NULs: a message's text runs on into the
 // file image behind it, so an early NUL could end the string for the game's parser, where
 // trailing spaces are inert. The <icon PAD> pictogram goes with the wording: on the Switch there
-// is no remote to shake or point, the controller is shaken (or R/ZR held, which the pad layer
-// turns into the same shake), and the pointer is aimed with the right stick. US lines only;
+// is no remote to shake or point, the controller is shaken (or the Shake action's buttons held,
+// R/ZR at the defaults, which the pad layer turns into the same shake; the shake lines below
+// compose their wording from the live bindings, so a rebinding is named correctly), and the
+// pointer is aimed with the right stick. US lines only;
 // other languages keep the original wording (their button pictograms are still swapped by the
 // texture sets). PatchBootStrings claims the boot screen's own "Hold the Wii Remote sideways."
 // first (it runs earlier in Draw), so the copy in this table is the message file's, the one the
@@ -3556,10 +3570,19 @@ void PatchMessageStrings() {
         const char* from;
         const char* to;
         bool seen = false;
+        // Shake lines only: the replacement is composed around the Shake action's live
+        // binding labels (prefix + labels + suffix), so the wording names the buttons the
+        // action currently answers to, the way the Controls panel resolves them. `to`
+        // stays the default-bindings text, used when no pad style is applied, the labels
+        // come out empty, or the composed line would outgrow the line it replaces.
+        const char* prefix = nullptr;
+        const char* suffix = nullptr;
     };
     static Line kLines[] = {
-        {"Shake <icon PAD 0.65 1 1 8> up and down!", "Shake the controller, or hold R/ZR!"},
-        {"Shake <icon PAD 0.65 1 1 8> with good timing!", "Shake, or hold R/ZR, with good timing!"},
+        {"Shake <icon PAD 0.65 1 1 8> up and down!", "Shake the controller, or hold R/ZR!", false,
+         "Shake the controller, or hold ", "!"},
+        {"Shake <icon PAD 0.65 1 1 8> with good timing!", "Shake, or hold R/ZR, with good timing!", false,
+         "Shake, or hold ", ", with good timing!"},
         {"Tilt <icon PAD 0.65 1 1 8> as shown!", "Tilt the controller as shown!"},
         {"Point the <icon PAD 0.65 1 1 8> at the screen!", "Aim with the right stick!"},
         // The star and shell action commands ("Aim with your cursor and fire / at <icon>!"):
@@ -3568,12 +3591,36 @@ void PatchMessageStrings() {
         // letter; the texture sets swap that icon to the Flip button's disc. First line
         // only, so the line break and the target icon keep their own bytes.
         {"Aim with your cursor and fire", "Press <icon PAD_A 0.6 0 0 2>"},
-        {"Shake <icon PAD 0.65 1 1 15> to wake up!", "Shake it, or hold R/ZR, to wake up!"},
-        {"Shake <icon PAD 0.65 1 1 15> to recover!", "Shake it, or hold R/ZR, to recover!"},
-        {"Shake <icon PAD 0.65 1 1 15> quickly to escape!", "Shake it fast, or hold R/ZR, to escape!"},
+        {"Shake <icon PAD 0.65 1 1 15> to wake up!", "Shake it, or hold R/ZR, to wake up!", false,
+         "Shake it, or hold ", ", to wake up!"},
+        {"Shake <icon PAD 0.65 1 1 15> to recover!", "Shake it, or hold R/ZR, to recover!", false,
+         "Shake it, or hold ", ", to recover!"},
+        {"Shake <icon PAD 0.65 1 1 15> quickly to escape!", "Shake it fast, or hold R/ZR, to escape!", false,
+         "Shake it fast, or hold ", ", to escape!"},
         {"Hold the Wii Remote sideways.", "Hold the controller sideways."},
         {"Simply point your Wii Remote", "Simply point your controller"},
     };
+    // The Shake action's binding labels for the pad in use, "/" joined like the default
+    // "R/ZR": the first two distinct bindings. Empty when no gamepad style is applied.
+    const auto shakeLabels = []() -> std::string {
+        const int style = aurora_button_icon_style();
+        if (style < 0 || style >= 3) return "";
+        const std::vector<std::string> names = GamepadBindingNames(style, 7); // the Shake action
+        std::vector<std::string> distinct;
+        for (const std::string& name : names) {
+            const std::string label = GamepadBindingLabel(name, style);
+            if (!label.empty() && std::find(distinct.begin(), distinct.end(), label) == distinct.end())
+                distinct.push_back(label);
+            if (distinct.size() >= 2) break;
+        }
+        std::string labels;
+        for (const std::string& label : distinct) {
+            if (!labels.empty()) labels += "/";
+            labels += label;
+        }
+        return labels;
+    };
+    const std::string shakeLabelText = shakeLabels();
     static int lastSeq = -2;  // not a real sequence: the first Draw() call passes
     static int passes = 0;
     static bool allSeen = false;
@@ -3602,7 +3649,15 @@ void PatchMessageStrings() {
         for (Line& line : kLines) {
             const auto* from = reinterpret_cast<const uint8_t*>(line.from);  // bytes, as in PatchBootStrings
             const size_t len = std::strlen(line.from);
-            const size_t toLen = std::strlen(line.to);
+            // The text written: composed around the live Shake labels for a shake line
+            // when that fits the line it replaces, the table's own text otherwise.
+            std::string composed;
+            const char* to = line.to;
+            if (line.prefix != nullptr && !shakeLabelText.empty()) {
+                composed = std::string(line.prefix) + shakeLabelText + line.suffix;
+                if (composed.size() <= len) to = composed.c_str();
+            }
+            const size_t toLen = std::strlen(to);
             if (toLen > len) continue;  // the table is length-checked by hand; never write long
             for (uint8_t* p = mem; (p = std::search(p, mem + range.size, from, from + len)) != mem + range.size; p += len) {
                 if (p + len >= mem + range.size) break;
@@ -3610,7 +3665,7 @@ void PatchMessageStrings() {
                 // line's end (a newline, the next tag, or the NUL of a dol-resident copy).
                 const uint8_t next = p[len];
                 if (next != '\n' && next != '\r' && next != '\0' && next != '<') continue;
-                std::copy(line.to, line.to + toLen, p);
+                std::copy(to, to + toLen, p);
                 std::fill(p + toLen, p + len, uint8_t{' '});
                 line.seen = true;
                 ++patched;

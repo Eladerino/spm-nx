@@ -487,7 +487,38 @@ Intent GamepadIntent() {
     }
     SDL_free(ids);
     if (firstStyle < 0) s_lastPressedStyle = -1;
-    aurora_set_button_icon_style(s_lastPressedStyle >= 0 ? s_lastPressedStyle : firstStyle);
+    const int appliedStyle = s_lastPressedStyle >= 0 ? s_lastPressedStyle : firstStyle;
+    // The prompt letters follow the same bindings the prompts' actions answer to: feed the
+    // texture compositor the primary input of every action for the style in use, taken from
+    // the layouts this read is built from (themselves parsed from the Config.toml [gamepad]
+    // values the Controls panel resolves at draw time, so the two can never disagree).
+    // SDL's own string tables name the inputs, in the grammar the config stores.
+    if (appliedStyle >= 0) {
+        const PadLayout& layout = (*layouts)[appliedStyle];
+        std::array<std::string, Keybinds::kActionCount> owned;
+        std::array<const char*, Keybinds::kActionCount> names{};
+        for (int action = 0; action < Keybinds::kActionCount; ++action) {
+            if (layout[action].empty()) {
+                continue;
+            }
+            const PadInput& input = layout[action].front();
+            if (input.axis) {
+                const char* base = SDL_GetGamepadStringForAxis(static_cast<SDL_GamepadAxis>(input.id));
+                if (base == nullptr) {
+                    continue;
+                }
+                owned[action] = base;
+                if (input.sign != 0) {
+                    owned[action] += input.sign < 0 ? '-' : '+';
+                }
+                names[action] = owned[action].c_str();
+            } else {
+                names[action] = SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(input.id));
+            }
+        }
+        aurora_set_gamepad_bindings(appliedStyle, names.data(), static_cast<int>(names.size()));
+    }
+    aurora_set_button_icon_style(appliedStyle);
     return intent;
 }
 
