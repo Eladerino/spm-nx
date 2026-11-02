@@ -196,7 +196,11 @@ std::vector<PadInput> ParsePadInputs(const std::string& text) {
             input.sign = name.back() == '+' ? 1 : -1;
             name.pop_back();
         }
-        if (const SDL_GamepadAxis axis = SDL_GetGamepadAxisFromString(name.c_str()); axis != SDL_GAMEPAD_AXIS_INVALID) {
+        if (name == kPadUnboundValue) {
+            // "none": the stored word for an action the player cleared on
+            // purpose (virtual_remote.h). Not an input; skip it quietly
+            // rather than logging it as an unknown name below.
+        } else if (const SDL_GamepadAxis axis = SDL_GetGamepadAxisFromString(name.c_str()); axis != SDL_GAMEPAD_AXIS_INVALID) {
             input.axis = true;
             input.id = axis;
             inputs.push_back(input);
@@ -345,7 +349,10 @@ std::array<PadLayout, kPadStyleCount> BuildPadLayouts() {
         for (int action = 0; action < Keybinds::kActionCount; ++action) {
             const std::string custom =
                 RuntimeConfigFile::GamepadBinding(std::string(kPadStyleNames[style]) + "_" + kPadActionKeys[action]);
-            result[style][action] = ParsePadInputs(custom.empty() ? kPadDefaults[action][style] : custom);
+            // A stored "none" is a deliberate unbind, not an absent key: it
+            // parses to no inputs instead of falling back to the defaults.
+            result[style][action] = ParsePadInputs(
+                custom == kPadUnboundValue ? "" : (custom.empty() ? kPadDefaults[action][style] : custom));
         }
     }
     return result;

@@ -241,8 +241,12 @@ inline Result MigrateGamepadLines(std::vector<std::string>& lines,
         return result;
     }
 
-    // "Unbound" can be written "" or as a lone ","; both parse to no inputs.
+    // "Unbound" can be written "", as a lone ",", or as "none" (the word the
+    // current build stores for a deliberate clear); all parse to no inputs.
     const auto isUnbound = [](const std::string& value) {
+        if (value == "none") {
+            return true;
+        }
         for (const char ch : value) {
             if (ch != ',' && ch != ' ' && ch != '\t') {
                 return false;

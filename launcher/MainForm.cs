@@ -725,8 +725,10 @@ sealed class MainForm : Form
         return style switch { 1 => input.ps, 2 => input.nintendo, _ => input.xbox };
     }
 
+    // "none" is the stored word for an action the player cleared (the Switch menu's
+    // unbind); it is not an input, so it contributes no label.
     static string PadLabels(int style, string tokens) =>
-        string.Join(" / ", tokens.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(t => PadLabel(style, t)));
+        string.Join(" / ", tokens.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Where(t => t != "none").Select(t => PadLabel(style, t)));
 
     Control BuildControlsPage()
     {
