@@ -58,6 +58,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"cpthread", &Diag::cpThread},
     {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},
     {"poselog", &Diag::poseLog},
+    {"dkcmd", &Diag::dkCmd},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -220,6 +221,14 @@ void diag_flush_all(const char* reason) {
 // nothing. The channel exists so a test run can be driven, and its log flushed, without
 // rebooting to edit dk_diag.txt or waiting out a buffer.
 void diag_cmd_poll() {
+    // Armed only for test and scripted runs (spec A2): the poll is an SD file open every 30
+    // presents forever, and normal play has no commands to receive. dkcmd=1 is the explicit arm;
+    // a session switch (a dump, the timers, the profiler, a trace) also counts, because a run
+    // driving one of those is a test run. The default-on switches (cpthread, gxthread) do not
+    // count: they are defaults, not an arming signal.
+    if (!g_diag.dkCmd && !g_diag.picDump && !g_diag.bufDump && !g_diag.texDump && !g_diag.shaderDump &&
+        !g_diag.perfTimer && !g_diag.profile && !g_diag.mtxLog && !g_diag.uvLog)
+        return;
     FILE* f = std::fopen("/switch/spm-nx/UserData/dk_cmd.txt", "r");
     if (!f) return;
     char cmd[256];
