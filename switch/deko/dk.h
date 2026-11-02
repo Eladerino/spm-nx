@@ -173,7 +173,7 @@ bool env_flag(const char* name, bool def);
 // Runtime diagnostics for the renderer. Each switch disables or exposes one piece of the replay
 // so a single boot can clear a whole suspect, or read state back (the picture, the most-sampled
 // textures) for inspection. No file = every switch at its default below, which is off for all
-// but cpthread (a "cpthread=0" line turns that one off too) = normal build. The fields are atomic:
+// but cpthread and gxthread (a "cpthread=0" or "gxthread=0" line turns those off too) = normal build. The fields are atomic:
 // diag_set below flips them at runtime (the settings menu and the dk_cmd.txt channel are the
 // callers), so a switch takes effect from its next use without a reboot.
 struct Diag {
@@ -195,7 +195,7 @@ struct Diag {
     std::atomic<bool> cpThread = true;   // Aurora decodes GX commands on a thread of its own on core 1, from the end of the frame it is set in (lib/gx/fifo.cpp); on unless dk_diag.txt says cpthread=0
     std::atomic<bool> gxWorker = false;  // the runtime records guest GX calls and replays each one at once (gx_worker.h, Immediate), from the next frame
     std::atomic<bool> gxDefer = false;   // as gxworker, but the records wait for the next sync point (Deferred); implies gxworker
-    std::atomic<bool> gxThread = false;  // as gxdefer, but the records replay on a worker thread on core 2 (Threaded); implies both
+    std::atomic<bool> gxThread = true;   // as gxdefer, but the records replay on a worker thread on core 2 (Threaded); implies both. On by default: mode 3 soaked clean in Prepare run 2 (0 replay errors, 0 skipped draws); a "gxthread=0" line in dk_diag.txt still wins and drops back to mode 0
 };
 extern Diag g_diag;
 void diag_init();
