@@ -1,7 +1,9 @@
 #pragma once
 
 #include "texture.hpp"
+#include <array>
 #include <optional>
+#include <string>
 
 namespace aurora::gfx::texture_replacement {
 void initialize() noexcept;
@@ -20,4 +22,10 @@ std::string build_texture_replacement_name(const GXTexObj_& obj) noexcept;
 void set_button_icon_style(int style) noexcept;
 bool take_button_icon_style_change() noexcept;
 int button_icon_style() noexcept;
+// New Super Paper Bros.: the primary gamepad input token of every action (Keybinds order)
+// for one pad style, from the runtime's live binding tables: the compositor draws prompt
+// letters from these, so a prompt shows the button the action is currently bound to.
+// Returns true once after they changed, so cached composites can be re-resolved.
+void set_gamepad_bindings(int style, const std::array<std::string, 12>& primaryTokens) noexcept;
+bool take_gamepad_bindings_change() noexcept;
 } // namespace aurora::gfx::texture_replacement

@@ -1348,6 +1348,7 @@ std::atomic<u32> g_spmMarkerFrames[8];
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {
   ZoneScoped;
   if (gfx::texture_replacement::take_button_icon_style_change()) invalidate_static_texture_cache();
+  if (gfx::texture_replacement::take_gamepad_bindings_change()) invalidate_static_texture_cache();
   struct MarkerCheck {
     const ShaderInfo& info;
     ~MarkerCheck() {

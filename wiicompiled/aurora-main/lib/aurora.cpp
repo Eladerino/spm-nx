@@ -2291,6 +2291,15 @@ void aurora_set_button_icon_style(int style) {
   aurora::gfx::texture_replacement::set_button_icon_style(style);
 #endif
 }
+void aurora_set_gamepad_bindings(int style, const char* const* primaryTokens, int count) {
+#ifdef AURORA_ENABLE_GX
+  std::array<std::string, 12> tokens{};
+  for (int i = 0; i < count && i < static_cast<int>(tokens.size()); ++i) {
+    if (primaryTokens[i] != nullptr) tokens[i] = primaryTokens[i];
+  }
+  aurora::gfx::texture_replacement::set_gamepad_bindings(style, tokens);
+#endif
+}
 int aurora_button_icon_style() {
 #ifdef AURORA_ENABLE_GX
   return aurora::gfx::texture_replacement::button_icon_style();
