@@ -35,12 +35,22 @@ function(mkw_apply_common_compile_options target)
     target_compile_options(${target} PRIVATE -O3 -ffast-math -w -pipe)
 endfunction()
 
+option(SPM_HOTCOLD "Translated shards: split hot/cold blocks within each function (-mllvm -hot-cold-split=true)" OFF)
+
 function(mkw_apply_translated_compile_options target)
     # -ffunction-sections: one .text.func_<guest address> section per translated function, so a
     # later hot-ordering step can lay the hot ones out from a linker ordering file (test build
     # spec A4/D3). No direct gain; --gc-sections at link is unchanged.
-    target_compile_options(${target} PRIVATE
+    set(_spm_translated_opts
         -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe -ffunction-sections)
+    # Hot/cold splitting (spec D1): upstream patchzyy/Wiicompiled carries this token group
+    # unconditionally on this very line; the NSPB line dropped it. Intra-function block
+    # reordering, a different mechanism from hot ordering and from profile-driven machine
+    # function splitting; unmeasured for SPM, so a variant, not a default.
+    if(SPM_HOTCOLD)
+        list(APPEND _spm_translated_opts -mllvm -hot-cold-split=true)
+    endif()
+    target_compile_options(${target} PRIVATE ${_spm_translated_opts})
 endfunction()
 
 function(mkw_configure_object_target target)
