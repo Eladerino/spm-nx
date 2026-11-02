@@ -36,13 +36,24 @@ function(mkw_apply_common_compile_options target)
 endfunction()
 
 option(SPM_HOTCOLD "Translated shards: split hot/cold blocks within each function (-mllvm -hot-cold-split=true)" OFF)
+option(SPM_O3_SHARDS "Translated shards: -O3 instead of -O2 (FP options unchanged)" OFF)
 
 function(mkw_apply_translated_compile_options target)
     # -ffunction-sections: one .text.func_<guest address> section per translated function, so a
     # later hot-ordering step can lay the hot ones out from a linker ordering file (test build
     # spec A4/D3). No direct gain; --gc-sections at link is unchanged.
+    # -O3 shards (spec D2): one variable only. The FP set on this line (-fno-fast-math
+    # -ffp-contract=off via MKW_TRANSLATED_PPC_FP_OPTIONS, -fno-slp-vectorize) does not move:
+    # -O3 without fast-math is the only acceptable form, and it is what KartPadNX's FullApp
+    # ships for the same shards. KartPad's extra -fno-strict-aliasing and lean flags are
+    # deliberately not imported, so the A/B has one variable. mkdd-nx and libdol-nx keep
+    # generated code at -O2 on purpose: this is a genuine A/B, not an expected win.
+    set(_spm_opt_level -O2)
+    if(SPM_O3_SHARDS)
+        set(_spm_opt_level -O3)
+    endif()
     set(_spm_translated_opts
-        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe -ffunction-sections)
+        ${_spm_opt_level} ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe -ffunction-sections)
     # Hot/cold splitting (spec D1): upstream patchzyy/Wiicompiled carries this token group
     # unconditionally on this very line; the NSPB line dropped it. Intra-function block
     # reordering, a different mechanism from hot ordering and from profile-driven machine
