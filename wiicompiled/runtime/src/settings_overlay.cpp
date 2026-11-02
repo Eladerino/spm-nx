@@ -3938,6 +3938,8 @@ constexpr DiagRow kDiagRows[] = {
      "As GX call records, but the records wait until the game next needs GX state back (a getter, a wait, the end of the frame). Turns records on by itself. Turn it off if anything draws wrong."},
     {"gxthread", "GX worker thread (gxthread)", nullptr,
      "As deferred GX records, but the records replay on a thread of their own on core 2 while the game thread runs on; anything that needs GX state back waits for it. Turns records on by itself. Experimental; turn it off if anything draws wrong or the game stalls."},
+    {"dkcmd", "Command channel (dkcmd)", "Command channel",
+     "Arms the dk_cmd.txt command channel: while on, the game checks UserData/dk_cmd.txt twice a second and runs the command it finds there (flush, mark, or set a switch), so a test run can be driven without editing dk_diag.txt and rebooting. Takes effect at once; the channel is live while any dump, timer, profiler or trace is on anyway. For scripted test runs; leave off for normal play."},
 };
 constexpr int kDiagCount = int(std::size(kDiagRows));
 
