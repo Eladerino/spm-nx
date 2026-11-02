@@ -173,7 +173,7 @@ bool env_flag(const char* name, bool def);
 // Runtime diagnostics for the renderer. Each switch disables or exposes one piece of the replay
 // so a single boot can clear a whole suspect, or read state back (the picture, the most-sampled
 // textures) for inspection. No file = every switch at its default below, which is off for all
-// but cpthread and gxthread (a "cpthread=0" or "gxthread=0" line turns those off too) = normal build. The fields are atomic:
+// but cpthread, gxthread and zcull (a "cpthread=0", "gxthread=0" or "zcull=0" line turns those off too) = normal build. The fields are atomic:
 // diag_set below flips them at runtime (the settings menu and the dk_cmd.txt channel are the
 // callers), so a switch takes effect from its next use without a reboot.
 struct Diag {
