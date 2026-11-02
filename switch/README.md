@@ -160,19 +160,26 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   table is reset. Clicking a stick while binding cancels. Changes apply immediately,
   no restart. The PC build's separate Controller rows for players 2 to 4 are not shown
   on Switch: this game is single-player, and player 1 is this list.
+- **Display** holds Resolution, Aspect ratio, the FPS counter and Texture replacements
+  (the master switch for the replacement button icons and prompt pictures; takes effect
+  after a restart). **Sound** holds the Master, Music, Sound effects, Voices and UI
+  volumes, and Mute.
 - **Developer** and **Diagnostics** are this port's own two pages, added after upstream's
   six (they replaced a separate Developer shell, which has been retired). Developer holds
-  Bloom, Disable copy filter, Skip draws while shaders compile, Texture replacements (the
-  master switch for the replacement button icons and prompt pictures; takes effect after a
-  restart), Frame graph, UI volume, the Audio mix worker toggle, Spinning coins, a Texture
-  dumps switch (writes every unmatched texture to `Cache/texture_dumps` under the name a
-  replacement would use, for making new replacement pictures; takes effect after a restart),
+  Bloom, Disable copy filter, Skip draws while shaders compile, Frame graph, the Audio
+  mix worker toggle, Spinning coins, a Texture dumps switch (writes every unmatched
+  texture to `Cache/texture_dumps` under the name a replacement would use, for making
+  new replacement pictures; takes effect after a restart),
   and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
-  recovery step for a cache that has gone wrong). Diagnostics holds nineteen of the
-  renderer's diagnostic switches (each flip also writes all of them back to
-  `UserData/dk_diag.txt`, the file the same switches are read from at boot) and Flush logs
-  and Mark log rows for test runs. Three more switches (dkcmd, zcull, guestcore) are
-  boot-time only, set in dk_diag.txt itself, so the file knows twenty-two keys in all.
+  recovery step for a cache that has gone wrong). Diagnostics holds twenty of the
+  renderer's diagnostic switches, grouped under the same headings dk_diag.txt uses
+  (each flip also writes all of them back to
+  `UserData/dk_diag.txt`, the file the same switches are read from at boot), and Flush logs
+  and Mark log rows for test runs. Two more switches are boot-time only and have no row:
+  zcull, which is read once when the render queue is created (change it by editing the
+  `zcull` line in dk_diag.txt), and guestcore, which the thread starter reads from the
+  file before the diag system exists (edit the `guestcore` line). The file knows
+  twenty-two keys in all.
   All of the page's switches start off except the GX decode thread (cpthread, on core 1)
   and the GX worker thread (gxthread), which are on unless turned off there; zcull also
   starts on. Three of them are the
