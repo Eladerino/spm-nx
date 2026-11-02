@@ -63,6 +63,10 @@ static int guestcore_enabled(void)
             if ((size_t)(p - key) != 9 || strncmp(key, "guestcore", 9) != 0)
                 continue;
             while (*p == ' ' || *p == '\t') p++;
+            if (*p == '\0' || *p == '\n' || *p == '\r') { // a bare key means on, as in device.cpp
+                on = 1;
+                continue;
+            }
             if (*p != '=')
                 continue;
             p++;
