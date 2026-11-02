@@ -3858,6 +3858,18 @@ struct OptRow {
     bool heading = false;
 };
 
+// A section heading row, for OptionsRows builders: the draw renders it as a
+// title and navigation skips it (see OptRow::heading). Pages whose row lists
+// are shared with the PC build add these under __SWITCH__ only, so the PC
+// pages keep their exact upstream shape.
+OptRow SectionHeading(const char* label) {
+    OptRow row;
+    row.label = label;
+    row.heading = true;
+    row.step = [](int) {};
+    return row;
+}
+
 std::string OnOff(bool on) { return on ? "On" : "Off"; }
 std::string Percent(int v) { return std::to_string(v) + "%"; }
 int Cycle(int v, int dir, int count) { return ((v + dir) % count + count) % count; }
@@ -4451,24 +4463,33 @@ std::vector<OptRow> OptionsRows(int tab) {
         // The deko renderer's diagnostic switches, then the log actions.
         // Flipping one writes the set back to dk_diag.txt, updating the known keys' lines in
         // place and leaving the rest of the file (comments, unknown keys) as the player left it.
+        // The switches render under the headings kDiagRows carries (the same headings the
+        // generated dk_diag.txt template groups them under); the builder used to ignore
+        // row.group and show all nineteen rows as one flat list.
+        static constexpr const char* kGxModes[] = {"Off", "Records", "Deferred", "Threaded"};
+        bool gxLadderShown = false;
         for (int n = 0; n < kDiagCount; ++n) {
             const DiagRow& row = kDiagRows[n];
-            // The three GX keys are not rows of their own: they are one ladder (see the
-            // "GX worker mode" row below), and three toggles for one ladder lied twice over,
+            // The three GX keys are not rows of their own: they are one ladder (the
+            // "GX worker mode" row, emitted where the first of them sits in the table, under
+            // the Threads heading), and three toggles for one ladder lied twice over,
             // no-op flips under a stronger rung and a file state that read as broken.
             if (std::strcmp(row.key, "gxworker") == 0 || std::strcmp(row.key, "gxdefer") == 0 ||
-                std::strcmp(row.key, "gxthread") == 0)
+                std::strcmp(row.key, "gxthread") == 0) {
+                if (!gxLadderShown) {
+                    gxLadderShown = true;
+                    const int gxMode = GxWorkerMode();
+                    rows.push_back({"GX worker mode", kGxModes[gxMode], [gxMode](int d) {
+                        SetGxWorkerMode(Cycle(gxMode, d == 0 ? 1 : d, 4));
+                    }, "How the game's GX calls reach the renderer. Off: calls run on the game thread as they are made. Records: calls are recorded and replayed straight away; the picture should look exactly the same. Deferred: records wait until the game next needs GX state back (a getter, a wait, the end of the frame). Threaded: records replay on a thread of their own on core 2 while the game thread runs on; experimental. Applies from the next frame. Turn it down a rung if anything draws wrong or the game stalls."});
+                }
                 continue;
+            }
+            if (row.group != nullptr) rows.push_back(SectionHeading(row.group));
             const bool on = swdk::diag_get(row.key);
             rows.push_back({row.label, OnOff(on), [n, on](int) { SetDiagKey(n, !on); }, row.help});
         }
-        {
-            static constexpr const char* kGxModes[] = {"Off", "Records", "Deferred", "Threaded"};
-            const int gxMode = GxWorkerMode();
-            rows.push_back({"GX worker mode", kGxModes[gxMode], [gxMode](int d) {
-                SetGxWorkerMode(Cycle(gxMode, d == 0 ? 1 : d, 4));
-            }, "How the game's GX calls reach the renderer. Off: calls run on the game thread as they are made. Records: calls are recorded and replayed straight away; the picture should look exactly the same. Deferred: records wait until the game next needs GX state back (a getter, a wait, the end of the frame). Threaded: records replay on a thread of their own on core 2 while the game thread runs on; experimental. Applies from the next frame. Turn it down a rung if anything draws wrong or the game stalls."});
-        }
+        rows.push_back(SectionHeading("Log actions"));
         rows.push_back({"Flush logs", "", [](int d) {
             if (d == 0) swdk::diag_flush_all("menu");
         }, "Writes buffered diagnostic output to stderr.log now. If performance timers are on, it also prints their partial 600-frame window."});
