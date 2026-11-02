@@ -196,6 +196,7 @@ struct Diag {
     std::atomic<bool> gxWorker = false;  // the runtime records guest GX calls and replays each one at once (gx_worker.h, Immediate), from the next frame
     std::atomic<bool> gxDefer = false;   // as gxworker, but the records wait for the next sync point (Deferred); implies gxworker
     std::atomic<bool> gxThread = true;   // as gxdefer, but the records replay on a worker thread on core 2 (Threaded); implies both. On by default: mode 3 soaked clean in Prepare run 2 (0 replay errors, 0 skipped draws); a "gxthread=0" line in dk_diag.txt still wins and drops back to mode 0
+    std::atomic<bool> dkCmd = false;     // arms the dk_cmd.txt command channel: while off, the present path never opens the file (test build spec A2). Scripted runs set dkcmd=1
 };
 extern Diag g_diag;
 void diag_init();
