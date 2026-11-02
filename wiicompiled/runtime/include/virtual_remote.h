@@ -60,6 +60,12 @@ const char* PadActionKey(int action);
 // The built-in default binding string for one style and action: what the
 // parser uses while the config key is absent.
 const char* PadDefaultBinding(int style, int action);
+// The stored [gamepad] value that says "deliberately unbound": an action the
+// player cleared on purpose. GamepadBinding() returns "" for an absent key,
+// and an absent key means "use the defaults", so a cleared action needs a
+// word of its own; "none" is not an SDL gamepad name, so it can never be
+// mistaken for an input. Every reader of the table honours it.
+inline constexpr const char* kPadUnboundValue = "none";
 
 // Save states (save_state.h).
 void SaveState(::SaveState::Writer& out);
