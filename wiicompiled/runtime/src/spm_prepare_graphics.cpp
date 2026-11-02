@@ -69,6 +69,7 @@ Phase g_phase = Phase::Idle;
 std::vector<const Room*> g_list;
 size_t g_index = 0;
 size_t g_doneThisRun = 0;
+size_t g_missedThisRun = 0;
 int g_skipsInARow = 0;
 bool g_sawChange = false;
 bool g_flipTried = false;  // this room's flip press has been sent (or found needless)
@@ -107,6 +108,19 @@ size_t ReadIndex() {
 }
 void WriteIndex(size_t i) { Touch(Dir() / "state.txt", std::to_string(i)); }
 
+fs::path MissedPath() { return Dir() / "missed.txt"; }
+
+// A room the game redirected the warp away from was never swept, whatever the count of
+// visited rooms says. Its name goes to missed.txt; BeginRun appends those rooms to the
+// next run's list, so a redirect costs a later visit, not silent lost coverage.
+void RecordMissed(const char* map) {
+    std::error_code ec;
+    fs::create_directories(Dir(), ec);
+    std::ofstream out(MissedPath(), std::ios::app);
+    if (out) out << map << "\n";
+    ++g_missedThisRun;
+}
+
 double Seconds(Clock::time_point since) { return std::chrono::duration<double>(Clock::now() - since).count(); }
 
 std::vector<const Room*> BuildList() {
@@ -141,10 +155,34 @@ void SetMessage(const std::string& text) {
 struct TreeEntry {
     std::string rel;  // path below the tree's root, generic separators
     std::uintmax_t size = 0;
-    bool operator==(const TreeEntry& o) const { return rel == o.rel && size == o.size; }
+    std::string hash;  // content hash (HashFile), empty when the listing did not take one
+    bool operator==(const TreeEntry& o) const { return rel == o.rel && size == o.size && hash == o.hash; }
 };
 
-bool ListTree(const fs::path& root, std::vector<TreeEntry>& out) {
+// FNV-1a (64-bit) over the file's bytes, as 16 hex digits. This is an integrity check for
+// the diverged-save guard, not cryptography: it only has to notice that a file's contents
+// changed, which a size cannot do for this game's fixed-size save records. Empty when the
+// file cannot be read.
+std::string HashFile(const fs::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in) return {};
+    std::uint64_t h = 1469598103934665603ull;
+    char buf[8192];
+    while (in) {
+        in.read(buf, sizeof buf);
+        const std::streamsize got = in.gcount();
+        for (std::streamsize i = 0; i < got; ++i) {
+            h ^= static_cast<unsigned char>(buf[i]);
+            h *= 1099511628211ull;
+        }
+    }
+    if (in.bad()) return {};
+    char out[17] = {};
+    std::snprintf(out, sizeof out, "%016llx", static_cast<unsigned long long>(h));
+    return out;
+}
+
+bool ListTree(const fs::path& root, std::vector<TreeEntry>& out, bool hash = false) {
     out.clear();
     std::error_code ec;
     if (!Exists(root)) return true;  // no tree: an empty listing, not an error
@@ -166,6 +204,13 @@ bool ListTree(const fs::path& root, std::vector<TreeEntry>& out) {
         if (tec || e.rel.empty()) {
             RT_LOGF(RT_TAG_RUNTIME, "[prepare] could not read %s\n", it->path().string().c_str());
             return false;
+        }
+        if (hash) {
+            e.hash = HashFile(it->path());
+            if (e.hash.empty()) {
+                RT_LOGF(RT_TAG_RUNTIME, "[prepare] could not hash %s\n", it->path().string().c_str());
+                return false;
+            }
         }
         out.push_back(e);
     }
@@ -277,15 +322,21 @@ void RemoveTreeLogged(const fs::path& root, const char* what) {
 
 fs::path ManifestPath() { return Dir() / "manifest.txt"; }
 
-// The manifest is the backup's file list (path and size of every file, relative to the title
-// folder), kept next to the backup. It is what lets a later start tell the sweep's own save
-// apart from a save the player has played on since the sweep.
+// The manifest is the backup's file list (path, size and content hash of every file,
+// relative to the title folder), kept next to the backup. It is what lets a later start
+// tell the sweep's own save apart from a save the player has played on since the sweep.
+// The hash matters because the game's save files are fixed-size records: playing on
+// changes contents without changing any size, so a size-only list cannot see it.
+// Manifests written before hashes existed have no third field; they still parse, with an
+// empty hash per entry, and the boot restore treats them as unverifiable (see RestoreSave).
 bool WriteManifest(const std::vector<TreeEntry>& entries) {
     std::string text;
     for (const TreeEntry& e : entries) {
         text += e.rel;
         text += '\t';
         text += std::to_string(e.size);
+        text += '\t';
+        text += e.hash;
         text += '\n';
     }
     return Touch(ManifestPath(), text);
@@ -304,9 +355,21 @@ bool ReadManifest(std::vector<TreeEntry>& out) {
         const size_t tab = line.rfind('\t');
         if (tab == std::string::npos) return false;
         TreeEntry e;
-        e.rel = line.substr(0, tab);
+        const std::string tail = line.substr(tab + 1);
+        // A trailing field of 16 hex digits, with a further tab before it, is the content
+        // hash; the field before that one is the size. Without it this is an old two-field
+        // line and the whole tail is the size.
+        const bool hasHash = tab > 0 && tail.size() == 16 &&
+                             tail.find_first_not_of("0123456789abcdef") == std::string::npos &&
+                             line.rfind('\t', tab - 1) != std::string::npos;
+        size_t sizeEnd = tab;
+        if (hasHash) {
+            e.hash = tail;
+            sizeEnd = line.rfind('\t', tab - 1);
+        }
+        e.rel = line.substr(0, sizeEnd);
         try {
-            e.size = std::stoull(line.substr(tab + 1));
+            e.size = std::stoull(line.substr(sizeEnd + 1, (hasHash ? tab : line.size()) - sizeEnd - 1));
         } catch (...) {
             return false;
         }
@@ -363,7 +426,7 @@ bool BackupSave() {
         // so the boot restore can still spot a save played on since.
         if (!Exists(ManifestPath())) {
             std::vector<TreeEntry> entries;
-            if (ListTree(BackupDir() / "title", entries)) {
+            if (ListTree(BackupDir() / "title", entries, true)) {
                 if (!WriteManifest(entries))
                     RT_LOGF(RT_TAG_RUNTIME, "[prepare] could not write the save manifest; the copy is still used\n");
             } else {
@@ -384,15 +447,15 @@ bool BackupSave() {
         return false;
     }
     std::vector<TreeEntry> source;
-    if (!ListTree(NandTitle(), source)) return false;
+    if (!ListTree(NandTitle(), source, true)) return false;
     if (Exists(NandTitle()) && !CopyTree(NandTitle(), BackupDir() / "title", "save copy")) {
         RemoveTreeLogged(BackupDir(), "save copy");  // a partial copy is never left for a restore to find
         return false;
     }
-    // The copy is certified only once every file in it matches the save it came from, in size;
-    // the complete marker is written last, and only then.
+    // The copy is certified only once every file in it matches the save it came from, in size
+    // and content; the complete marker is written last, and only then.
     std::vector<TreeEntry> copied;
-    if (!ListTree(BackupDir() / "title", copied) || copied != source) {
+    if (!ListTree(BackupDir() / "title", copied, true) || copied != source) {
         RT_LOGF(RT_TAG_RUNTIME, "[prepare] save copy did not verify; the partial copy is deleted\n");
         RemoveTreeLogged(BackupDir(), "save copy");
         return false;
@@ -420,8 +483,14 @@ RestoreResult RestoreSave(bool fromBoot) {
     if (!Exists(BackupDone())) return RestoreResult::None;
     if (fromBoot && Exists(ManifestPath()) && Exists(NandTitle())) {
         std::vector<TreeEntry> manifest, live;
-        const bool checked = ReadManifest(manifest) && ListTree(NandTitle(), live);
-        if (!checked || live != manifest) {
+        const bool checked = ReadManifest(manifest) && ListTree(NandTitle(), live, true);
+        // A manifest from before content hashes carries none, so it cannot prove the live
+        // save is the sweep's own. Fail safe: treat it as diverged and set the copy aside,
+        // rather than putting back a copy over a save that may have been played on.
+        bool unverifiable = false;
+        for (const TreeEntry& e : manifest)
+            if (e.hash.empty()) unverifiable = true;
+        if (!checked || unverifiable || live != manifest) {
             SetBackupAside();
             return RestoreResult::Diverged;
         }
@@ -472,10 +541,40 @@ void BeginRun() {
         Enter(Phase::Idle);
         return;
     }
+    // A new run is not the old run: clear the last run's completion before anything can
+    // read it. While it stood, a re-run stopped mid-way kept reporting the previous run
+    // as done (the Options row read "Done - run again" instead of "Continue", in-session
+    // and, through the file, on the next boot too), and the stale flag could arm the
+    // finish card over a stopped final room. EndRun re-creates both when a run completes.
+    g_complete = false;
+    Remove(Dir() / "complete.txt");
+    // Rooms an earlier run was redirected away from join the end of this run's list, once:
+    // the file is consumed here, and a room redirected again writes itself back for the
+    // run after. Rooms already in the list are not added twice.
+    if (Exists(MissedPath())) {
+        std::ifstream in(MissedPath());
+        std::string name;
+        while (std::getline(in, name)) {
+            if (!name.empty() && name.back() == '\r') name.pop_back();
+            if (name.empty()) continue;
+            bool present = false;
+            for (const Room* r : g_list)
+                if (name == r->map) present = true;
+            if (present) continue;
+            for (const Room& r : kRooms)
+                if (name == r.map) {
+                    g_list.push_back(&r);
+                    break;
+                }
+        }
+        in.close();
+        Remove(MissedPath());
+    }
     Remove(Dir() / "resume.txt");
     g_index = ReadIndex();
     if (g_index >= g_list.size()) g_index = 0;
     g_doneThisRun = 0;
+    g_missedThisRun = 0;
     g_skipsInARow = 0;
     g_runStart = Clock::now();
     g_stop = false;
@@ -507,6 +606,10 @@ void EndRun(const char* why, bool complete, bool stuck) {
     }
     RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: %zu rooms this run in %.0f min, next %zu of %zu\n", why, g_doneThisRun,
             Seconds(g_runStart) / 60.0, g_index + 1, g_list.size());
+    if (g_missedThisRun > 0)
+        RT_LOGF(RT_TAG_RUNTIME,
+                "[prepare] %zu room(s) were redirected and not swept this run; they are listed in missed.txt and join the next run\n",
+                g_missedThisRun);
     if (complete) {
         g_complete = true;
         WriteIndex(0);
@@ -579,7 +682,11 @@ void Step(CpuContext* cpu) {
     }
     const bool running = g_phase >= Phase::Request && g_phase <= Phase::FlipDrain;
 
-    if (g_startRequest.exchange(false) && !running && g_phase != Phase::Finish) Enter(Phase::Waiting);
+    // The phase is tested before the request is consumed: during Finish (up to 30 s while
+    // the title is awaited) the row is still clickable, and consuming a start click there
+    // ate it silently while the menu closed as if the run had started. Left pending, the
+    // request fires as soon as Finish ends, which is what the click asked for.
+    if (g_phase != Phase::Finish && !running && g_startRequest.exchange(false)) Enter(Phase::Waiting);
     if (running && g_stop.exchange(false)) {
         EndRun("stopped", false, false);
         return;
@@ -613,8 +720,19 @@ void Step(CpuContext* cpu) {
         g_sawChange = g_sawChange || seq != 2;
         if (g_sawChange && seq == 2) {
             const std::string actual = CurrentMap();
-            if (actual != g_list[g_index]->map)
-                RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: the game went to %s instead\n", g_list[g_index]->map, actual.c_str());
+            if (actual != g_list[g_index]->map) {
+                // The game redirected the warp (an event owns the destination): the
+                // requested room's pipelines were never exercised, so it is not counted
+                // as visited and does not pass through the room phases. It is recorded
+                // as missed instead, and BeginRun appends it to the next run's list.
+                RT_LOGF(RT_TAG_RUNTIME, "[prepare] %s: the game went to %s instead; counted as missed, not visited\n",
+                        g_list[g_index]->map, actual.c_str());
+                RecordMissed(g_list[g_index]->map);
+                ++g_index;
+                WriteIndex(g_index);
+                Enter(Phase::Request);
+                return;
+            }
             g_skipsInARow = 0;
             Enter(Phase::Settle);
             return;
