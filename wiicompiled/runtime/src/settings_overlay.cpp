@@ -3887,7 +3887,12 @@ void WriteDiagFileBack() {
                             if (key == kDiagRows[n].key) owned = n;
                 }
             }
-            if (owned >= 0 && !written[owned]) {
+            // Every owned line is rewritten, duplicates included: the boot parser reads
+            // the file in order and the last line naming a key wins, so carrying a stale
+            // duplicate through unchanged would let it override the value written here
+            // at the next boot. written[] now only tracks which keys the file has at
+            // all, for the append-missing pass below.
+            if (owned >= 0) {
                 out += FormatDiagLine(kDiagRows[owned]);
                 written[owned] = true;
             } else {
