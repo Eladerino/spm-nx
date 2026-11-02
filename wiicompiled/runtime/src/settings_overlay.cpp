@@ -864,14 +864,23 @@ std::vector<std::string> SplitBindingNames(const std::string& text) {
 }
 
 // The inputs an action currently answers to: the config value when one is
-// saved, the parser's built-in defaults when the key is absent.
+// saved, the parser's built-in defaults when the key is absent. A saved
+// "none" (VirtualRemote::kPadUnboundValue) is a deliberate unbind: the
+// action answers to nothing, never to the defaults an absent key brings.
 std::vector<std::string> GamepadBindingNames(int style, int action) {
     const char* styleName = VirtualRemote::PadStyleName(style);
     const char* actionKey = VirtualRemote::PadActionKey(action);
     if (styleName == nullptr || actionKey == nullptr) return {};
     const std::string custom = RuntimeConfigFile::GamepadBinding(std::string(styleName) + "_" + actionKey);
-    const char* fallback = VirtualRemote::PadDefaultBinding(style, action);
-    return SplitBindingNames(custom.empty() ? (fallback != nullptr ? fallback : "") : custom);
+    if (custom.empty()) {
+        const char* fallback = VirtualRemote::PadDefaultBinding(style, action);
+        return SplitBindingNames(fallback != nullptr ? fallback : "");
+    }
+    std::vector<std::string> names = SplitBindingNames(custom);
+    // Drop the unbound word wherever it sits, so it is never drawn as a
+    // button (the Controls panel and the prompt compositor read this list).
+    names.erase(std::remove(names.begin(), names.end(), std::string(VirtualRemote::kPadUnboundValue)), names.end());
+    return names;
 }
 
 void WriteGamepadBindingNames(int style, int action, std::vector<std::string> names) {
@@ -886,9 +895,12 @@ void WriteGamepadBindingNames(int style, int action, std::vector<std::string> na
         joined += name;
     }
     // An empty value in the config means "use the defaults", so it cannot
-    // say "nothing bound". A lone comma parses back to zero inputs, which
-    // is the one true unbound encoding.
-    if (joined.empty()) joined = ",";
+    // say "nothing bound"; the stored word for that is "none"
+    // (VirtualRemote::kPadUnboundValue), which no reader can mistake for an
+    // input and every reader maps back to zero inputs. (Builds from before
+    // the word wrote a lone comma here; that still parses to zero inputs
+    // everywhere it did, so files they wrote read the same.)
+    if (joined.empty()) joined = VirtualRemote::kPadUnboundValue;
     const char* styleName = VirtualRemote::PadStyleName(style);
     const char* actionKey = VirtualRemote::PadActionKey(action);
     if (styleName == nullptr || actionKey == nullptr) return;
@@ -897,7 +909,15 @@ void WriteGamepadBindingNames(int style, int action, std::vector<std::string> na
 
 void BindGamepadSlot(int style, int action, int slot, const std::string& name) {
     std::vector<std::string> names = GamepadBindingNames(style, action);
-    if (slot < static_cast<int>(names.size())) {
+    if (slot < static_cast<int>(names.size()) && names[static_cast<size_t>(slot)] == name) {
+        // Pressing the button already in a slot clears that slot: it is the
+        // one clear gesture the capture offers, hard to hit by accident, and
+        // the only way to unbind short of resetting the whole table. The
+        // entries behind it move up, so clearing slot 1 promotes slot 2.
+        // Clearing the last entry writes the unbound word ("none") through
+        // WriteGamepadBindingNames, so the defaults stay off.
+        names.erase(names.begin() + slot);
+    } else if (slot < static_cast<int>(names.size())) {
         names[static_cast<size_t>(slot)] = name;
     } else {
         names.push_back(name);  // slot 1 with a shorter list appends as the only entry
@@ -951,6 +971,37 @@ std::string GamepadBindingLabel(const std::string& name, int style) {
     if (base == "dpright") return "D-pad right";
     if (base == "touchpad") return "Touchpad";
     return name;
+}
+
+// One gamepad action's row text on the Controls page: the first slot's
+// label, then ", also <label>" for the second slot (the Controls panel's
+// phrasing), or "-" when nothing is bound. A name another shown action also
+// answers to is noted once, as "(also on <action>)": the button does both
+// jobs in game, and the row is where the player can see why. `shown` holds
+// the page's actions in display order with their resolved names, so the
+// note names the first conflicting action in that order.
+std::string GamepadActionRowText(int style, int action, const std::vector<std::string>& names,
+                                 const std::vector<std::pair<int, std::vector<std::string>>>& shown) {
+    if (names.empty()) return "-";
+    std::string text = GamepadBindingLabel(names[0], style);
+    if (names.size() > 1) text += ", also " + GamepadBindingLabel(names[1], style);
+    for (const std::string& name : names) {
+        int otherAction = -1;
+        for (const auto& [other, otherNames] : shown) {
+            if (other == action) continue;
+            if (std::find(otherNames.begin(), otherNames.end(), name) != otherNames.end()) {
+                otherAction = other;
+                break;
+            }
+        }
+        if (otherAction >= 0) {
+            text += " (also on ";
+            text += kGamepadActionLabels[otherAction];
+            text += ")";
+            break;
+        }
+    }
+    return text;
 }
 
 // The [gamepad] grammar name for a captured input (a gamepad button index,
@@ -3800,6 +3851,11 @@ struct OptRow {
     std::string value;             // empty: an action row
     std::function<void(int)> step; // -1 / +1 for a value, 0 for confirm
     const char* help = "";
+    // A section heading (the Controls page's Movement / Actions / System
+    // groups): drawn as a title, never selectable. Navigation skips these
+    // rows and the draw never puts the selection box on one, so step is
+    // never called; it still gets a no-op step so an accidental call is safe.
+    bool heading = false;
 };
 
 std::string OnOff(bool on) { return on ? "On" : "Off"; }
@@ -4467,38 +4523,70 @@ std::vector<OptRow> OptionsRows(int tab) {
         // Controller rows above remap the PAD route, which in this game
         // serves players 2-4; player 1's pad is read through this table
         // (virtual_remote's GamepadIntent), so this block is the one that
-        // remaps the pad in hand. Two slots per action, like the table
-        // itself; a change writes through and applies at once.
+        // remaps the pad in hand. One row per action under section
+        // headings, the row showing both slots: select binds the first
+        // slot, a direction press binds the second. A change writes
+        // through and applies at once.
         {
             const int index = PADGetIndexForPort(static_cast<uint32_t>(g_controllerPort));
             auto* pad = index >= 0 ? PADGetSDLGamepadForIndex(static_cast<uint32_t>(index)) : nullptr;
             const int style = pad != nullptr ? VirtualRemote::PadStyleOf(pad) : 2;
-            for (int action = 0; action < 12; ++action) {
-                // Tilt left/right (actions 8 and 9) get no rows (Brandon's call, Nov 1): SPM's main
-                // game never reads tilt, their defaults are unbound, and the arcade games that
-                // steer by tilt take it from the left stick and the motion sensor. The reset row
-                // below still covers them.
-                if (action == 8 || action == 9) continue;
-                const std::vector<std::string> names = GamepadBindingNames(style, action);
-                for (int slot = 0; slot < 2; ++slot) {
-                    const int idx = action * 2 + slot;
-                    const std::string bound = slot < static_cast<int>(names.size()) ? names[static_cast<size_t>(slot)] : "";
-                    rows.push_back({std::string("Gamepad: ") + kGamepadActionLabels[action] + (slot == 1 ? " 2" : ""),
-                                    g_optGamepadCapture == idx ? "Press a button..."
-                                                                 : (bound.empty() ? "-" : GamepadBindingLabel(bound, style)),
-                                    [idx](int d) {
-                        if (d != 0) return;
+            // The shown actions, in display order, under their headings.
+            // Tilt left/right (actions 8 and 9) get no rows (Brandon's
+            // call, Nov 1): SPM's main game never reads tilt, their
+            // defaults are unbound, and the arcade games that steer by
+            // tilt take it from the left stick and the motion sensor. The
+            // reset row below still covers them.
+            constexpr struct {
+                const char* heading;
+                int actions[4];
+                int count;
+            } kSections[] = {
+                {"Movement", {0, 1, 2, 3}, 4},
+                {"Actions", {4, 5, 6, 7}, 4},
+                {"System", {10, 11, -1, -1}, 2},
+            };
+            // Every shown action's names, resolved once for the page: a
+            // row's text also notes a name another action shares.
+            std::vector<std::pair<int, std::vector<std::string>>> shown;
+            for (const auto& section : kSections)
+                for (int i = 0; i < section.count; ++i)
+                    shown.push_back({section.actions[i], GamepadBindingNames(style, section.actions[i])});
+            const auto namesFor = [&shown](int action) -> const std::vector<std::string>& {
+                for (const auto& entry : shown)
+                    if (entry.first == action) return entry.second;
+                static const std::vector<std::string> kEmpty;
+                return kEmpty;
+            };
+            for (const auto& section : kSections) {
+                OptRow heading;
+                heading.label = section.heading;
+                heading.heading = true;
+                heading.step = [](int) {};
+                rows.push_back(heading);
+                for (int i = 0; i < section.count; ++i) {
+                    const int action = section.actions[i];
+                    const bool capturing =
+                        g_optGamepadCapture == action * 2 || g_optGamepadCapture == action * 2 + 1;
+                    rows.push_back({kGamepadActionLabels[action],
+                                    capturing ? "Press a button..."
+                                              : GamepadActionRowText(style, action, namesFor(action), shown),
+                                    [action](int d) {
+                        // Confirm binds slot 1; a direction press, the
+                        // gesture value rows cycle with, binds slot 2.
+                        const int slot = d == 0 ? 0 : 1;
                         const int index = PADGetIndexForPort(static_cast<uint32_t>(g_controllerPort));
                         if (index < 0 || !PADGetSDLGamepadForIndex(static_cast<uint32_t>(index))) return;
-                        BeginRebind(RebindKind::Gamepad, static_cast<uint16_t>(idx), kGamepadActionLabels[idx / 2]);
+                        const int idx = action * 2 + slot;
+                        BeginRebind(RebindKind::Gamepad, static_cast<uint16_t>(idx), kGamepadActionLabels[action]);
                         g_rebind.openPopup = false;  // picked here, not in the developer window
                         g_optGamepadCapture = idx;
-                    }, "Player 1's gamepad. Select it, then press the button to use; it applies at once. Clicking a stick cancels."});
+                    }, "Player 1's gamepad. Select binds the first slot; press left or right to bind the second. The change applies at once. Pressing the button already in a slot clears that slot. Clicking a stick while binding cancels."});
                 }
             }
-            rows.push_back({"Gamepad: reset to defaults", "", [style](int d) {
+            rows.push_back({"Reset to defaults", "", [style](int d) {
                 if (d == 0) ResetGamepadBindings(style);
-            }, "Restore every Gamepad action above to the built-in bindings."});
+            }, "Restore every action above to the built-in bindings."});
         }
 #endif
     }
@@ -4838,9 +4926,22 @@ void HandleOptionsInput() {
     }
     const std::vector<OptRow> rows = OptionsRows(g_optTab);
     const int count = static_cast<int>(rows.size());
+    // Section headings are titles, not rows: Up and Down step over them,
+    // so the selection only ever rests on a row that can be used.
+    const auto isHeading = [&rows, count](int i) {
+        return i >= 0 && i < count && rows[static_cast<size_t>(i)].heading;
+    };
     // Row -1 is the tab strip.
-    if (ev & kOptUp) g_optRow = g_optRow <= -1 ? count - 1 : g_optRow - 1;
-    if (ev & kOptDown) g_optRow = g_optRow >= count - 1 ? -1 : g_optRow + 1;
+    if (ev & kOptUp) {
+        int r = g_optRow <= -1 ? count - 1 : g_optRow - 1;
+        while (isHeading(r)) --r;
+        g_optRow = r;
+    }
+    if (ev & kOptDown) {
+        int r = g_optRow >= count - 1 ? -1 : g_optRow + 1;
+        while (isHeading(r)) ++r;
+        g_optRow = r >= count ? -1 : r;
+    }
     const int dir = (ev & kOptLeft) ? -1 : (ev & kOptRight) ? 1 : 0;
     if (g_optRow < 0) {
         if (dir != 0) g_optTab = Cycle(g_optTab, dir, kOptTabCount);
@@ -4848,6 +4949,18 @@ void HandleOptionsInput() {
         return;
     }
     g_optRow = std::min(g_optRow, count - 1);
+    if (isHeading(g_optRow)) {
+        // A clamp above (a shorter page after a tab switch) can leave the
+        // selection resting on a heading: settle it on the next usable
+        // row, or the previous one when the heading ends the page.
+        int r = g_optRow;
+        while (r < count && isHeading(r)) ++r;
+        if (r >= count) {
+            r = g_optRow;
+            while (r >= 0 && isHeading(r)) --r;
+        }
+        g_optRow = std::max(r, 0);
+    }
 #if defined(__SWITCH__)
     // A moved selection cancels a pending Clear shader cache confirmation: the second press
     // only counts while the same row stays selected (closing the menu cancels it too, in
@@ -4927,7 +5040,11 @@ void DrawOptionsMenu() {
     }
 
     const std::vector<OptRow> rows = OptionsRows(g_optTab);
-    const float rowH = 33.0f, rowsTop = tabY - 50.0f, rowsBottom = bottom + 76.0f;
+    float rowsBottom = bottom + 76.0f;
+#if defined(__SWITCH__)
+    if (g_optTab == 3) rowsBottom = bottom + 104.0f;  // the Controls page's footer line sits under the rows
+#endif
+    const float rowH = 33.0f, rowsTop = tabY - 50.0f;
     const int visible = std::max(1, int((rowsTop - rowsBottom) / rowH) + 1);
     static int first = 0;  // the first row shown: the list scrolls to keep the selected row in view
     if (g_optRow >= 0 && g_optRow < first) first = g_optRow;
@@ -4936,6 +5053,12 @@ void DrawOptionsMenu() {
     float y = rowsTop;
     for (int i = first; i < int(rows.size()) && i < first + visible; ++i, y -= rowH) {
         const OptRow& row = rows[static_cast<size_t>(i)];
+        if (row.heading) {
+            // A section heading: a title on the page in the blue of an
+            // action label, with no value, no arrows and no selection.
+            Txt(row.label, -hw + 56, y, 19.0f, 0x2A5AB0FFu, 0);
+            continue;
+        }
         const bool sel = i == g_optRow;
         if (sel) {
             Box(-hw + 22, y + 15, hw - 22, y - 15, IM_COL32(254, 230, 133, 255), 10.0f, 3.0f, IM_COL32(220, 160, 30, 255));
@@ -4962,6 +5085,15 @@ void DrawOptionsMenu() {
     const char* help = g_optRow >= 0 && g_optRow < int(rows.size()) ? rows[static_cast<size_t>(g_optRow)].help
                                                                      : "Left and right pick a page.";
     Txt(help, 0, bottom + 50.0f, Fit(help, 15.0f, 2 * hw - 40.0f), 0x5A4A38FFu, 1);
+#if defined(__SWITCH__)
+    if (g_optTab == 3) {
+        // The Controls page's own footer, always on the page rather than
+        // in a row's help: how binding, clearing and cancelling work is
+        // the thing players could not discover here before.
+        const char* footer = "Select: bind. Left/right: bind second slot. Same button again: clear. Stick click: cancel.";
+        Txt(footer, 0, bottom + 78.0f, Fit(footer, 14.0f, 2 * hw - 40.0f), 0x8A7A68FFu, 1);
+    }
+#endif
     Txt("Up/Down choose   Left/Right change   A / 2 select   B / 1 / HOME close", 0, bottom + 22.0f, 14.0f, 0x8A7A68FFu, 1);
 
     if (g_optQuitPrompt) {
