@@ -143,6 +143,10 @@ void spm_switch_tls_init_main_thread(void);
 void spm_switch_tls_check_main_thread(void);
 // runtime/guest_flat_memory_horizon.cpp: unmaps the flat guest window, which hbloader needs gone.
 void spm_switch_guest_memory_release(void);
+// source/pgo_instr_switch.c, linked only into the instrumented-PGO capture build
+// (SPM_PGO_INSTRUMENT): weak, so normal builds take the null branch and pay nothing.
+void spm_pgo_instr_start(void) __attribute__((weak));
+void spm_pgo_instr_dump_now(void) __attribute__((weak));
 
 // The exception handler runs on its own stack: the faulting thread's may be the problem.
 alignas(16) u8 __nx_exception_stack[0x4000];
@@ -158,6 +162,8 @@ void userAppInit(void) {
         std::setvbuf(stderr, nullptr, _IOLBF, 0);  // line-buffered: a crash keeps the last lines
     }
     spm_switch_tls_check_main_thread();
+    // The PGO capture build starts its dump thread now that the SD layout and stderr exist.
+    if (spm_pgo_instr_start) spm_pgo_instr_start();
     setenv("WIICOMPILED_RUNTIME_DIR", kRoot, 1);
     setenv("WIICOMPILED_DATA_DIR", kUserData, 1);
 
@@ -197,6 +203,10 @@ void userAppExit(void) {
     u64 self = 0;
     svcGetThreadId(&self, CUR_THREAD_HANDLE);
     g_exitingThread = self;
+    // The PGO capture build's final dump comes before the guest memory release: its counters
+    // live in instrumented code and data the release does not touch, but nothing after this
+    // point is guaranteed to run.
+    if (spm_pgo_instr_dump_now) spm_pgo_instr_dump_now();
     spm_switch_guest_memory_release();
     std::fflush(stderr);
     if (g_sockets) {
