@@ -36,8 +36,11 @@ function(mkw_apply_common_compile_options target)
 endfunction()
 
 function(mkw_apply_translated_compile_options target)
+    # -ffunction-sections: one .text.func_<guest address> section per translated function, so a
+    # later hot-ordering step can lay the hot ones out from a linker ordering file (test build
+    # spec A4/D3). No direct gain; --gc-sections at link is unchanged.
     target_compile_options(${target} PRIVATE
-        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe)
+        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -w -pipe -ffunction-sections)
 endfunction()
 
 function(mkw_configure_object_target target)
