@@ -1155,3 +1155,81 @@ bool FlagValue(int flag) {
     return g_flagSnap[flag] != 0;
 }
 } // namespace SpmMapSweep
+
+// Anim pose log hook, called from the generated animPoseDrawMtx (func_800496B0) via
+// switch/scripts/patch-anim-draw.py, which inserts the consult before the function's
+// first block. LOG ONLY in this form: the hook always returns false, so no draw is ever
+// skipped. Its job is evidence. The first attempt at this hook (911c18a) suppressed by
+// archive name alone and was reverted (d383d9c) because that also took out the Controls
+// screen's remote (whose draws fire the marker the replacement panel opens from) and
+// the shake action commands' remote. A suppression that comes back has to key on the
+// pose's animation, and that needs a hardware log naming which poses are which first.
+//
+// The walk mirrors what the draw code itself does: animdrv_wp is SDA-relative in the
+// game code (r13 - 32680); the pose array is at AnimWork + 16 with its count at + 20,
+// each AnimPose is 392 bytes, its group id is at + 16, the group array is at AnimWork
+// + 0 with 16-byte entries whose file entry pointer is at + 8, and FileEntry.path is
+// at + 0x20 (64 bytes). Only poses drawn from an n_controler archive are logged (the
+// demo Wii Remote's); each distinct (file, group, pose, place) combination logs once,
+// with the map and sequence it was seen in riding along, so a teaching pose can be told
+// apart from the Controls screen's and the shake command's in the same run.
+//
+// The switch is the "poselog" dk_diag key: device.cpp forwards it here through
+// spm_pose_log_set, from diag_init at boot and from the Diagnostics page at runtime.
+namespace {
+std::atomic<bool> g_poseLog{false};
+}  // namespace
+
+extern "C" void spm_pose_log_set(bool enabled) { g_poseLog = enabled; }
+
+extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
+    if (!g_poseLog.load() || ctx == nullptr) return false;
+    const uint32_t id = ctx->gpr[3];
+    uint32_t wp = 0;
+    if (!Memory::TryRead32(ctx->gpr[13] - 32680u, wp) || wp == 0) return false;
+    uint32_t poses = 0, count = 0;
+    if (!Memory::TryRead32(wp + 16, poses) || !Memory::TryRead32(wp + 20, count)) return false;
+    if (poses == 0 || id >= count) return false;
+    uint32_t groupId = 0;
+    if (!Memory::TryRead32(poses + id * 392 + 16, groupId)) return false;
+    uint32_t groups = 0;
+    if (!Memory::TryRead32(wp, groups) || groups == 0) return false;
+    uint32_t file = 0;
+    if (!Memory::TryRead32(groups + groupId * 16 + 8, file) || file == 0) return false;
+    if (!Memory::Contains(file + 0x20, 64)) return false;
+    char path[65] = {};
+    for (int i = 0; i < 64; ++i) {
+        const uint8_t b = Memory::Read8(file + 0x20 + uint32_t(i));
+        if (b == 0) break;
+        path[i] = static_cast<char>(b);
+    }
+    if (path[0] == 0) return false;
+    const std::string p(path);
+    const bool match = p == "n_controler" || p == "n_controler-" ||
+        (p.size() > 12 && p.compare(p.size() - 12, 12, "/n_controler") == 0) ||
+        (p.size() > 13 && p.compare(p.size() - 13, 13, "/n_controler-") == 0);
+    if (!match) return false;
+    char place[48] = {};
+    SpmMapSweep::CurrentPlace(place, sizeof place);
+    const int seq = SpmMapSweep::Seq();
+    // One log line per distinct (file, group, pose, place), so a test run names every
+    // pose the demo remote is drawn in without flooding the log at 60 draws a second.
+    static char seenPath[64][64] = {};
+    static uint32_t seenGroup[64] = {};
+    static uint32_t seenPose[64] = {};
+    static char seenPlace[64][48] = {};
+    static int seenCount = 0;
+    for (int i = 0; i < seenCount; ++i)
+        if (seenGroup[i] == groupId && seenPose[i] == id && p == seenPath[i] && std::strcmp(place, seenPlace[i]) == 0)
+            return false;
+    if (seenCount < 64) {
+        std::snprintf(seenPath[seenCount], 64, "%s", p.c_str());
+        seenGroup[seenCount] = groupId;
+        seenPose[seenCount] = id;
+        std::snprintf(seenPlace[seenCount], 48, "%s", place);
+        ++seenCount;
+        RT_LOGF(RT_TAG_RUNTIME, "[poselog] file '%s' group %u pose %u at %s (seq %d)\n", p.c_str(), groupId, id,
+                place, seq);
+    }
+    return false;
+}
