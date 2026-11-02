@@ -206,12 +206,16 @@ the game:
    itself never saves, and the copy is put back when it ends.
 3. It then visits every room in the game (426 of them), one warp at a time, and waits in
    each room until the shader pipeline queue has drained: 2 seconds for the room to draw,
-   then a second of quiet queue. Mario's HP is kept full while it runs, and the console
-   is kept awake.
+   then a second of quiet queue. It then flips Mario to 3D with the same press a player
+   flips with, and waits for the queue to drain again (up to 5 more seconds), because the
+   flipped view draws through pipelines the 2D view never touches. A room that will not
+   flip, because Mario does not have control or another character is out, is logged and
+   simply goes on in 2D. Mario's HP is kept full while it runs, and the console is kept
+   awake.
 4. Everything compiled lands in the caches already kept in `UserData/`, so the next
    launches prewarm it and the effects are ready when you meet them in play.
 
-**Time and stopping.** Expect roughly half an hour to an hour, once. The card on screen
+**Time and stopping.** Expect roughly 45 minutes to an hour, once. The card on screen
 shows the room, how many are done, and an estimate of the minutes left once the pace is
 known. To stop, **hold B for a second or so**: progress is kept in
 `UserData/PrepareGraphics/state.txt`, and the row reads "Continue" next time, picking up
