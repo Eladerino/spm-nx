@@ -198,6 +198,7 @@ struct Diag {
     std::atomic<bool> gxDefer = false;   // as gxworker, but the records wait for the next sync point (Deferred); implies gxworker
     std::atomic<bool> gxThread = true;   // as gxdefer, but the records replay on a worker thread on core 2 (Threaded); implies both. On by default: mode 3 soaked clean in Prepare run 2 (0 replay errors, 0 skipped draws); a "gxthread=0" line in dk_diag.txt still wins and drops back to mode 0
     std::atomic<bool> dkCmd = false;     // arms the dk_cmd.txt command channel: while off, the present path never opens the file (test build spec A2). Scripted runs set dkcmd=1
+    std::atomic<bool> guestCore = false; // helper threads (pipeline compile, uam, presenter) are kept off the guest's core 0 by the pthread trampoline (test build spec B2). Boot-time only: the trampoline reads dk_diag.txt itself, before diag_init exists; this field mirrors it for the boot log
 };
 extern Diag g_diag;
 void diag_init();

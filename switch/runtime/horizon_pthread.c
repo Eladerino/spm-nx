@@ -24,6 +24,8 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <strings.h>
 #include <switch.h>
 
 #define MINIMUM_STACK_SIZE (4u * 1024u * 1024u)
@@ -34,6 +36,63 @@ int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (
 int __wrap_pthread_detach(pthread_t thread);
 
 static atomic_int g_next_core = 1;
+
+// guestcore (dk_diag.txt, test build spec B2): with it on, helper threads are kept off the
+// guest's core 0 entirely. An unpinned thread's mask today is every application core, so a
+// pipeline compile (Tint holds a core for hundreds of ms on a cold pipeline) can land on the
+// guest core and stall it; KartPadNX calls keeping compilers off the guest core its decisive
+// fix. This file runs before the renderer's diag_init (threads start at process start), so it
+// reads dk_diag.txt itself, once, on first use. What is bought is only "never on core 0":
+// with three application cores the helpers share cores 1 and 2 with the pinned GX threads.
+static atomic_int g_guestcore = -1; // -1 unknown, 0 off, 1 on
+
+static int guestcore_enabled(void)
+{
+    int cached = atomic_load(&g_guestcore);
+    if (cached >= 0)
+        return cached;
+    int on = 0;
+    FILE* f = fopen("/switch/spm-nx/UserData/dk_diag.txt", "r");
+    if (f != NULL) {
+        char line[256];
+        while (fgets(line, sizeof line, f) != NULL) {
+            const char* p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            const char* key = p;
+            while ((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '_') p++;
+            if ((size_t)(p - key) != 9 || strncmp(key, "guestcore", 9) != 0)
+                continue;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p != '=')
+                continue;
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            on = !(p[0] == '0' || strncasecmp(p, "off", 3) == 0 || strncasecmp(p, "false", 5) == 0);
+        }
+        fclose(f);
+    }
+    atomic_store(&g_guestcore, on);
+    return on;
+}
+
+static u32 application_core_mask(void);
+
+// The next preferred core for a helper thread with guestcore on: the application cores minus
+// core 0, dealt from the highest down (2, then 1), KartPadNX's compiler_core shape. -1 when
+// nothing is left (a one-core process), meaning keep the normal dealing.
+static int guestcore_next_core(void)
+{
+    static atomic_int next = 0;
+    const u32 mask = application_core_mask() & ~1u;
+    int cores[3];
+    int n = 0;
+    for (int c = 2; c >= 0; c--)
+        if (mask & (1u << c))
+            cores[n++] = c;
+    if (n == 0)
+        return -1;
+    return cores[atomic_fetch_add(&next, 1) % n];
+}
 
 struct Trampoline {
     void* (*start)(void*);
@@ -59,7 +118,12 @@ static void* trampoline(void* raw)
 {
     struct Trampoline t = *(struct Trampoline*)raw;
     free(raw);
-    const u32 mask = application_core_mask();
+    u32 mask = application_core_mask();
+    if (guestcore_enabled()) {
+        const u32 no_guest = mask & ~1u;
+        if (no_guest != 0)
+            mask = no_guest;
+    }
     int core = t.core;
     if ((mask & (1u << core)) == 0)
         core = __builtin_ctz(mask);
@@ -92,7 +156,8 @@ int __wrap_pthread_create(pthread_t* thread, const pthread_attr_t* attr, void* (
     }
     t->start = start;
     t->arg = arg;
-    t->core = 1 + (atomic_fetch_add(&g_next_core, 1) - 1) % 2; // 1, 2, 1, 2...
+    const int guest_free = guestcore_enabled() ? guestcore_next_core() : -1;
+    t->core = guest_free >= 0 ? guest_free : 1 + (atomic_fetch_add(&g_next_core, 1) - 1) % 2; // 1, 2, 1, 2...
     const int result = __real_pthread_create(thread, &sized, trampoline, t);
     if (result != 0)
         free(t);
