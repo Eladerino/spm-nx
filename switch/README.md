@@ -150,14 +150,15 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
 
 - **Game** holds the port's **Prepare graphics** row, covered in its own section below.
 - **Controls** remaps the gamepad, and holds the vibration setting. Player 1's actions
-  sit under Movement, Actions and System headings, one row per action showing both of
-  its slots (the second reads "also"): ten actions are shown (the config table has
-  twelve; the Tilt left/right pair is not shown, because the main game never reads
-  tilt, and the reset row still covers them). Select a row to bind its first slot, or
-  press left or right to bind the second; then press the button or push the stick
+  sit under Movement, Actions and System headings, as a table: one row per action,
+  with a column for the first slot and a column for the second. Ten actions are shown
+  (the config table has twelve; the Tilt left/right pair is not shown, because the
+  main game never reads tilt, and the reset row still covers them). Left and right
+  pick the slot; select starts binding it, then press the button or push the stick
   direction to bind. Pressing the button already in a slot clears that slot, and
   clearing the last slot leaves the action unbound until it is bound again or the
-  table is reset. Clicking a stick while binding cancels. Changes apply immediately,
+  table is reset. While binding, clicking the right stick cancels, and clicking the
+  left stick puts that slot's built-in binding back. Changes apply immediately,
   no restart. The PC build's separate Controller rows for players 2 to 4 are not shown
   on Switch: this game is single-player, and player 1 is this list.
 - **Display** holds Resolution, Aspect ratio, the FPS counter and Texture replacements
