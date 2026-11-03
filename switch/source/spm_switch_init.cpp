@@ -147,6 +147,10 @@ void spm_switch_guest_memory_release(void);
 // (SPM_PGO_INSTRUMENT): weak, so normal builds take the null branch and pay nothing.
 void spm_pgo_instr_start(void) __attribute__((weak));
 void spm_pgo_instr_dump_now(void) __attribute__((weak));
+// source/spm_debug_server.cpp: stops the debug server (dkserver=1 in dk_diag.txt) if
+// diag_init started it, so its threads are gone before the socket service closes below.
+// Inert when the server never started.
+void spm_debug_server_stop(void);
 
 // The exception handler runs on its own stack: the faulting thread's may be the problem.
 alignas(16) u8 __nx_exception_stack[0x4000];
@@ -203,6 +207,9 @@ void userAppExit(void) {
     u64 self = 0;
     svcGetThreadId(&self, CUR_THREAD_HANDLE);
     g_exitingThread = self;
+    // The debug server stops first: its threads touch nothing the release unmaps, but they
+    // hold the listening socket the socketExit below is about to close under them.
+    spm_debug_server_stop();
     // The PGO capture build's final dump comes before the guest memory release: its counters
     // live in instrumented code and data the release does not touch, but nothing after this
     // point is guaranteed to run.

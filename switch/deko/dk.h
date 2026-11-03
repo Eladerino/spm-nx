@@ -199,6 +199,7 @@ struct Diag {
     std::atomic<bool> gxThread = true;   // as gxdefer, but the records replay on a worker thread on core 2 (Threaded); implies both. On by default: mode 3 soaked clean in Prepare run 2 (0 replay errors, 0 skipped draws); a "gxthread=0" line in dk_diag.txt still wins and drops back to mode 0
     std::atomic<bool> dkCmd = false;     // arms the dk_cmd.txt command channel: while off, the present path never opens the file (test build spec A2). Scripted runs set dkcmd=1
     std::atomic<bool> guestCore = false; // helper threads (pipeline compile, uam, presenter) are kept off the guest's core 0 by the pthread trampoline (test build spec B2). Boot-time only: the trampoline reads dk_diag.txt itself, before diag_init exists; this field mirrors it for the boot log
+    std::atomic<bool> dkServer = false;  // the debug server (source/debug_server.h, commands in source/spm_debug_server.cpp): a plain-text TCP line server on port 6543 for dev runs. Boot-time only: diag_init starts it once when this is on, and diag_set storing the field starts and stops nothing (the server's own diag command refuses the key). Dev runs only: the server has NO authentication, so anyone on the LAN can flip the switches above, move files and press buttons while it runs
 };
 extern Diag g_diag;
 void diag_init();
@@ -210,6 +211,10 @@ bool diag_set(const char* key, bool on);
 // The read side of diag_set: the current state of one switch by name, for the Switch
 // settings menu's Diagnostics rows. Unknown names read as off.
 bool diag_get(const char* key);
+// Every switch, in dk_diag.txt order, for the listings that are not the settings menu
+// (the debug server's "diag" command, which has to answer for keys it does not know by
+// name in advance). The callback gets the file spelling and the current value.
+void diag_enumerate(void (*visit)(const char* name, bool on, void* user), void* user);
 // R.presents, for "[diag]" log markers written outside device.cpp.
 uint64_t diag_present_count();
 // Pushes every buffered diagnostic line to UserData/Logs/stderr.log now: Aurora's mtxlog

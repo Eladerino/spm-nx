@@ -17,6 +17,7 @@ is under the repository's GPLv3 license.
 | `uam/` | [uam](https://github.com/devkitPro/uam) 1.1.0, vendored from SwitchWakerHD with the local changes in `uam/PATCHES.md`; the `mesa-imported/` parts are Mesa's GLSL frontend and nouveau's nv50_ir | zlib (`uam/LICENSE`), MIT (the mesa-imported parts) |
 | `deko/` | this fork's WebGPU-to-deko3d interposer, adapted from SwitchWaker/SwitchWakerHD's deko3d backend | MPL-2.0 (`licenses/MPL-2.0.txt`) |
 | `menu/spm_switch_menu.cpp` (the framework parts; file removed: the Developer shell was retired and its rows moved into the Options menu's Developer and Diagnostics pages) | [SwitchWakerHD](https://github.com/centollOS/SwitchWakerHD) `runtime/src/overlay/` at `b2e51df`: the gamepad navigation feed (`gamepad_nav.h`), the settings window and tab machinery (`overlay.cpp`), the widget helpers and tooltips (`widgets.h`, `tooltip.h`) and the style (`setup_style`), adapted at this port's seams as the file's header comment lists; the rows and settings plumbing in the same file are this fork's own code | MPL-2.0 (`licenses/MPL-2.0.txt`) |
+| `source/debug_server.h`, `source/debug_server.cpp` | [SwitchWakerHD](https://github.com/centollOS/SwitchWakerHD) `runtime/src/platform/` at `ac84576`, unchanged but for a provenance block at the top of each file and the spm-nx line in the header's port list; the debug server core shared by the ports (spm-nx's own commands are `source/spm_debug_server.cpp`, this fork's code) | MPL-2.0 (`licenses/MPL-2.0.txt`) |
 
 Fetched at build time, not stored here:
 
