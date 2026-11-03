@@ -5199,13 +5199,25 @@ void DrawOptionsMenu() {
             continue;
         }
         const bool sel = i == g_optRow;
-        if (sel) {
+        const bool action = row.value.empty();
+        // A Switch press-to-run row is drawn as a button (the plate in the
+        // action branch below): its selection yellow and ink border live on
+        // the plate itself, so the row-wide selection box and the pointing
+        // cursor stay off it and the selection hugs the button instead of
+        // running the width of the row. The cursor could not stay either:
+        // its tip lands inside the plate's left edge, so the plate fill
+        // would paint over it. Setting rows keep the box and cursor.
+#if defined(__SWITCH__)
+        const bool plate = action && !row.cells;
+#else
+        const bool plate = false;
+#endif
+        if (sel && !plate) {
             Box(-hw + 22, y + 15, hw - 22, y - 15, IM_COL32(254, 230, 133, 255), 10.0f, 3.0f, IM_COL32(220, 160, 30, 255));
             const float bob = std::sin(t * 8.0f) * 3.0f;  // the pointing cursor
             list->AddTriangleFilled(S(-hw + 30 + bob, y + 9), S(-hw + 46 + bob, y), S(-hw + 30 + bob, y - 9),
                                     IM_COL32(220, 60, 40, 255));
         }
-        const bool action = row.value.empty();
         const float labelW = action ? 2 * hw - 90.0f : 2 * hw - 330.0f;
         if (row.cells) {
             // The gamepad binding table: the action's name, then one cell
