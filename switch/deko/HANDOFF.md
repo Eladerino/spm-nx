@@ -48,8 +48,8 @@ serial), barriers and serials.
 - Diagnostics follow one pattern: a switch in `UserData/dk_diag.txt`, read once at renderer init
   (see `dk.h`), then flippable at runtime from the Options menu's Diagnostics page and the
   `UserData/dk_cmd.txt` command channel. A flip in the menu writes all twenty-one page switches back
-  to `dk_diag.txt`; the file knows twenty-three keys in all, two of them (zcull,
-  guestcore) boot-time only. No file means a normal build. Every switch is off by default except
+  to `dk_diag.txt`; the file knows twenty-five keys in all, four of them (zcull,
+  guestcore, dkserver, rttlog) boot-time only. No file means a normal build. Every switch is off by default except
   `cpthread` (Aurora's GX decode thread, core 1), `gxthread` and `zcull`, which are on. The lines that move a build
   away from normal are the ones to name in a test report: `cpthread=0`, `gxthread=0`,
   `zcull=0`, and the experimental
@@ -63,8 +63,7 @@ serial), barriers and serials.
   (boot-time only: started from `diag_init`, stopped from `userAppExit`), has no menu
   row and no settings_overlay code, feeds its log stream by tailing
   `UserData/Logs/stderr.log` into the core's ring, and runs its threads at priority
-  0x3B. The dkserver key is one more than the count above says; the README's count is
-  the current one.
+  0x3B.
 - Changes land on main with the commit message stating what was actually compiled and tested.
 
 ## Known limitations
