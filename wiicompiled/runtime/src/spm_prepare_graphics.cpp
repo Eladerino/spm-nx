@@ -36,6 +36,11 @@ extern "C" bool spm_switch_restart_program(void);   // switch/source/spm_switch_
 extern "C" void spm_switch_keep_awake(bool on);
 #endif
 
+// The 30 fps cap's gate, read by the deko present path through spm_gameplay_present
+// below: true only while the game is in a map and no Prepare sweep owns the warps.
+// SpmPrepareGraphics::Tick refreshes it on the game thread, once per presented frame.
+std::atomic<bool> g_gameplayPresent{false};
+
 namespace SpmPrepareGraphics {
 namespace {
 namespace fs = std::filesystem;
@@ -853,6 +858,13 @@ void Step(CpuContext* cpu) {
 void Tick(CpuContext* cpu, uint32_t presentedFrames) {
     if (!cpu) return;
     g_presented = presentedFrames;
+    // The 30 fps cap's gate (g_gameplayPresent): gameplay is a map (sequence 2) with
+    // the sweep idle or only waiting for a save. The logo, the title, map changes and
+    // loads keep the panel's full rate (the title card's hold counts presented frames,
+    // so capping there would stretch it), and the sweep's own warps present through
+    // the same call the cap divides, so a running sweep is never gameplay here.
+    const bool sweeping = g_phase != Phase::Idle && g_phase != Phase::Waiting;
+    g_gameplayPresent.store(!sweeping && SpmMapSweep::Seq() == 2);
     static bool started = false;
     if (!started) {
         started = true;
@@ -908,3 +920,7 @@ void MarkOffered() {
 }
 
 }  // namespace SpmPrepareGraphics
+
+// The 30 fps cap's gate for the deko present path (switch/deko/wgpu_encode.cpp),
+// which declares it the same way device.cpp declares this runtime's other hooks.
+extern "C" bool spm_gameplay_present() { return g_gameplayPresent.load(); }

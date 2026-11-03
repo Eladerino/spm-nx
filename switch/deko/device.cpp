@@ -59,9 +59,9 @@ constexpr DiagKey kDiagKeys[] = {
     {"picdump", &Diag::picDump},      {"efbclear", &Diag::efbClear},    {"bufdump", &Diag::bufDump},
     {"texdump", &Diag::texDump},      {"shaderdump", &Diag::shaderDump}, {"nomerge", &Diag::noMerge},
     {"uvlog", &Diag::uvLog},          {"mtxlog", &Diag::mtxLog},        {"perftimer", &Diag::perfTimer},
-    {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"cpthread", &Diag::cpThread},
-    {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},
-    {"poselog", &Diag::poseLog},
+    {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"fps30", &Diag::fps30},
+    {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},
+    {"gxthread", &Diag::gxThread},   {"poselog", &Diag::poseLog},
     {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},
     {"dkserver", &Diag::dkServer},
 };

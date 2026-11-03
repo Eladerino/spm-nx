@@ -3957,6 +3957,8 @@ constexpr DiagRow kDiagRows[] = {
      "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log, plus the decode thread's time and what the game waited on it for. Use it to measure where frame time goes."},
     {"profile", "Guest profiler (profile)", nullptr,
      "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them)."},
+    {"fps30", "30 fps cap (fps30)", nullptr,
+     "Caps the picture at 30 frames a second while you play: gameplay frames are shown one in two, each held for two screen refreshes, while the game itself keeps its own pace. For a locked 30 in places that cannot hold 60, or for curiosity. Takes effect at once; the title screen and the Prepare graphics sweep are not capped."},
     {"cpthread", "GX decode thread (cpthread)", "Threads",
      "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong."},
     {"gxworker", "GX call records (gxworker)", nullptr,

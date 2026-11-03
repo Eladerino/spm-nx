@@ -1330,11 +1330,29 @@ void __wrap_wgpuQueueWriteTexture(WGPUQueue queue, WGPUTexelCopyTextureInfo cons
 }
 
 // ---- the present: Aurora's picture, scaled to fit, into a swapchain image
+// The runtime's word on whether the frame being presented is gameplay (in a map, no
+// Prepare sweep running), kept current on the game thread (spm_prepare_graphics.cpp).
+bool spm_gameplay_present();
 bool aurora_switch_dk_present(void* texture) {
     auto t = g_textures.get(texture);
     if (!R.device || !t || !t->valid || !t->fmt.can2d) {
         SWDK_LOG_LIMITED(8, "present: the picture has no deko3d image: nothing shown");
         return false;
+    }
+    // Diag fps30, the 30 fps cap: while it is on, gameplay presents are shown one in
+    // two, so each shown frame stays on the panel for a second vblank and the picture
+    // updates at 30 Hz. The held call takes no swapchain image and waits for nothing:
+    // Aurora's next picture simply replaces this one unseen, so the guest's own pace
+    // never changes. Gameplay only (spm_gameplay_present): the Prepare sweep presents
+    // through this same call, and the title card's hold counts presented frames, so
+    // the sweep, the title, the logo and the loads all keep the panel's full rate.
+    static bool s_fps30HoldNext = false;
+    if (g_diag.fps30 && spm_gameplay_present()) {
+        const bool hold = s_fps30HoldNext;
+        s_fps30HoldNext = !s_fps30HoldNext;
+        if (hold) return true;
+    } else {
+        s_fps30HoldNext = false;
     }
     // (the wait for a free image, up to a vsync, outside the lock: the game's submits go on meanwhile)
     DkFence imageFence{};
