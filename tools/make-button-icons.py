@@ -61,6 +61,18 @@ TEXTURES = [
     ("tex1_40x40_1d6fdad80b7dcd8a_14.png", "disc", [("-", 0.5, 0.5, 0.5)]),
     ("tex1_40x40_c4a6d5884f8e8519_5.png", "plaindisc", [("1", 0.5, 0.5, 0.5)]),
     ("tex1_40x40_341c9fd2189acc61_5.png", "plaindisc", [("2", 0.5, 0.5, 0.5)]),
+    # The animated press prompts (wicon.bin's ICON_BTN_1_PRESSING and
+    # ICON_BTN_2_PRESSING): two stages of 16 frames each, the skirted up pose
+    # and the flat pressed pose, over the same button art as the plain discs
+    # above (wicon.tpl stores each pose twice under the one hash). The A pair
+    # below is the same animation, already covered. Each pose is a whole
+    # button, so a disc covers it outright; spots are measured per pose from
+    # the art's own silhouette (the pressed pose sits lower, as the game
+    # draws it), radius from the silhouette's half width like the title disc.
+    ("tex1_40x40_9385da9c84917672_5.png", "disc", [("1", 0.49, 0.475, 0.45)]),
+    ("tex1_40x40_7cdc488c8aac0ffe_5.png", "disc", [("1", 0.49, 0.525, 0.45)]),
+    ("tex1_40x40_6b099107b1c20a06_5.png", "disc", [("2", 0.49, 0.5, 0.45)]),
+    ("tex1_40x40_4cd31df78a31c8d4_5.png", "disc", [("2", 0.49, 0.537, 0.45)]),
     ("tex1_48x48_42bca1c8ab4b3dfb_5.png", "disc", [("A", 0.5, 0.5, 0.5)]),
     # The title screen's own "Press 2" disc (its title TPL instance, not the menu discs):
     # spot and radius measured from the title dump's art (opaque bbox 3,3 to 44,43 of 48).

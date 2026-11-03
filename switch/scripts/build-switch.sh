@@ -176,6 +176,8 @@ else
                      tex1_40x40_21ecf92a70736554_14.png tex1_40x40_db14bc3d6c7b16a5_14.png \
                      tex1_40x40_e73bd2aadadde9d9_14.png \
                      tex1_40x40_c4a6d5884f8e8519_5.png tex1_40x40_341c9fd2189acc61_5.png \
+                     tex1_40x40_9385da9c84917672_5.png tex1_40x40_7cdc488c8aac0ffe_5.png \
+                     tex1_40x40_6b099107b1c20a06_5.png tex1_40x40_4cd31df78a31c8d4_5.png \
                      letters/a.png letters/b.png letters/x.png letters/y.png \
                      letters/rightshoulder.png letters/righttrigger.png \
                      faces/a.png faces/b.png faces/x.png faces/y.png \
