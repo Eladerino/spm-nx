@@ -54,6 +54,17 @@ serial), barriers and serials.
   away from normal are the ones to name in a test report: `cpthread=0`, `gxthread=0`,
   `zcull=0`, and the experimental
   GX record switches `gxworker=1`, `gxdefer=1` (records replay on core 2).
+- The debug server is a second consumer of the same switches, and the scripted-run front
+  end: `source/debug_server.{h,cpp}` is the shared core vendored from SwitchWakerHD (see
+  `../THIRD_PARTY.md`), and `source/spm_debug_server.cpp` registers this port's commands
+  (info, diag, set, flush, mark, warp, place; shot, peek, poke, quit and reload answer
+  that they are not in this build) and the input provider the SDL shim's weak
+  `cos_switch_debug_input` expects. It is gated by `dkserver=1` in dk_diag.txt
+  (boot-time only: started from `diag_init`, stopped from `userAppExit`), has no menu
+  row and no settings_overlay code, feeds its log stream by tailing
+  `UserData/Logs/stderr.log` into the core's ring, and runs its threads at priority
+  0x3B. The dkserver key is one more than the count above says; the README's count is
+  the current one.
 - Changes land on main with the commit message stating what was actually compiled and tested.
 
 ## Known limitations

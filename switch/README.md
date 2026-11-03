@@ -175,11 +175,12 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   renderer's diagnostic switches, grouped under the same headings dk_diag.txt uses
   (each flip also writes all of them back to
   `UserData/dk_diag.txt`, the file the same switches are read from at boot), and Flush logs
-  and Mark log rows for test runs. Two more switches are boot-time only and have no row:
+  and Mark log rows for test runs. Three more switches are boot-time only and have no row:
   zcull, which is read once when the render queue is created (change it by editing the
-  `zcull` line in dk_diag.txt), and guestcore, which the thread starter reads from the
-  file before the diag system exists (edit the `guestcore` line). The file knows
-  twenty-two keys in all.
+  `zcull` line in dk_diag.txt), guestcore, which the thread starter reads from the
+  file before the diag system exists (edit the `guestcore` line), and dkserver, which
+  starts the debug server below (edit the `dkserver` line). The file knows
+  twenty-three keys in all.
   All of the page's switches start off except the GX decode thread (cpthread, on core 1)
   and the GX worker thread (gxthread), which are on unless turned off there; zcull also
   starts on. Three of them are the
@@ -194,6 +195,17 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   Diagnostics can hurt performance or distort the picture; they are for bug reports, not
   for play. If anything draws wrong with one of the GX switches on, turn it off and say
   which one in the bug report.
+- **Debug server** (dev builds only): with `dkserver=1` in `UserData/dk_diag.txt` the
+  game listens on TCP port 6543, a plain-text line protocol shared with the other ports
+  in this family (`help` lists the commands). It streams the log as it is written, reads
+  and flips the dk_diag switches (`diag`, `diag set`), flushes and marks the log, warps
+  (`warp <map>`), says where the game is (`info`, `place`), moves files under
+  `switch/spm-nx` (`get`, `put`, `ls`, `rm`, `mkdir`) and presses buttons as if from the
+  controller (`press`, `hold`, `stick`). It is off by default and stays off unless that
+  line is in the file; nothing about it runs, not even a socket. There is no password:
+  anyone on the local network who can reach the port can do all of the above, so turn it
+  on only for your own test runs. `shot`, `peek`, `poke`, `quit` and `reload` answer
+  that they are not in this build yet.
 
 Fresh installs start at Resolution 1.5x (a 1280x720 render, the screen's native size in
 handheld), Aspect 16:9 and frame interpolation off; the output itself is a fixed 60 Hz,
