@@ -214,7 +214,14 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/horizon_tls.c"
         "${SPM_SWITCH_DIR}/runtime/horizon_sdl.cpp"
         "${SPM_SWITCH_DIR}/runtime/updater_horizon.cpp"
-        "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp")
+        "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp"
+        "${SPM_SWITCH_DIR}/source/debug_server.cpp"
+        "${SPM_SWITCH_DIR}/source/spm_debug_server.cpp")
+    # The debug server core is one shared file across the ports (SwitchWakerHD's shape: it
+    # knows nothing of the game and is copied on, not forked): it stays out of the unity
+    # build so the translation unit that ships is the one the host test compiles.
+    set_source_files_properties("${SPM_SWITCH_DIR}/source/debug_server.cpp"
+        PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
     # The runtime's precompiled header is C++ (mkw_pch.h); these are the only C files in its targets.
     # They also stay out of its unity build: CMake would merge them into a generated unity_*_c.c
     # file that still gets the PCH, whatever these files' own SKIP_PRECOMPILE_HEADERS says.
