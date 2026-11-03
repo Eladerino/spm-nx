@@ -1004,14 +1004,29 @@ void RttLogInvoke(CpuContext* cpu) {
     RttLogWindowWords("[rttlog] invoke", "msgw", msgw);
     RttLogWindowWords("[rttlog] invoke", "pausewin", pausewin);
 }
+// The game's own title destination for a mapchange: the string "title" in relF's
+// .rodata, at the module's pre-linked address (image 0x80BF6840; .rodata at
+// 0x80C5A658 in the layout spm_rel_layout.json records for the prelink, +
+// 0x4AE90). The rttlog probe captured the game's own boot transit passing
+// exactly this pointer (stderr-rtt3.log frames 2021 and 2040: SeqWork.p0
+// 80CA54E8 "title", p1 null), and the decomp's relF symbol table has a 6-byte
+// string object at that .rodata offset (lbl_1_rodata_4AE90), so the address is
+// a static literal of the game's module, not a runtime buffer: it holds
+// "title" at all times.
+constexpr uint32_t kTitleMapName = 0x80CA54E8;
 void ReturnToTitle() {
     Enqueue([](CpuContext* cpu) {
         uint32_t now = 0, after = 0;
         if (!Memory::TryRead32(kNowSeq, now) || !Memory::TryRead32(kNextSeq, after) || now != 2 || after != 2) return;
         if (g_rttLog.load()) RttLogInvoke(cpu);
+        // Route through SEQ_MAPCHANGE with the game's own title destination
+        // instead of the game-over path's direct SEQ_TITLE jump: the transit
+        // tears down gameplay the way every working arrival on record was torn
+        // down, where the direct jump left carried MarioWork state (flags
+        // bit 0, the rttlog verdict) sitting in the file select's wait state.
         CpuContext call = *cpu;
-        call.gpr[3] = 1;  // seqSetSeq(SEQ_TITLE, nullptr, nullptr): the game over "quit" path
-        call.gpr[4] = 0;
+        call.gpr[3] = 3;  // seqSetSeq(SEQ_MAPCHANGE, "title", nullptr)
+        call.gpr[4] = kTitleMapName;
         call.gpr[5] = 0;
         InvokeIndirectCpu(0x8017B3C8, &call);
     });
