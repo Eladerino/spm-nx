@@ -193,6 +193,7 @@ struct Diag {
     std::atomic<bool> arrayUp = false;   // Aurora re-uploads every draw's vertex arrays (sets NSMBW_ARRAY_REUPLOAD=1 before the first draw)
     std::atomic<bool> profile = false;   // the runtime's guest sampling profiler captures the game thread while on; turning it off prints the hot list
     std::atomic<bool> poseLog = false;   // the runtime logs each n_controler anim pose drawn (archive, group, pose, map, sequence), once per distinct combination; log only, no draw is ever skipped
+    std::atomic<bool> fps30 = false;     // the 30 fps cap: while on, gameplay presents are shown one in two (the divider in aurora_switch_dk_present), so each shown frame is held for a second vblank and the picture updates at 30 Hz while the guest keeps its own pace. Gameplay only: the present path asks the runtime (spm_gameplay_present) and never caps the title, the loads or the Prepare sweep
     std::atomic<bool> cpThread = true;   // Aurora decodes GX commands on a thread of its own on core 1, from the end of the frame it is set in (lib/gx/fifo.cpp); on unless dk_diag.txt says cpthread=0
     std::atomic<bool> gxWorker = false;  // the runtime records guest GX calls and replays each one at once (gx_worker.h, Immediate), from the next frame
     std::atomic<bool> gxDefer = false;   // as gxworker, but the records wait for the next sync point (Deferred); implies gxworker
