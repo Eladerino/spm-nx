@@ -201,6 +201,7 @@ struct Diag {
     std::atomic<bool> dkCmd = false;     // arms the dk_cmd.txt command channel: while off, the present path never opens the file (test build spec A2). Scripted runs set dkcmd=1
     std::atomic<bool> guestCore = false; // helper threads (pipeline compile, uam, presenter) are kept off the guest's core 0 by the pthread trampoline (test build spec B2). Boot-time only: the trampoline reads dk_diag.txt itself, before diag_init exists; this field mirrors it for the boot log
     std::atomic<bool> dkServer = false;  // the debug server (source/debug_server.h, commands in source/spm_debug_server.cpp): a plain-text TCP line server on port 6543 for dev runs. Boot-time only: diag_init starts it once when this is on, and diag_set storing the field starts and stops nothing (the server's own diag command refuses the key). Dev runs only: the server has NO authentication, so anyone on the LAN can flip the switches above, move files and press buttons while it runs
+    std::atomic<bool> rttLog = false;    // the Return to Title hang log (spm_map_sweep.cpp's RttLogStep): while the game sits in SEQ_LOAD, the state the file select's startup waits on is written to the log once a second, reads only, nothing is changed. File-only like dkserver: no menu row; diag_init hands the boot value to the runtime through spm_rtt_log_set, and diag_set forwards flips the same way it forwards poselog
 };
 extern Diag g_diag;
 void diag_init();

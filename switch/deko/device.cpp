@@ -31,6 +31,10 @@ void SetSwitchProfileEnabled(bool enabled);
 // diag_init and diag_set forward the "poselog" switch to it.
 extern "C" void spm_pose_log_set(bool enabled);
 
+// The runtime's Return to Title hang log (spm_map_sweep.cpp), declared here the same way:
+// diag_init and diag_set forward the "rttlog" switch to it.
+extern "C" void spm_rtt_log_set(bool enabled);
+
 // The debug server (source/spm_debug_server.cpp), declared here the same way: diag_init
 // hands it the dkserver switch once the file has been read.
 extern "C" void spm_debug_server_boot(bool enabled);
@@ -63,7 +67,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},
     {"gxthread", &Diag::gxThread},   {"poselog", &Diag::poseLog},
     {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},
-    {"dkserver", &Diag::dkServer},
+    {"dkserver", &Diag::dkServer},    {"rttlog", &Diag::rttLog},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -169,6 +173,10 @@ void diag_init() {
     // A dkserver=1 in dk_diag.txt starts the debug server (TCP 6543, LAN only, no auth).
     // With the switch off this call returns at once: no socket, no thread.
     spm_debug_server_boot(g_diag.dkServer);
+    // A rttlog=1 in dk_diag.txt arms the runtime's Return to Title hang log from the start,
+    // so the session covers the boot's own file select too: the working arrival the hanging
+    // one gets compared against.
+    if (g_diag.rttLog) spm_rtt_log_set(true);
 }
 
 // diag_set (dk.h): the runtime path for the same switches. Every switch stores its field, which
@@ -188,6 +196,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "arrayup")) aurora::gx::fifo::nsmbw_set_array_reupload(on);
     else if (!std::strcmp(key, "profile")) GuestProfiler::SetSwitchProfileEnabled(on);
     else if (!std::strcmp(key, "poselog")) spm_pose_log_set(on);
+    else if (!std::strcmp(key, "rttlog")) spm_rtt_log_set(on);
     else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
     else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer") || !std::strcmp(key, "gxthread"))
         apply_gx_worker_mode();

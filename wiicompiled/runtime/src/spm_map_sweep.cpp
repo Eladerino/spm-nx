@@ -179,6 +179,12 @@ void RunMtxSelfTest(CpuContext* cpu) {
 // US0 seqSetSeq (0x8017B3C8) stores seq/map/entry; seq_gameInit reads gp->mapName at +0x44.
 constexpr uint32_t kNowSeq = 0x8056D0D8, kNextSeq = 0x8056D0DC, kGp = 0x8056D198;
 
+// Return to Title hang log (RttLogStep below): the guest words it reads. The stage word is
+// seqdrv's SeqWork.stage, the same one LogSceneChanges reads in hle/vi.cpp; the three work
+// pointers are the .sdata pointer variables of the same names in projects/spm/pal/addr_map.tsv.
+constexpr uint32_t kSeqWorkStage = 0x804CF364, kSeqLoadSubWp = 0x8056D0F0, kMsgDrvMsgW = 0x8056CF38,
+                   kPauseWinWp = 0x8056D950;
+
 // Debug menu warps (settings_overlay.cpp): the request is stored by the UI and served here, on the game's own frame.
 std::mutex g_warpMutex;
 bool g_warpPending = false, g_warpHasDoor = false;
@@ -695,8 +701,96 @@ bool MarioHasControl(CpuContext* cpu) {
     return Memory::Read8(mw + 0x34) == 0 && Memory::Read8(mw + 0x35) == 0;
 }
 
+// ---- Return to Title hang log (the "rttlog" dk_diag key) ----------------------------
+// ReturnToTitle borrows the game-over path's seqSetSeq(SEQ_TITLE) from live gameplay,
+// and after a direct jump the file select never becomes usable: seq_load sits in stage 0
+// polling guest state that a mapchange transit would have torn down (the hunt is written
+// up in spm-audit-findings/return-to-title-hunt-2026-11-03.md). This logger is the
+// evidence run for naming that state. While the game is in SEQ_LOAD it writes, once at
+// entry and then once every 60 frames, the load sequence's own stage, the file select's
+// work words (its state, flags and save-update event pointer live in the first words of
+// SeqLoadSubWork), the event manager's work words, the head of gp, Mario's flags and
+// control bytes, the spmario system level, and the message/pause window pointers. The
+// struct layouts are the generated code's, not this repo's, so the work structs are
+// logged as raw words: a value frozen across a whole hang is the finding, whichever
+// word it turns out to be. READS ONLY: the guest calls are the game's own pure
+// getters (marioGetPtr as above, spmarioGetSystemLevel as in SetGamePaused, and the
+// event manager's evtGetWork); nothing here writes guest memory or changes any
+// state. Off by default, and with the switch off Tick pays one atomic load for it.
+std::atomic<bool> g_rttLog{false};
+
+void RttLogStep(CpuContext* cpu, uint32_t frames) {
+    static bool inLoad = false;
+    static uint32_t lastEmit = 0;
+    if (!g_rttLog.load() || !cpu) {
+        inLoad = false;
+        return;
+    }
+    uint32_t now = 0, after = 0;
+    if (!Memory::TryRead32(kNowSeq, now) || !Memory::TryRead32(kNextSeq, after)) return;
+    if (now != 5) {  // SEQ_LOAD (kSeqNames order in TrackPlace)
+        if (inLoad) {
+            inLoad = false;
+            RT_LOGF(RT_TAG_RUNTIME, "[rttlog] left load at frame %u (now %u next %u)\n", frames, now, after);
+        }
+        return;
+    }
+    if (inLoad && frames - lastEmit < 60) return;
+    inLoad = true;
+    lastEmit = frames;
+
+    uint32_t stage = 0xFFFFFFFFu;
+    Memory::TryRead32(kSeqWorkStage, stage);
+    const int sysLevel = int(CallGuest(cpu, 0x801A7A4C, 0));  // spmarioGetSystemLevel
+    const uint32_t mw = CallGuest(cpu, 0x801214EC, 0);        // marioGetPtr
+    uint32_t marioFlags = 0;
+    int ctrl = -1, keyOff = -1;
+    if (Memory::Contains(mw, 0x40)) {
+        marioFlags = Memory::Read32(mw);  // MarioWork.flags, the word the [mario] log prints
+        ctrl = Memory::Read8(mw + 0x34);
+        keyOff = Memory::Read8(mw + 0x35);
+    }
+    uint32_t msgw = 0, pausewin = 0;
+    Memory::TryRead32(kMsgDrvMsgW, msgw);
+    Memory::TryRead32(kPauseWinWp, pausewin);
+    RT_LOGF(RT_TAG_RUNTIME,
+            "[rttlog] frame %u seq load (next %u) stage %u syslvl %d mario %08X flags %08X ctrl %d keyoff %d "
+            "msgw %08X pausewin %08X\n",
+            frames, after, stage, sysLevel, mw, marioFlags, ctrl, keyOff, msgw, pausewin);
+
+    uint32_t sub = 0;
+    if (Memory::TryRead32(kSeqLoadSubWp, sub) && sub && Memory::Contains(sub, 64)) {
+        RT_LOGF(RT_TAG_RUNTIME,
+                "[rttlog] loadsub %08X words %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X "
+                "%08X %08X\n",
+                sub, Memory::Read32(sub), Memory::Read32(sub + 4), Memory::Read32(sub + 8), Memory::Read32(sub + 12),
+                Memory::Read32(sub + 16), Memory::Read32(sub + 20), Memory::Read32(sub + 24), Memory::Read32(sub + 28),
+                Memory::Read32(sub + 32), Memory::Read32(sub + 36), Memory::Read32(sub + 40), Memory::Read32(sub + 44),
+                Memory::Read32(sub + 48), Memory::Read32(sub + 52), Memory::Read32(sub + 56), Memory::Read32(sub + 60));
+    } else {
+        RT_LOGF(RT_TAG_RUNTIME, "[rttlog] loadsub %08X (unreadable)\n", sub);
+    }
+    const uint32_t evt = CallGuest(cpu, 0x800D89B4, 0);  // evtGetWork
+    if (evt && Memory::Contains(evt, 32)) {
+        RT_LOGF(RT_TAG_RUNTIME, "[rttlog] evtwork %08X words %08X %08X %08X %08X %08X %08X %08X %08X\n", evt,
+                Memory::Read32(evt), Memory::Read32(evt + 4), Memory::Read32(evt + 8), Memory::Read32(evt + 12),
+                Memory::Read32(evt + 16), Memory::Read32(evt + 20), Memory::Read32(evt + 24), Memory::Read32(evt + 28));
+    } else {
+        RT_LOGF(RT_TAG_RUNTIME, "[rttlog] evtwork %08X (unreadable)\n", evt);
+    }
+    uint32_t gp = 0;
+    if (Memory::TryRead32(kGp, gp) && gp && Memory::Contains(gp, 32)) {
+        RT_LOGF(RT_TAG_RUNTIME, "[rttlog] gp %08X words %08X %08X %08X %08X %08X %08X %08X %08X\n", gp,
+                Memory::Read32(gp), Memory::Read32(gp + 4), Memory::Read32(gp + 8), Memory::Read32(gp + 12),
+                Memory::Read32(gp + 16), Memory::Read32(gp + 20), Memory::Read32(gp + 24), Memory::Read32(gp + 28));
+    } else {
+        RT_LOGF(RT_TAG_RUNTIME, "[rttlog] gp %08X (unreadable)\n", gp);
+    }
+}
+
 void Tick(CpuContext* cpu, uint32_t presentedFrames) {
     TrackPlace(cpu, presentedFrames);
+    RttLogStep(cpu, presentedFrames);
     Assert57SelfTest(cpu);
     CheatSelfTest(cpu);
     SaveAndCheatsStep(cpu);
@@ -1181,6 +1275,12 @@ std::atomic<bool> g_poseLog{false};
 }  // namespace
 
 extern "C" void spm_pose_log_set(bool enabled) { g_poseLog = enabled; }
+
+// The "rttlog" dk_diag key's other end: device.cpp forwards it here, from diag_init at
+// boot and from diag_set at runtime, the same handshake as spm_pose_log_set above. The
+// flag and the logger live with the Tick code (RttLogStep, in the SpmMapSweep namespace
+// of this same file).
+extern "C" void spm_rtt_log_set(bool enabled) { SpmMapSweep::g_rttLog.store(enabled); }
 
 extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
     if (!g_poseLog.load() || ctx == nullptr) return false;

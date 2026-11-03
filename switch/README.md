@@ -176,12 +176,14 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   renderer's diagnostic switches, grouped under the same headings dk_diag.txt uses
   (each flip also writes all of them back to
   `UserData/dk_diag.txt`, the file the same switches are read from at boot), and Flush logs
-  and Mark log rows for test runs. Three more switches are boot-time only and have no row:
+  and Mark log rows for test runs. Four more switches are boot-time only and have no row:
   zcull, which is read once when the render queue is created (change it by editing the
   `zcull` line in dk_diag.txt), guestcore, which the thread starter reads from the
-  file before the diag system exists (edit the `guestcore` line), and dkserver, which
-  starts the debug server below (edit the `dkserver` line). The file knows
-  twenty-four keys in all. One of the page's rows is a display option rather than a
+  file before the diag system exists (edit the `guestcore` line), dkserver, which
+  starts the debug server below (edit the `dkserver` line), and rttlog, which logs
+  the state the file select waits on when Return to Title hangs (edit the `rttlog`
+  line). The file knows
+  twenty-five keys in all. One of the page's rows is a display option rather than a
   check: 30 fps cap (`fps30`), under Performance, shows gameplay frames one in two
   for a locked 30 fps while the game keeps its own pace; the title screen and the
   Prepare graphics sweep are not capped.
