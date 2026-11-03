@@ -836,7 +836,8 @@ struct RebindState {
 // through RuntimeConfigFile::SetGamepadBinding and live-applied through
 // VirtualRemote::ReloadPadLayouts. The binding helpers mirror the ones the
 // Switch settings menu's Controls tab used for the same table.
-int g_optGamepadCapture = -1;  // gamepad row (action * 2 + slot) waiting for an input, or -1
+int g_optGamepadCapture = -1;  // gamepad cell (action * 2 + slot) waiting for an input, or -1
+int g_optGamepadCol = 0;       // the gamepad table's focused cell: 0 the first slot, 1 the second
 
 // Display names for the [gamepad] actions. The config grammar keeps the inherited keys
 // ("run", "a", "plus", "minus"), but the menu names what each input actually does in SPM:
@@ -926,6 +927,26 @@ void BindGamepadSlot(int style, int action, int slot, const std::string& name) {
     VirtualRemote::ReloadPadLayouts();
 }
 
+// The left stick click during a gamepad capture: the slot goes back to the
+// action's built-in binding for that slot, the defaults table's entry at the
+// same position. When the default has no entry for the slot, the slot is
+// cleared instead (the last entry going writes "none", like a clear). The
+// write goes through the same path as a bind, so dedup and the live reload
+// behave the same.
+void RestoreGamepadSlotDefault(int style, int action, int slot) {
+    std::vector<std::string> names = GamepadBindingNames(style, action);
+    const char* fallback = VirtualRemote::PadDefaultBinding(style, action);
+    const std::vector<std::string> defaults = SplitBindingNames(fallback != nullptr ? fallback : "");
+    if (slot < static_cast<int>(defaults.size())) {
+        if (slot < static_cast<int>(names.size())) names[static_cast<size_t>(slot)] = defaults[static_cast<size_t>(slot)];
+        else names.push_back(defaults[static_cast<size_t>(slot)]);  // an empty list: the default becomes the only entry
+    } else if (slot < static_cast<int>(names.size())) {
+        names.erase(names.begin() + slot);
+    }
+    WriteGamepadBindingNames(style, action, names);
+    VirtualRemote::ReloadPadLayouts();
+}
+
 void ResetGamepadBindings(int style) {
     for (int action = 0; action < 12; ++action) {
         const char* fallback = VirtualRemote::PadDefaultBinding(style, action);
@@ -973,30 +994,21 @@ std::string GamepadBindingLabel(const std::string& name, int style) {
     return name;
 }
 
-// One gamepad action's row text on the Controls page: the first slot's
-// label, then ", also <label>" for the second slot (the Controls panel's
-// phrasing), or "-" when nothing is bound. A name another shown action also
-// answers to is noted once, as "(also on <action>)": the button does both
-// jobs in game, and the row is where the player can see why. `shown` holds
-// the page's actions in display order with their resolved names, so the
-// note names the first conflicting action in that order.
-std::string GamepadActionRowText(int style, int action, const std::vector<std::string>& names,
-                                 const std::vector<std::pair<int, std::vector<std::string>>>& shown) {
-    if (names.empty()) return "-";
-    std::string text = GamepadBindingLabel(names[0], style);
-    if (names.size() > 1) text += ", also " + GamepadBindingLabel(names[1], style);
-    for (const std::string& name : names) {
-        int otherAction = -1;
-        for (const auto& [other, otherNames] : shown) {
-            if (other == action) continue;
-            if (std::find(otherNames.begin(), otherNames.end(), name) != otherNames.end()) {
-                otherAction = other;
-                break;
-            }
-        }
-        if (otherAction >= 0) {
+// One gamepad slot's cell text in the Controls page's binding table: the
+// slot's label, with "(also on <action>)" noted when another shown action
+// answers to the same input: the button does both jobs in game, and the
+// cell is where the player can see why. `shown` holds the page's actions in
+// display order with their resolved names, so the note names the first
+// conflicting action in that order. An empty slot never reaches here (the
+// builder draws "-" for it).
+std::string GamepadSlotCellText(int style, int action, const std::string& name,
+                                const std::vector<std::pair<int, std::vector<std::string>>>& shown) {
+    std::string text = GamepadBindingLabel(name, style);
+    for (const auto& [other, otherNames] : shown) {
+        if (other == action) continue;
+        if (std::find(otherNames.begin(), otherNames.end(), name) != otherNames.end()) {
             text += " (also on ";
-            text += kGamepadActionLabels[otherAction];
+            text += kGamepadActionLabels[other];
             text += ")";
             break;
         }
@@ -1007,9 +1019,10 @@ std::string GamepadActionRowText(int style, int action, const std::vector<std::s
 // The [gamepad] grammar name for a captured input (a gamepad button index,
 // or a PADEncodeAxisButton axis), through SDL's own name tables, with a
 // direction suffix for the stick axes. Empty when the input is outside the
-// bindable set: the stick clicks (elsewhere in this file the right click is
-// fast-forward and the left click switches character; in the Switch menu
-// they were the capture's cancel gesture, and they cancel here too).
+// bindable set: the stick clicks never bind (elsewhere in this file the
+// right click is fast-forward and the left click switches character);
+// CompleteRebind spends them as the capture's own gestures instead, the
+// right click cancelling and the left click restoring the slot's default.
 std::string GamepadCaptureName(uint32_t value) {
     if (PADIsAxisButton(value)) {
         const auto axis = static_cast<SDL_GamepadAxis>(PADAxisButtonAxis(value));
@@ -1054,8 +1067,15 @@ void CompleteRebind(uint32_t value) {
     if (capture.kind == RebindKind::Gamepad) {
         // The pad that was captured from sets the style table being edited.
         if (auto* pad = SDL_GetGamepadFromID(capture.instance)) {
-            if (const std::string name = GamepadCaptureName(value); !name.empty()) {
-                BindGamepadSlot(VirtualRemote::PadStyleOf(pad), capture.target / 2, capture.target % 2, name);
+            const int style = VirtualRemote::PadStyleOf(pad);
+            const int action = capture.target / 2, slot = capture.target % 2;
+            if (value == SDL_GAMEPAD_BUTTON_RIGHT_STICK) {
+                // The right stick click cancels: the binding stays as it was.
+            } else if (value == SDL_GAMEPAD_BUTTON_LEFT_STICK) {
+                // The left stick click puts the slot's default back.
+                RestoreGamepadSlotDefault(style, action, slot);
+            } else if (const std::string name = GamepadCaptureName(value); !name.empty()) {
+                BindGamepadSlot(style, action, slot, name);
             }
         }
         g_rebind.active = false;
@@ -3856,6 +3876,13 @@ struct OptRow {
     // rows and the draw never puts the selection box on one, so step is
     // never called; it still gets a no-op step so an accidental call is safe.
     bool heading = false;
+    // A two-cell table row (the Switch Controls page's gamepad bindings):
+    // value is the first slot's cell, value2 the second slot's. Left and
+    // right move the cell focus (g_optGamepadCol) instead of stepping a
+    // value, and confirm starts a capture for the focused cell only. Only
+    // the gamepad builder sets this, so no other page changes shape.
+    bool cells = false;
+    std::string value2;
 };
 
 // A section heading row, for OptionsRows builders: the draw renders it as a
@@ -4607,9 +4634,9 @@ std::vector<OptRow> OptionsRows(int tab) {
         // serves players 2-4; player 1's pad is read through this table
         // (virtual_remote's GamepadIntent), so this block is the one that
         // remaps the pad in hand. One row per action under section
-        // headings, the row showing both slots: select binds the first
-        // slot, a direction press binds the second. A change writes
-        // through and applies at once.
+        // headings, drawn as a table with a cell per slot: left and right
+        // pick the cell, select starts a capture for that cell only. A
+        // change writes through and applies at once.
         {
             const int index = PADGetIndexForPort(static_cast<uint32_t>(g_controllerPort));
             auto* pad = index >= 0 ? PADGetSDLGamepadForIndex(static_cast<uint32_t>(index)) : nullptr;
@@ -4649,22 +4676,38 @@ std::vector<OptRow> OptionsRows(int tab) {
                 rows.push_back(heading);
                 for (int i = 0; i < section.count; ++i) {
                     const int action = section.actions[i];
+                    const std::vector<std::string>& names = namesFor(action);
+                    // One cell per slot: the slot's label, "-" when the slot
+                    // is empty, "Press a button..." in the cell a capture is
+                    // armed for.
+                    const auto cellText = [&](int slot) {
+                        if (g_optGamepadCapture == action * 2 + slot) return std::string("Press a button...");
+                        if (slot >= static_cast<int>(names.size())) return std::string("-");
+                        return GamepadSlotCellText(style, action, names[static_cast<size_t>(slot)], shown);
+                    };
                     const bool capturing =
                         g_optGamepadCapture == action * 2 || g_optGamepadCapture == action * 2 + 1;
-                    rows.push_back({kGamepadActionLabels[action],
-                                    capturing ? "Press a button..."
-                                              : GamepadActionRowText(style, action, namesFor(action), shown),
-                                    [action](int d) {
-                        // Confirm binds slot 1; a direction press, the
-                        // gesture value rows cycle with, binds slot 2.
-                        const int slot = d == 0 ? 0 : 1;
+                    OptRow row;
+                    row.label = kGamepadActionLabels[action];
+                    row.cells = true;
+                    row.value = cellText(0);
+                    row.value2 = cellText(1);
+                    row.step = [action](int d) {
+                        // Confirm only: left and right move the cell focus
+                        // (HandleOptionsInput spends them there, so step
+                        // never sees them for a table row).
+                        if (d != 0) return;
                         const int index = PADGetIndexForPort(static_cast<uint32_t>(g_controllerPort));
                         if (index < 0 || !PADGetSDLGamepadForIndex(static_cast<uint32_t>(index))) return;
-                        const int idx = action * 2 + slot;
+                        const int idx = action * 2 + g_optGamepadCol;
                         BeginRebind(RebindKind::Gamepad, static_cast<uint16_t>(idx), kGamepadActionLabels[action]);
                         g_rebind.openPopup = false;  // picked here, not in the developer window
                         g_optGamepadCapture = idx;
-                    }, "Player 1's gamepad. Select binds the first slot; press left or right to bind the second. The change applies at once. Pressing the button already in a slot clears that slot. Clicking a stick while binding cancels."});
+                    };
+                    row.help = capturing
+                        ? "Press the button for this slot; it applies at once. Pressing the button already in the slot clears it. Right stick click cancels; left stick click puts the slot's default back."
+                        : "Player 1's gamepad. Left and right pick the slot, select sets it. The change applies at once.";
+                    rows.push_back(row);
                 }
             }
             rows.push_back({"Reset to defaults", "", [style](int d) {
@@ -5053,7 +5096,14 @@ void HandleOptionsInput() {
         g_clearCacheState = 0;
 #endif
     const OptRow& row = rows[static_cast<size_t>(g_optRow)];
-    if (dir != 0 && !row.value.empty()) row.step(dir);
+    if (row.cells) {
+        // A table row (the gamepad bindings): left and right move the cell
+        // focus between the row's two slots, clamped at either end, and
+        // never start a capture on their own; confirm captures the cell.
+        if (dir != 0) g_optGamepadCol = std::clamp(g_optGamepadCol + dir, 0, 1);
+    } else if (dir != 0 && !row.value.empty()) {
+        row.step(dir);
+    }
     if (ev & kOptConfirm) row.step(0);
 }
 
@@ -5137,9 +5187,15 @@ void DrawOptionsMenu() {
     for (int i = first; i < int(rows.size()) && i < first + visible; ++i, y -= rowH) {
         const OptRow& row = rows[static_cast<size_t>(i)];
         if (row.heading) {
-            // A section heading: a title on the page in the blue of an
-            // action label, with no value, no arrows and no selection.
+            // A section heading: a title on the page, with no value, no
+            // arrows and no selection. On Switch it sits outdented to the
+            // card's margin in plain ink, so it reads as the page's
+            // structure; the blue belongs to pressable rows alone.
+#if defined(__SWITCH__)
+            Txt(row.label, -hw + 30, y, 20.0f, 0x18120CFFu, 0);
+#else
             Txt(row.label, -hw + 56, y, 19.0f, 0x2A5AB0FFu, 0);
+#endif
             continue;
         }
         const bool sel = i == g_optRow;
@@ -5151,8 +5207,42 @@ void DrawOptionsMenu() {
         }
         const bool action = row.value.empty();
         const float labelW = action ? 2 * hw - 90.0f : 2 * hw - 330.0f;
-        Txt(row.label, -hw + 56, y, Fit(row.label, 20.0f, labelW), action ? 0x2A5AB0FFu : 0x18120CFFu, 0);
-        if (!action) {
+        if (row.cells) {
+            // The gamepad binding table: the action's name, then one cell
+            // per slot in fixed columns, all a step smaller than the other
+            // rows so the longest names and bind labels fit side by side
+            // (Fit still shrinks a longer cell, a conflict note, into its
+            // column). The focused cell wears the red outline the tab
+            // strip uses for focus.
+            const float cellCentres[2] = {-5.0f, 169.0f};
+            Txt(row.label, -hw + 56, y, Fit(row.label, 16.0f, 190.0f), 0x18120CFFu, 0);
+            const std::string cells[2] = {row.value, row.value2};
+            for (int c = 0; c < 2; ++c) {
+                Txt(cells[c], cellCentres[c], y, Fit(cells[c], 16.0f, 160.0f), 0x18120CFFu, 1);
+                if (sel && c == g_optGamepadCol)
+                    list->AddRect(S(cellCentres[c] - 83.0f, y + 14.0f), S(cellCentres[c] + 83.0f, y - 14.0f),
+                                  IM_COL32(220, 60, 40, 255), 8.0f * k, 0, 3.0f * k);
+            }
+            continue;
+        }
+        if (action) {
+#if defined(__SWITCH__)
+            // A press-to-run row is drawn as a button: a plate in the tab
+            // strip's fills (the selection yellow when the row is selected,
+            // the resting cream otherwise) with an ink border and an ink
+            // label, so it reads as pressable at a glance and never as a
+            // heading or a setting.
+            const float size = Fit(row.label, 20.0f, labelW);
+            const float textW = gameFont ? GameLayout::MeasureText(*font, GameLayout::Utf16(row.label), size)
+                                         : ImGui::GetFont()->CalcTextSizeA(size * k * 0.9f, FLT_MAX, 0.0f, row.label.c_str()).x / k;
+            Box(-hw + 42, y + 14, -hw + 70 + textW, y - 14,
+                sel ? IM_COL32(254, 230, 133, 255) : IM_COL32(236, 228, 210, 255), 9.0f, 3.0f);
+            Txt(row.label, -hw + 56, y, size, 0x18120CFFu, 0);
+#else
+            Txt(row.label, -hw + 56, y, Fit(row.label, 20.0f, labelW), 0x2A5AB0FFu, 0);
+#endif
+        } else {
+            Txt(row.label, -hw + 56, y, Fit(row.label, 20.0f, labelW), 0x18120CFFu, 0);
             Txt(row.value, hw - 140, y, Fit(row.value, 20.0f, 180.0f), 0x18120CFFu, 1);
             const ImU32 arrow = sel ? IM_COL32(220, 60, 40, 255) : IM_COL32(150, 140, 120, 255);
             list->AddTriangleFilled(S(hw - 252, y), S(hw - 240, y + 9), S(hw - 240, y - 9), arrow);
@@ -5171,9 +5261,9 @@ void DrawOptionsMenu() {
 #if defined(__SWITCH__)
     if (g_optTab == 3) {
         // The Controls page's own footer, always on the page rather than
-        // in a row's help: how binding, clearing and cancelling work is
-        // the thing players could not discover here before.
-        const char* footer = "Select: bind. Left/right: bind second slot. Same button again: clear. Stick click: cancel.";
+        // in a row's help: how the binding table works is the thing
+        // players could not discover here before.
+        const char* footer = "Select: set the highlighted slot. Right stick: cancel. Left stick: back to default.";
         Txt(footer, 0, bottom + 78.0f, Fit(footer, 14.0f, 2 * hw - 40.0f), 0x8A7A68FFu, 1);
     }
 #endif
