@@ -181,8 +181,8 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   `zcull` line in dk_diag.txt), guestcore, which the thread starter reads from the
   file before the diag system exists (edit the `guestcore` line), dkserver, which
   starts the debug server below (edit the `dkserver` line), and rttlog, which logs
-  the state the file select waits on when Return to Title hangs (edit the `rttlog`
-  line). The file knows
+  the state the file select waits on when Return to Title hangs, and the state at
+  the moment Return to Title is chosen (edit the `rttlog` line). The file knows
   twenty-five keys in all. One of the page's rows is a display option rather than a
   check: 30 fps cap (`fps30`), under Performance, shows gameplay frames one in two
   for a locked 30 fps while the game keeps its own pace; the title screen and the

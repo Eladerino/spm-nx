@@ -710,7 +710,10 @@ bool MarioHasControl(CpuContext* cpu) {
 // entry and then once every 60 frames, the load sequence's own stage, the file select's
 // work words (its state, flags and save-update event pointer live in the first words of
 // SeqLoadSubWork), the event manager's work words, the head of gp, Mario's flags and
-// control bytes, the spmario system level, and the message/pause window pointers. The
+// control bytes, the spmario system level, and the message/pause window pointers and
+// the first words of the two window work structs themselves. It also takes one
+// snapshot at the moment ReturnToTitle's job fires (tagged "invoke"): the state the
+// jump is made FROM, in gameplay, before seqSetSeq runs. The
 // struct layouts are the generated code's, not this repo's, so the work structs are
 // logged as raw words: a value frozen across a whole hang is the finding, whichever
 // word it turns out to be. READS ONLY: the guest calls are the game's own pure
@@ -718,6 +721,23 @@ bool MarioHasControl(CpuContext* cpu) {
 // event manager's evtGetWork); nothing here writes guest memory or changes any
 // state. Off by default, and with the switch off Tick pays one atomic load for it.
 std::atomic<bool> g_rttLog{false};
+uint32_t g_rttFrame = 0;  // presented frames at the latest Tick, for the invoke line
+
+// The first 8 words at a window work pointer, in the same guarded style as the other
+// structs here: a null pointer and an unreadable one each get a marker line instead of
+// a read. `tag` is "[rttlog]" for the load-step lines, "[rttlog] invoke" for the
+// ReturnToTitle snapshot, so the two never blur together in the log.
+void RttLogWindowWords(const char* tag, const char* name, uint32_t wp) {
+    if (!wp) {
+        RT_LOGF(RT_TAG_RUNTIME, "%s %s 00000000 (null)\n", tag, name);
+    } else if (!Memory::Contains(wp, 32)) {
+        RT_LOGF(RT_TAG_RUNTIME, "%s %s %08X (unreadable)\n", tag, name, wp);
+    } else {
+        RT_LOGF(RT_TAG_RUNTIME, "%s %s %08X words %08X %08X %08X %08X %08X %08X %08X %08X\n", tag, name, wp,
+                Memory::Read32(wp), Memory::Read32(wp + 4), Memory::Read32(wp + 8), Memory::Read32(wp + 12),
+                Memory::Read32(wp + 16), Memory::Read32(wp + 20), Memory::Read32(wp + 24), Memory::Read32(wp + 28));
+    }
+}
 
 void RttLogStep(CpuContext* cpu, uint32_t frames) {
     static bool inLoad = false;
@@ -726,6 +746,7 @@ void RttLogStep(CpuContext* cpu, uint32_t frames) {
         inLoad = false;
         return;
     }
+    g_rttFrame = frames;
     uint32_t now = 0, after = 0;
     if (!Memory::TryRead32(kNowSeq, now) || !Memory::TryRead32(kNextSeq, after)) return;
     if (now != 5) {  // SEQ_LOAD (kSeqNames order in TrackPlace)
@@ -757,6 +778,8 @@ void RttLogStep(CpuContext* cpu, uint32_t frames) {
             "[rttlog] frame %u seq load (next %u) stage %u syslvl %d mario %08X flags %08X ctrl %d keyoff %d "
             "msgw %08X pausewin %08X\n",
             frames, after, stage, sysLevel, mw, marioFlags, ctrl, keyOff, msgw, pausewin);
+    RttLogWindowWords("[rttlog]", "msgw", msgw);
+    RttLogWindowWords("[rttlog]", "pausewin", pausewin);
 
     uint32_t sub = 0;
     if (Memory::TryRead32(kSeqLoadSubWp, sub) && sub && Memory::Contains(sub, 64)) {
@@ -880,10 +903,37 @@ void SetTippi(bool enabled) {
         }
     });
 }
+// The rttlog snapshot at the moment ReturnToTitle's job fires: Mario's flags and
+// control bytes, the spmario system level, and the two window work structs' first
+// words, all as they stand in live gameplay BEFORE the seqSetSeq below runs. The
+// load-step lines show what the file select waits on; this shows what the jump
+// carried in. Same reads-only discipline as RttLogStep (the game's pure getters and
+// guarded memory reads, no writes). Called only with the switch on; with it off the
+// job below checks the flag and does nothing extra at all.
+void RttLogInvoke(CpuContext* cpu) {
+    const int sysLevel = int(CallGuest(cpu, 0x801A7A4C, 0));  // spmarioGetSystemLevel
+    const uint32_t mw = CallGuest(cpu, 0x801214EC, 0);        // marioGetPtr
+    uint32_t marioFlags = 0;
+    int ctrl = -1, keyOff = -1;
+    if (Memory::Contains(mw, 0x40)) {
+        marioFlags = Memory::Read32(mw);  // MarioWork.flags, as in RttLogStep
+        ctrl = Memory::Read8(mw + 0x34);
+        keyOff = Memory::Read8(mw + 0x35);
+    }
+    uint32_t msgw = 0, pausewin = 0;
+    Memory::TryRead32(kMsgDrvMsgW, msgw);
+    Memory::TryRead32(kPauseWinWp, pausewin);
+    RT_LOGF(RT_TAG_RUNTIME,
+            "[rttlog] invoke frame %u mario %08X flags %08X ctrl %d keyoff %d syslvl %d msgw %08X pausewin %08X\n",
+            g_rttFrame, mw, marioFlags, ctrl, keyOff, sysLevel, msgw, pausewin);
+    RttLogWindowWords("[rttlog] invoke", "msgw", msgw);
+    RttLogWindowWords("[rttlog] invoke", "pausewin", pausewin);
+}
 void ReturnToTitle() {
     Enqueue([](CpuContext* cpu) {
         uint32_t now = 0, after = 0;
         if (!Memory::TryRead32(kNowSeq, now) || !Memory::TryRead32(kNextSeq, after) || now != 2 || after != 2) return;
+        if (g_rttLog.load()) RttLogInvoke(cpu);
         CpuContext call = *cpu;
         call.gpr[3] = 1;  // seqSetSeq(SEQ_TITLE, nullptr, nullptr): the game over "quit" path
         call.gpr[4] = 0;
