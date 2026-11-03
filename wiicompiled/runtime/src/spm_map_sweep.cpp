@@ -182,8 +182,11 @@ constexpr uint32_t kNowSeq = 0x8056D0D8, kNextSeq = 0x8056D0DC, kGp = 0x8056D198
 // Return to Title hang log (RttLogStep below): the guest words it reads. The stage word is
 // seqdrv's SeqWork.stage, the same one LogSceneChanges reads in hle/vi.cpp; the three work
 // pointers are the .sdata pointer variables of the same names in projects/spm/pal/addr_map.tsv.
-constexpr uint32_t kSeqWorkStage = 0x804CF364, kSeqLoadSubWp = 0x8056D0F0, kMsgDrvMsgW = 0x8056CF38,
-                   kPauseWinWp = 0x8056D950;
+// SeqWork itself sits at 0x804CF360 (addr_map.tsv's seqWork; the stage word above is +0x04);
+// p0 and p1 are its pending seqSetSeq arguments, +0x08 and +0x0C by the decomp's seqdrv.h
+// (SeqWork SIZE_ASSERT 0x24): for a mapchange, the map name and door name pointers.
+constexpr uint32_t kSeqWorkStage = 0x804CF364, kSeqWorkP0 = 0x804CF368, kSeqWorkP1 = 0x804CF36C,
+                   kSeqLoadSubWp = 0x8056D0F0, kMsgDrvMsgW = 0x8056CF38, kPauseWinWp = 0x8056D950;
 
 // Debug menu warps (settings_overlay.cpp): the request is stored by the UI and served here, on the game's own frame.
 std::mutex g_warpMutex;
@@ -716,7 +719,16 @@ bool MarioHasControl(CpuContext* cpu) {
 // jump is made FROM, in gameplay, before seqSetSeq runs. The
 // struct layouts are the generated code's, not this repo's, so the work structs are
 // logged as raw words: a value frozen across a whole hang is the finding, whichever
-// word it turns out to be. READS ONLY: the guest calls are the game's own pure
+// word it turns out to be. The second run convicted carried MarioWork state (flags
+// bit 0, set in gameplay, never normalised because the direct SEQ_TITLE jump skips
+// the transit every working arrival took); the fix shape is to route the jump
+// through SEQ_MAPCHANGE with the game's own title destination, a token no source
+// here confirms and which must be captured, never guessed. So while a mapchange is
+// pending or running this step also logs SeqWork's pending arguments (p0 the map
+// name, p1 the door name) with their guarded string contents: every ordinary boot
+// performs the title-bound transit (logo -> mapchange -> game -> mapchange ->
+// title -> load), so one boot's log carries the token, pointers and all. READS
+// ONLY: the guest calls are the game's own pure
 // getters (marioGetPtr as above, spmarioGetSystemLevel as in SetGamePaused, and the
 // event manager's evtGetWork); nothing here writes guest memory or changes any
 // state. Off by default, and with the switch off Tick pays one atomic load for it.
@@ -739,16 +751,79 @@ void RttLogWindowWords(const char* tag, const char* name, uint32_t wp) {
     }
 }
 
+// A guest C string into buf, for SeqWork's pending map/door names: at most 24 bytes,
+// stopping at the NUL, every byte checked mappable before it is read and printable
+// before it is kept (the bounded-read style of the [mario] ground-name log in Tick).
+// A null pointer spells "(null)" and anything unmapped or non-printable spells
+// "(unreadable)", the markers RttLogWindowWords uses, so the mapchange line never
+// faults and never prints raw guest bytes.
+void RttLogStr(char* buf, size_t cap, uint32_t ptr) {
+    const char* marker = nullptr;
+    size_t n = 0;
+    if (!ptr) {
+        marker = "(null)";
+    } else {
+        for (; n < 24 && n + 1 < cap; n++) {
+            if (!Memory::Contains(ptr + uint32_t(n), 1)) {
+                marker = "(unreadable)";
+                break;
+            }
+            const uint8_t c = Memory::Read8(ptr + uint32_t(n));
+            if (!c) break;
+            if (c < 0x20 || c > 0x7E) {
+                marker = "(unreadable)";
+                break;
+            }
+            buf[n] = char(c);
+        }
+        if (n == 24) marker = nullptr;  // a long name truncates at 24 chars, still shown
+    }
+    if (marker) {
+        std::snprintf(buf, cap, "%s", marker);
+    } else {
+        buf[n] = '\0';
+    }
+}
+
 void RttLogStep(CpuContext* cpu, uint32_t frames) {
     static bool inLoad = false;
     static uint32_t lastEmit = 0;
+    static bool inMapchange = false;
+    static uint32_t mcStage = 0, mcP0 = 0, mcP1 = 0;
     if (!g_rttLog.load() || !cpu) {
         inLoad = false;
+        inMapchange = false;
         return;
     }
     g_rttFrame = frames;
     uint32_t now = 0, after = 0;
     if (!Memory::TryRead32(kNowSeq, now) || !Memory::TryRead32(kNextSeq, after)) return;
+    // A mapchange pending (next) or running (now): SeqWork's pending arguments are the
+    // destination the SEQ_MAPCHANGE fix needs, and a transit is only a few frames, so
+    // this logs at entry and at every stage or argument change, not on the load step's
+    // 60-frame cadence. It sits ahead of the load branch so that cadence can never
+    // swallow a transit frame.
+    if (now == 3 || after == 3) {  // SEQ_MAPCHANGE (kSeqNames order in TrackPlace)
+        uint32_t stage = 0xFFFFFFFFu, p0 = 0, p1 = 0;
+        Memory::TryRead32(kSeqWorkStage, stage);
+        Memory::TryRead32(kSeqWorkP0, p0);
+        Memory::TryRead32(kSeqWorkP1, p1);
+        if (!inMapchange || stage != mcStage || p0 != mcP0 || p1 != mcP1) {
+            char s0[32], s1[32];
+            RttLogStr(s0, sizeof s0, p0);
+            RttLogStr(s1, sizeof s1, p1);
+            RT_LOGF(RT_TAG_RUNTIME,
+                    "[rttlog] frame %u seq mapchange (now %u next %u) stage %u p0 %08X \"%s\" p1 %08X \"%s\"\n",
+                    frames, now, after, stage, p0, s0, p1, s1);
+        }
+        inMapchange = true;
+        mcStage = stage;
+        mcP0 = p0;
+        mcP1 = p1;
+    } else if (inMapchange) {
+        inMapchange = false;
+        RT_LOGF(RT_TAG_RUNTIME, "[rttlog] left mapchange at frame %u (now %u next %u)\n", frames, now, after);
+    }
     if (now != 5) {  // SEQ_LOAD (kSeqNames order in TrackPlace)
         if (inLoad) {
             inLoad = false;
