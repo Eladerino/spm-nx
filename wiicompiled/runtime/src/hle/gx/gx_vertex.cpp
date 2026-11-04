@@ -31,6 +31,156 @@ void ApplyAuroraVtxStateForBegin(GXVtxFmt fmt) {
 }
 
 // ============================================================================
+// gxdedup: GX setter no-change early-out (Switch Diagnostics "gxdedup")
+// ============================================================================
+//
+// The GX state setters' dirty-flag deferral follows libdol-nx by nx-mod
+// (https://github.com/nx-mod/libdol-nx, GPL-3.0-or-later), whose GX behaviour
+// follows doldecomp/ogws (CC0): a setter whose value already matches the live
+// state does not re-emit it.
+//
+// While the switch is on, GX__SetVtxDesc and GX__SetVtxAttrFmt below skip their
+// Aurora forward when the value they would send already equals what Aurora's
+// vertex state is known to hold, and GX__SetArray skips rewriting an unchanged
+// array entry (that setter has no Aurora forward; g_hleGxState is its state).
+// The HLE state update above each forward — and the vertex-layout-hash
+// invalidation a real change drives, which is where the pipeline keys read
+// from — runs exactly as it always has. Only the Aurora call is elided, and
+// only under all of these conditions:
+//
+// - A mirror (below) records the last value each Aurora vertex slot is known
+//   to hold. The forwards maintain it, GX__ClearVtxDesc's forward sets it to
+//   Aurora's post-clear registers (POS = GX_DIRECT, the rest GX_NONE), and
+//   GxStream::PublishAuroraVtxState re-syncs it wholesale, since a publish
+//   writes the descriptor set and one format row from g_hleGxState.
+// - A played display list's own state ops rewrite the CP registers behind the
+//   HLE cache's back, so GX__CallDisplayList, GXBeginDisplayList,
+//   GXEndDisplayList and GXInit invalidate the mirror: after any of them a
+//   slot forwards once before it can be skipped again. GX__DrawSphere
+//   invalidates too — it rewrites g_hleGxState and calls Aurora's clear
+//   directly, outside these overrides.
+// - While a display list is being RECORDED into guest memory the call is the
+//   list's content and must always emit, so the skip is gated on the tree's
+//   own recording predicate, GxWorkerRecordingBlocked() (gx_init.cpp):
+//   GXBeginDisplayList capture (g_dlRecordState) or an Aurora-recorded list
+//   (g_spmAuroraDlActive) in progress means never skip.
+// - GX_VA_NBT calls always forward: the pseudo-attribute also drives Aurora's
+//   hasBiNrms/nrmType side state, which the value mirror does not model.
+//
+// The mirror and counters are touched wherever the setter bodies run — the
+// game thread, or the GX worker's replay in record order — exactly like
+// g_hleGxState itself, and need no more synchronisation than it has. With the
+// switch off, each setter pays one atomic load and behaves exactly as base.
+
+namespace GxDedup {
+namespace {
+std::atomic<bool> g_enabled{false};
+
+GXAttrType g_mirrorDesc[26]{};
+bool g_mirrorDescValid[26]{};
+VtxAttrFmt g_mirrorFmt[8][26]{};
+bool g_mirrorFmtValid[8][26]{};
+
+struct FamilyCounter {
+    std::atomic<uint64_t> total{0};
+    std::atomic<uint64_t> skipped{0};
+};
+FamilyCounter g_counters[3];
+
+GXAttrType MapDescType(uint32_t t) {
+    return (t == GX_INDEX8 || t == GX_INDEX16) ? GX_DIRECT : static_cast<GXAttrType>(t);
+}
+}  // namespace
+
+bool Enabled() noexcept { return g_enabled.load(std::memory_order_relaxed); }
+
+void CountCall(int family) noexcept {
+    g_counters[family].total.fetch_add(1, std::memory_order_relaxed);
+}
+void CountSkip(int family) noexcept {
+    g_counters[family].skipped.fetch_add(1, std::memory_order_relaxed);
+}
+void TakeCounts(uint64_t totals[3], uint64_t skipped[3]) {
+    for (int i = 0; i < 3; ++i) {
+        totals[i] = g_counters[i].total.exchange(0, std::memory_order_relaxed);
+        skipped[i] = g_counters[i].skipped.exchange(0, std::memory_order_relaxed);
+    }
+}
+
+void NoteDescForwarded(uint32_t attr, GXAttrType mapped) noexcept {
+    if (attr < 26) {
+        g_mirrorDesc[attr] = mapped;
+        g_mirrorDescValid[attr] = true;
+    }
+}
+bool DescMatches(uint32_t attr, GXAttrType mapped) noexcept {
+    return attr < 26 && g_mirrorDescValid[attr] && g_mirrorDesc[attr] == mapped;
+}
+void NoteFmtForwarded(uint32_t fmt, uint32_t attr, const VtxAttrFmt& value) noexcept {
+    if (fmt < 8 && attr < 26) {
+        g_mirrorFmt[fmt][attr] = value;
+        g_mirrorFmtValid[fmt][attr] = true;
+    }
+}
+bool FmtMatches(uint32_t fmt, uint32_t attr, const VtxAttrFmt& value) noexcept {
+    if (fmt >= 8 || attr >= 26 || !g_mirrorFmtValid[fmt][attr]) return false;
+    const VtxAttrFmt& held = g_mirrorFmt[fmt][attr];
+    return held.cnt == value.cnt && held.type == value.type && held.frac == value.frac;
+}
+void NoteClearForwarded() noexcept {
+    for (uint32_t attr = 0; attr < 26; ++attr) {
+        g_mirrorDesc[attr] = attr == GX_VA_POS ? GX_DIRECT : GX_NONE;
+        g_mirrorDescValid[attr] = attr != GX_VA_NBT;
+    }
+}
+void NoteVtxPublish(int fmt, int fmtLoopFirst, int fmtLoopLast) {
+    for (uint32_t attr = 0; attr < 26; ++attr) {
+        if (attr == GX_VA_NBT) continue;
+        g_mirrorDesc[attr] = MapDescType(static_cast<uint32_t>(g_hleGxState.vtxDesc[attr]));
+        g_mirrorDescValid[attr] = true;
+    }
+    if (fmt < 0 || fmt >= 8) return;
+    for (int attr = fmtLoopFirst; attr <= fmtLoopLast; ++attr) {
+        if (attr < GX_VA_POS || attr >= GX_VA_MAX_ATTR) continue;
+        g_mirrorFmt[fmt][attr] = g_hleGxState.vtxAttrFmt[fmt][attr];
+        g_mirrorFmtValid[fmt][attr] = true;
+    }
+}
+void InvalidateVtxMirror() noexcept {
+    for (bool& valid : g_mirrorDescValid) valid = false;
+    for (auto& row : g_mirrorFmtValid)
+        for (bool& valid : row) valid = false;
+}
+}  // namespace GxDedup
+
+// The deko diag channel's door (switch/deko/device.cpp), the same shape as
+// spm_gxskip_set: diag_init and diag_set forward the "gxdedup" switch here.
+extern "C" void spm_gxdedup_set(bool enabled) {
+    GxDedup::g_enabled.store(enabled, std::memory_order_relaxed);
+}
+
+namespace GxWorker {
+void PrintGxDedupWindow(uint64_t firstFrame, uint64_t lastFrame) {
+    if (lastFrame < firstFrame) return;
+    uint64_t totals[3], skipped[3];
+    GxDedup::TakeCounts(totals, skipped);
+    if (totals[0] == 0 && totals[1] == 0 && totals[2] == 0) {
+        return;  // the switch was off (or no setter ran) for this whole window
+    }
+    std::fprintf(stderr,
+                 "[gxdedup] frames %llu-%llu: skipped/total VtxDesc %llu/%llu, VtxAttrFmt %llu/%llu, "
+                 "SetArray %llu/%llu\n",
+                 static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                 static_cast<unsigned long long>(skipped[GxDedup::kFamilyVtxDesc]),
+                 static_cast<unsigned long long>(totals[GxDedup::kFamilyVtxDesc]),
+                 static_cast<unsigned long long>(skipped[GxDedup::kFamilyVtxAttrFmt]),
+                 static_cast<unsigned long long>(totals[GxDedup::kFamilyVtxAttrFmt]),
+                 static_cast<unsigned long long>(skipped[GxDedup::kFamilySetArray]),
+                 static_cast<unsigned long long>(totals[GxDedup::kFamilySetArray]));
+}
+}  // namespace GxWorker
+
+// ============================================================================
 // Vertex Descriptor
 // ============================================================================
 
@@ -43,6 +193,7 @@ extern "C" void GX__ClearVtxDesc_8016dc34() {
     if (changed) g_hleGxState.InvalidateVtxLayoutHash();
     // GXClearVtxDesc resets descriptors only; array base/stride state persists.
     GXClearVtxDesc();
+    GxDedup::NoteClearForwarded();
 }
 PPC_NATIVE_OVERRIDE_VOID(8028bec8, GX__ClearVtxDesc_8016dc34, (), ());
 
@@ -56,7 +207,16 @@ extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
     }
     if (g_hleGxState.vtxDesc[attr] != oldType) g_hleGxState.InvalidateVtxLayoutHash();
     if(IsMatrixIndexAttr((GXAttr)attr)) return;
-    GXSetVtxDesc((GXAttr)a, (t==GX_INDEX8||t==GX_INDEX16)?GX_DIRECT:(GXAttrType)t);
+    const GXAttrType mapped = (t==GX_INDEX8||t==GX_INDEX16)?GX_DIRECT:(GXAttrType)t;
+    if (GxDedup::Enabled()) {
+        GxDedup::CountCall(GxDedup::kFamilyVtxDesc);
+        if (a != GX_VA_NBT && GxDedup::DescMatches(attr, mapped) && !GxWorkerRecordingBlocked()) {
+            GxDedup::CountSkip(GxDedup::kFamilyVtxDesc);
+            return;
+        }
+    }
+    GXSetVtxDesc((GXAttr)a, mapped);
+    if (a != GX_VA_NBT) GxDedup::NoteDescForwarded(attr, mapped);
 }
 PPC_NATIVE_OVERRIDE_VOID(8028b638, GX__SetVtxDesc_8016d3a4, (uint32_t a, uint32_t t), (a, t));
 
@@ -123,7 +283,16 @@ extern "C" void GX__SetVtxAttrFmt_8016dc68(uint32_t vf, uint32_t a, uint32_t c, 
     if (vf >= GX_MAX_VTXFMT || a < GX_VA_POS || a >= GX_VA_MAX_ATTR) {
         return;
     }
+    const VtxAttrFmt value{(GXCompCnt)c, (GXCompType)t, (u8)fr};
+    if (a != GX_VA_NBT && GxDedup::Enabled()) {
+        GxDedup::CountCall(GxDedup::kFamilyVtxAttrFmt);
+        if (GxDedup::FmtMatches(vf, attr, value) && !GxWorkerRecordingBlocked()) {
+            GxDedup::CountSkip(GxDedup::kFamilyVtxAttrFmt);
+            return;
+        }
+    }
     GXSetVtxAttrFmt((GXVtxFmt)vf, (GXAttr)a, (GXCompCnt)c, (GXCompType)t, (u8)fr);
+    if (a != GX_VA_NBT) GxDedup::NoteFmtForwarded(vf, attr, value);
 }
 PPC_NATIVE_OVERRIDE_VOID(8028befc, GX__SetVtxAttrFmt_8016dc68, (uint32_t vf, uint32_t a, uint32_t c, uint32_t t, uint32_t fr), (vf, a, c, t, fr));
 
@@ -183,7 +352,20 @@ PPC_NATIVE_OVERRIDE_VOID(8028c54c, GX__GetVtxAttrFmtv_8016e2b8, (uint32_t vf, ui
 
 extern "C" void GX__SetArray_8016e32c(uint32_t a, uint32_t ba, uint32_t str) {
     const uint32_t attr = CanonicalVtxAttr(a);
-    if(attr<26){ g_hleGxState.vtxArray[attr].base=ba; g_hleGxState.vtxArray[attr].stride=str; }
+    if(attr<26){
+        // gxdedup: this setter's whole forward is the state write itself (the
+        // array state lives in g_hleGxState; nothing is emitted), so an
+        // unchanged entry is pure re-write. Counted for the share; the saving
+        // here is the write, not a call.
+        if (GxDedup::Enabled()) {
+            GxDedup::CountCall(GxDedup::kFamilySetArray);
+            if (g_hleGxState.vtxArray[attr].base == ba && g_hleGxState.vtxArray[attr].stride == str) {
+                GxDedup::CountSkip(GxDedup::kFamilySetArray);
+                return;
+            }
+        }
+        g_hleGxState.vtxArray[attr].base=ba; g_hleGxState.vtxArray[attr].stride=str;
+    }
 }
 PPC_NATIVE_OVERRIDE_VOID(8028c5c0, GX__SetArray_8016e32c, (uint32_t a, uint32_t ba, uint32_t str), (a, ba, str));
 
@@ -339,6 +521,9 @@ PPC_NATIVE_OVERRIDE_VOID(802a7c90, GX__End_80048c30, (), ());  // NSMBW out-of-l
 #endif
 
 extern "C" void GX__DrawSphere_80172a30(uint32_t numMajor, uint32_t numMinor) {
+    // gxdedup: this function rewrites g_hleGxState directly and calls Aurora's
+    // GXClearVtxDesc itself, outside the overrides the mirror watches.
+    GxDedup::InvalidateVtxMirror();
     constexpr uint32_t kAttrCount = 26;
     constexpr float kSphereRadius = 1.0f;
     constexpr float kPi = 3.14159265358979323846f;

@@ -3959,6 +3959,8 @@ constexpr DiagRow kDiagRows[] = {
      "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them)."},
     {"fps30", "30 fps cap (fps30)", nullptr,
      "Caps the picture at 30 frames a second while you play: gameplay frames are shown one in two, each held for two screen refreshes, while the game itself keeps its own pace. For a locked 30 in places that cannot hold 60, or for curiosity. Takes effect at once; the title screen and the Prepare graphics sweep are not capped."},
+    {"gxdedup", "GX setter dedup (gxdedup)", nullptr,
+     "An experiment: while on, the vertex state setters (vertex descriptions, attribute formats and array bases) skip re-sending a value the graphics state already holds, except while a display list is being recorded, where every call is list content and always goes through. The picture should look exactly the same; if anything draws wrong, turn it off and say what you saw. With Performance timers on, a [gxdedup] line every 600 frames counts how many setter calls were skipped out of how many arrived. Takes effect at once."},
     {"cpthread", "GX decode thread (cpthread)", "Threads",
      "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong."},
     {"gxworker", "GX call records (gxworker)", nullptr,
