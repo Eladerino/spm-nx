@@ -85,17 +85,12 @@ constexpr DiagKey kDiagKeys[] = {
     {"texdump", &Diag::texDump},      {"shaderdump", &Diag::shaderDump}, {"nomerge", &Diag::noMerge},
     {"uvlog", &Diag::uvLog},          {"mtxlog", &Diag::mtxLog},        {"perftimer", &Diag::perfTimer},
     {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"fps30", &Diag::fps30},
-    {"gxskip", &Diag::gxSkip},        {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},
-    {"dlprobe", &Diag::dlProbe},      {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},
-    {"gxdedup", &Diag::gxDedup},      {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},
-    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},    {"poselog", &Diag::poseLog},
-    {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},
-    {"dkserver", &Diag::dkServer},    {"rttlog", &Diag::rttLog},          {"pmsmemo", &Diag::pmsMemo},
-    {"dkserver", &Diag::dkServer},    {"rttlog", &Diag::rttLog},        {"axfxnative", &Diag::axfxNative},
-    {"gxskip", &Diag::gxSkip},        {"dstep", &Diag::dstep},          {"cpthread", &Diag::cpThread},
-    {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},
-    {"poselog", &Diag::poseLog},      {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},
-    {"guestcore", &Diag::guestCore},  {"dkserver", &Diag::dkServer},    {"rttlog", &Diag::rttLog},
+    {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},
+    {"gxthread", &Diag::gxThread},    {"poselog", &Diag::poseLog},      {"dkcmd", &Diag::dkCmd},
+    {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},  {"dkserver", &Diag::dkServer},
+    {"rttlog", &Diag::rttLog},        {"pmsmemo", &Diag::pmsMemo},      {"gxskip", &Diag::gxSkip},
+    {"dlprobe", &Diag::dlProbe},      {"gxdedup", &Diag::gxDedup},      {"axfxnative", &Diag::axfxNative},
+    {"dstep", &Diag::dstep},
 };
 
 const DiagKey* find_diag_key(const char* name) {
