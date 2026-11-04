@@ -172,7 +172,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   texture to `Cache/texture_dumps` under the name a replacement would use, for making
   new replacement pictures; takes effect after a restart),
   and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
-  recovery step for a cache that has gone wrong). Diagnostics holds twenty-one of the
+  recovery step for a cache that has gone wrong). Diagnostics holds twenty-two of the
   renderer's diagnostic switches, grouped under the same headings dk_diag.txt uses
   (each flip also writes all of them back to
   `UserData/dk_diag.txt`, the file the same switches are read from at boot), and Flush logs
@@ -183,13 +183,19 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   starts the debug server below (edit the `dkserver` line), and rttlog, which logs
   the state the file select waits on when Return to Title hangs, and the state at
   the moment Return to Title is chosen (edit the `rttlog` line). The file knows
-  twenty-five keys in all. One of the page's rows is a display option rather than a
+  twenty-six keys in all. One of the page's rows is a display option rather than a
   check: 30 fps cap (`fps30`), under Performance, shows gameplay frames one in two
   for a locked 30 fps while the game keeps its own pace; the title screen and the
   Prepare graphics sweep are not capped.
   All of the page's switches start off except the GX decode thread (cpthread, on core 1)
   and the GX worker thread (gxthread), which are on unless turned off there; zcull also
-  starts on. Three of them are the
+  starts on. One Performance row is an experiment rather than a way to play: the
+  message-string memo (`pmsmemo`) makes the patcher that rewrites the game's instruction
+  lines for the controller check each already-patched line at the address it remembers,
+  and only re-search the lines whose check fails, instead of sweeping all of MEM1 for
+  every line on every area change; the wording patched is identical either way, and its
+  `[pmsmemo]` log line counts the checks, the fallbacks and the searches still run.
+  Three of them are the
   experimental GX call-record switches, best left as they are for play:
 
   | Switch | What it does |
