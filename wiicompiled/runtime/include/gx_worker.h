@@ -131,6 +131,15 @@ void GxSkipPresentedFrame();
 // the window were sunk, and the mean present-to-present interval of the sunk and the rendered
 // ticks in the same window, so L is read off one log with its own control group.
 void PrintGxSkipWindow(uint64_t firstFrame, uint64_t lastFrame);
+// ---- the gxdedup experiment (Switch Diagnostics "gxdedup"; state in gx_vertex.cpp) -----------
+//
+// While the switch is on, the vertex setters (GXSetVtxDesc / GXSetVtxAttrFmt / GXSetArray)
+// skip re-emitting a value Aurora's vertex state already holds — never while a display
+// list is being recorded (GxWorkerRecordingBlocked), where the call is list content. The
+// [gxdedup] line for a perftimer window, printed with the [calls] lines: skipped/total
+// calls per setter family while the switch was on, which is the no-change share the
+// experiment exists to measure. Prints nothing while nothing was counted.
+void PrintGxDedupWindow(uint64_t firstFrame, uint64_t lastFrame);
 
 template <auto Fn, typename Tuple>
 void ReplayTuple(void* payload) {
