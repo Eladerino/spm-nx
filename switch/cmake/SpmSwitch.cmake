@@ -325,10 +325,16 @@ function(spm_switch_configure_products)
     # deko3d or uam: they compile in GCC scope before the clang launcher is set and cannot
     # take Clang PGO.
     if(SPM_PGO_INSTRUMENT)
-        set(_spm_pgo_flags -fprofile-generate
-            "SHELL:-mllvm -disable-vp=true"
-            "SHELL:-mllvm -static-func-full-module-prefix=false"
-            "SHELL:-mllvm -do-counter-promotion=false")
+        # Language-gated (COMPILE_LANGUAGE C,CXX): the -mllvm options are Clang-only, and
+        # targets in scope (mkw_runtime_common) carry .S sources that the GCC assembler
+        # driver compiles: applied unconditionally, the first LOQ capture build died with
+        # "unrecognized command-line option '-mllvm'" on data_sections_init_blobs.S and
+        # co_switch.S. C/CXX compile lines are unchanged: the full KartPadNX set, in order.
+        set(_spm_pgo_flags
+            "$<$<COMPILE_LANGUAGE:C,CXX>:-fprofile-generate>"
+            "$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-mllvm -disable-vp=true>"
+            "$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-mllvm -static-func-full-module-prefix=false>"
+            "$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-mllvm -do-counter-promotion=false>")
         foreach(_spm_pgo_target IN ITEMS
                 mkw_base_shared mkw_base_sensitive mkw_retro_sensitive mkw_retro_rewind_functions)
             if(TARGET ${_spm_pgo_target})
@@ -412,9 +418,13 @@ function(spm_switch_configure_products)
                 "(switch/scripts/Containerfile): raw profile formats are version-locked. "
                 "Re-train with the current toolchain.")
         endif()
-        set(_spm_pgo_use_flags "-fprofile-instr-use=${SPM_PGO_PROFILE}"
-            "SHELL:-mllvm -disable-vp=true"
-            "SHELL:-mllvm -static-func-full-module-prefix=false")
+        # Same COMPILE_LANGUAGE gating as the capture side: this block applies to the same
+        # targets, so ungated -mllvm options would fail the pgo-use build on the same GCC
+        # assembler sources.
+        set(_spm_pgo_use_flags
+            "$<$<COMPILE_LANGUAGE:C,CXX>:-fprofile-instr-use=${SPM_PGO_PROFILE}>"
+            "$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-mllvm -disable-vp=true>"
+            "$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-mllvm -static-func-full-module-prefix=false>")
         foreach(_spm_pgo_target IN ITEMS
                 mkw_base_shared mkw_base_sensitive mkw_retro_sensitive mkw_retro_rewind_functions
                 mkw_runtime_common WiiCompiled RetroRewind
