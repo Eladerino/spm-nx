@@ -172,7 +172,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   texture to `Cache/texture_dumps` under the name a replacement would use, for making
   new replacement pictures; takes effect after a restart),
   and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
-  recovery step for a cache that has gone wrong). Diagnostics holds twenty-two of the
+  recovery step for a cache that has gone wrong). Diagnostics holds twenty-three of the
   renderer's diagnostic switches, grouped under the same headings dk_diag.txt uses
   (each flip also writes all of them back to
   `UserData/dk_diag.txt`, the file the same switches are read from at boot), and Flush logs
@@ -183,14 +183,20 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   starts the debug server below (edit the `dkserver` line), and rttlog, which logs
   the state the file select waits on when Return to Title hangs, and the state at
   the moment Return to Title is chosen (edit the `rttlog` line). The file knows
-  twenty-six keys in all. One of the page's rows is a display option rather than a
+  twenty-seven keys in all. One of the page's rows is a display option rather than a
   check: 30 fps cap (`fps30`), under Performance, shows gameplay frames one in two
   for a locked 30 fps while the game keeps its own pace; the title screen and the
   Prepare graphics sweep are not capped. Another Performance row is a measurement
   spike rather than a way to play: GX suppression (`gxskip`) throws away every
   second gameplay frame's GX output before any of it is decoded and does not show
   that frame, while the game tick itself runs in full, so a perftimer run prices
-  what a tick costs when its GX costs nothing.
+  what a tick costs when its GX costs nothing. A third Performance row is the mode
+  that spike priced: double-step (`dstep`) runs two game ticks per picture shown —
+  the first sunk through the same discard path, the second rendered — so the game
+  advances at up to twice the shown rate in heavy areas, with input read again on
+  the second tick; a perftimer run's `[dstep]` line reports the tick rate and game
+  speed it reached. If `gxskip` is on at the same time, the spike wins and `dstep`
+  does nothing, and `fps30`'s divider stands down while `dstep` is on.
   All of the page's switches start off except the GX decode thread (cpthread, on core 1)
   and the GX worker thread (gxthread), which are on unless turned off there; zcull also
   starts on. Three of them are the
