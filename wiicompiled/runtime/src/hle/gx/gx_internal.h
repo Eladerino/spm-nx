@@ -309,6 +309,40 @@ void SpmBBoxPosition(const float* p, int count);
 // Flushes the shadow cursor/count back into guest memory and stops recording.
 void EndDisplayListRecording();
 
+// ---- gxdedup: GX setter no-change early-out (Switch Diagnostics "gxdedup") ----
+// While the switch is on, the vertex setters in gx_vertex.cpp skip re-emitting a
+// value Aurora's CP state is known to already hold. The mirror of that state lives
+// in gx_vertex.cpp; these are its doors. The gate that keeps it sound is the tree's
+// own recording predicate, GxWorkerRecordingBlocked() (gx_worker.h): while a
+// display list is being recorded into guest memory, a setter call IS list content
+// and never skips.
+namespace GxDedup {
+inline constexpr int kFamilyVtxDesc = 0;
+inline constexpr int kFamilyVtxAttrFmt = 1;
+inline constexpr int kFamilySetArray = 2;
+
+bool Enabled() noexcept;
+void CountCall(int family) noexcept;
+void CountSkip(int family) noexcept;
+void TakeCounts(uint64_t totals[3], uint64_t skipped[3]);
+
+// The mirror: the last value each Aurora vertex slot is known to hold (for
+// descriptors, the mapped type — GX_INDEX8/16 are forwarded as GX_DIRECT).
+void NoteDescForwarded(uint32_t attr, GXAttrType mapped) noexcept;
+bool DescMatches(uint32_t attr, GXAttrType mapped) noexcept;
+void NoteFmtForwarded(uint32_t fmt, uint32_t attr, const VtxAttrFmt& value) noexcept;
+bool FmtMatches(uint32_t fmt, uint32_t attr, const VtxAttrFmt& value) noexcept;
+void NoteClearForwarded() noexcept;
+// GxStream::PublishAuroraVtxState has just written the descriptor set and format
+// row `fmt` (rows fmtLoopFirst..fmtLoopLast) from g_hleGxState, so Aurora holds
+// exactly those values now.
+void NoteVtxPublish(int fmt, int fmtLoopFirst, int fmtLoopLast);
+// A display list played, or a recording boundary passed: a list's own state ops
+// may have rewritten Aurora's CP registers behind the HLE cache's back, so no
+// slot is known to mirror g_hleGxState again until it is forwarded or published.
+void InvalidateVtxMirror() noexcept;
+}  // namespace GxDedup
+
 // --- Helper Functions ---
 void WriteDisplayListData(uint32_t val, uint32_t sizeBytes);
 void BeginNextAuroraFrameWithRetry(std::chrono::milliseconds timeout = std::chrono::milliseconds(100));

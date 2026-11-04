@@ -385,6 +385,10 @@ inline void PublishAuroraVtxState(GXVtxFmt fmt, const AuroraVtxPublishOptions& o
         const auto& f = g_hleGxState.vtxAttrFmt[fmt][attr];
         GXSetVtxAttrFmt(fmt, gxAttr, f.cnt, f.type, f.frac);
     }
+
+    // gxdedup (gx_internal.h): Aurora's vertex state now holds exactly what was
+    // published above, so the setters' mirror of it is re-synced here.
+    GxDedup::NoteVtxPublish(static_cast<int>(fmt), options.fmtLoopFirst, options.fmtLoopLast);
 }
 
 } // namespace GxStream
