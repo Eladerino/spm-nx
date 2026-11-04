@@ -141,6 +141,39 @@ void PrintGxSkipWindow(uint64_t firstFrame, uint64_t lastFrame);
 // experiment exists to measure. Prints nothing while nothing was counted.
 void PrintGxDedupWindow(uint64_t firstFrame, uint64_t lastFrame);
 
+// ---- the dstep mode (Switch Diagnostics "dstep"; state in gx_worker.cpp) ----------------------
+//
+// The double-step full-speed mode, built on the gxskip sink: while the switch is on and the
+// same gameplay gate is open, the guest runs TWO ticks per shown frame. The first tick of
+// each pair is sunk — its GX output dies at the gxskip doors and its present is held by the
+// dstep divider in aurora_switch_dk_present — and the second tick renders and shows. Exactly
+// two ticks per shown frame, never more: there is no catch-up accumulator, so a slow pair
+// just takes longer. The game therefore advances at up to twice the shown rate; whether it
+// reaches full speed is the rendered tick's price, and the [dstep] window line reports the
+// tick rate and game-speed percentage it actually reached.
+//
+// The pair driver lives at the same presented-frame boundary as the spike
+// (DstepPresentedFrame, called just after GxSkipPresentedFrame) and has the last word on the
+// sink there; when it owns the frames, the spike's hook stands down entirely. Pair state
+// resets whenever the switch is off, the gate shuts (title, loads, map changes, saves, the
+// Prepare sweep) or the mode disengages, so the first frame back always starts a pair with a
+// sunk tick and the sink never leaks across a boundary it should not. If gxskip is on too,
+// dstep yields: the spike owns the frames and dstep does nothing (the two alternations
+// would otherwise stack into a stream with no shown frames at all). While dstep is on, the
+// fps30 present divider stands down at its use site instead.
+
+// Called from VI_HLE_PresentFrame for every presented (XFB) frame, just after
+// GxSkipPresentedFrame: closes the ended tick's interval into the sunk or rendered bucket
+// (a completed pair also closes a shown-frame interval), decides the next tick's sink
+// state, and hands it to Aurora's FIFO sink.
+void DstepPresentedFrame();
+
+// The [dstep] line for a perftimer window, printed with the [calls] lines: shown frames,
+// guest ticks, the effective tick rate and game speed as a percentage of 60 ticks/s over
+// the engaged span, and the sunk / rendered / shown mean intervals. Prints nothing while
+// no tick in the window was sunk by the mode.
+void PrintDstepWindow(uint64_t firstFrame, uint64_t lastFrame);
+
 template <auto Fn, typename Tuple>
 void ReplayTuple(void* payload) {
     Tuple* args = static_cast<Tuple*>(payload);
