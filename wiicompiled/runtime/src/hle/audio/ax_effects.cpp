@@ -488,5 +488,17 @@ extern "C" void AXFXReverbHiExpCallback_802881c0(CpuContext* ctx) {
     func_802881C0(ctx);
 }
 
-REGISTER_NATIVE_FUNCTION_AS(0x802881C0, AXFXReverbHiExpCallback_802881c0,
-                            "AXFXReverbHiExpCallback_802881c0");
+// NOT REGISTERED, deliberately (lab combine fix, Nov 4, 2026): 0x802881C0 is an
+// indirect-dispatch target — the game reaches this callback through the AXFX
+// function table, so the generated indirect dispatch table carries an entry
+// for it, and abi_bridge's ValidateGeneratedIndirectDispatchLocked requires
+// every table entry's registered winner to be the translated body. A
+// REGISTER_NATIVE_FUNCTION_AS here makes the winner Native and the runtime
+// refuses to boot ("Stale generated indirect dispatch winner at 0x802881c0"),
+// toggle or no toggle: the first lab build crashed on exactly that before
+// the title. Serving this callback natively needs an indirect-dispatch
+// override mechanism in the runtime (or a guest-side trampoline), which is
+// separate work from the state-layout derivation; the wrapper above stays
+// as the ABI-proven shell that work will register. Until then the
+// "axfxnative" switch is a reserved no-op: spm_axfx_native_set still
+// forwards it, and nothing reads the flag.
