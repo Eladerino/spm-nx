@@ -3959,6 +3959,8 @@ constexpr DiagRow kDiagRows[] = {
      "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them)."},
     {"fps30", "30 fps cap (fps30)", nullptr,
      "Caps the picture at 30 frames a second while you play: gameplay frames are shown one in two, each held for two screen refreshes, while the game itself keeps its own pace. For a locked 30 in places that cannot hold 60, or for curiosity. Takes effect at once; the title screen and the Prepare graphics sweep are not capped."},
+    {"dlprobe", "Display-list cache probe (dlprobe)", nullptr,
+     "A measurement, not a cache: while on, every display list the game submits is hashed and compared with the last list seen at the same address, and every Performance timers window prints a [dlprobe] line giving the share of submitted list bytes that came back unchanged — what a decoded-display-list cache would serve instead of decoding again. It caches nothing and skips nothing; it only makes submitting lists slower while it runs. Use it with Performance timers on, in the place you want priced, then turn it off to play."},
     {"cpthread", "GX decode thread (cpthread)", "Threads",
      "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong."},
     {"gxworker", "GX call records (gxworker)", nullptr,
