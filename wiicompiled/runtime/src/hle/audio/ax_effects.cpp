@@ -4,9 +4,11 @@
 #include "memory.h"
 #include "ppc_runtime.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 
@@ -375,3 +377,116 @@ extern "C" void AXFXReverbStdExpCallback_8012b830(CpuContext* ctx) {
 REGISTER_NATIVE_FUNCTION_AS(0x801A6D30, AXFXReverbStdExpCallback_8012b830,
                             "AXFXReverbStdExpCallback_8012b830");
 #endif
+
+// ---- AXFXReverbHiExp: SPM's reverb, and the "axfxnative" experiment ------------------------
+//
+// The hand-written AXFX reverb native follows the AXFXReverbStdExpCallback implementation in
+// Wiicompiled by patchzyy (https://github.com/patchzyy/Wiicompiled, GPLv3), extended to the
+// Hi variant SPM uses.
+//
+// SPM has no standard reverb; its game uses AXFXReverbHiExp, whose callback
+// (US 0x802881C0, EU0 0x8028ACFC, 0x518 bytes) is one of the hottest guest functions on the
+// game thread (about 8.5% self in the Run 4 profile). This is the experiment that grows a
+// hand native for it behind the "axfxnative" diag switch, following the StdExp native above:
+// same validation-then-serve shape, same FP discipline, and the translated body as the
+// fallback for anything the native does not serve.
+//
+// What this tree's own material establishes about the HiExp call, and what it does not:
+//
+//   Proven: the AXFX callback ABI. r3 is an AXFX_BUFFERUPDATE (three s32 sample-buffer
+//   pointers: left, right, surround), r4 is the effect state struct. The StdExp native above
+//   reads its arguments the same way, and the SDK prototypes the family carries declare the
+//   same signature. The frame is 96 samples per channel, the framework's buffer size (the
+//   StdExp native's kSamplesPerFrame). AXFXReverbHiCallback (0x80287E74) is four bytes —
+//   one instruction, a tail branch — so the plain Hi API and the Exp API share this body.
+//
+//   Not established anywhere in this tree: every field offset inside the HiExp state struct
+//   (ring buffer pointers, indices and lengths, coefficients, the flags word, the gains, the
+//   aux buffer arrays, the struct's own size), the .sdata2 constants the guest function
+//   loads, and the render topology itself. The Exp generation is a redesign — the StdExp
+//   native above shares almost nothing with the older AXFX_REVERBSTD layout — so the Hi
+//   offsets cannot be carried over from the Std ones, nor from the older AXFX_REVERBHI
+//   struct (9 comb + 9 allpass delay lines and a crosstalk term the Exp Std does not mirror
+//   either). They have to be read out of the guest functions themselves (GetMemSize
+//   0x80287E78, Init 0x80287F00, Settings 0x8028809C, this callback) from the game's own
+//   DOL. Until that table exists the native does not render: the armed path below validates
+//   the derivable side of the call and lets the translated body serve, so the experiment's
+//   wiring — registration, switch, ABI reading — is proven on hardware before the render is
+//   entrusted to it. A layout guessed instead would not crash; it would quietly sound
+//   wrong, which is worse.
+
+// The translated body of the guest callback. Unlike func_801A6D30 above (a no-op, because
+// SPM has no standard reverb at that address), this one exists in SPM's build: it is the
+// hot function itself, and it serves every call the native does not.
+extern "C" void func_802881C0(CpuContext* ctx);
+
+namespace {
+namespace ReverbHiExp {
+
+constexpr uint32_t kSamplesPerFrame = 96;
+constexpr uint32_t kChannels = 3;
+
+// Resolves the three channel buffers of one frame: the whole of the call that is derivable
+// today, and the armed path's proof that the ABI reading above is the one the game uses.
+bool ResolveBuffers(uint32_t buffersAddr, const uint8_t* buffers[kChannels]) {
+    if (buffersAddr == 0) {
+        return false;
+    }
+    constexpr size_t kFrameBytes = kSamplesPerFrame * sizeof(int32_t);
+    for (uint32_t channel = 0; channel < kChannels; ++channel) {
+        const uint32_t addr = Memory::Read32(buffersAddr + channel * 4);
+        buffers[channel] = ReverbStd::ResolveGuestThreadRange(addr, kFrameBytes);
+        if (!buffers[channel]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace ReverbHiExp
+
+// The "axfxnative" switch state (dk_diag.txt / the Diagnostics page), forwarded by
+// device.cpp's diag_init and diag_set through spm_axfx_native_set below — the same extern
+// "C" hook pattern as the pose and rtt logs. The callback reads it on every invocation, so
+// a flip lands on the next audio frame.
+std::atomic<bool> g_axfxNativeEnabled{false};
+std::atomic<bool> g_axfxNativeLogged{false};
+
+} // namespace
+
+extern "C" void spm_axfx_native_set(bool enabled) {
+    g_axfxNativeEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+extern "C" void AXFXReverbHiExpCallback_802881c0(CpuContext* ctx) {
+    if (!ctx) {
+        return;
+    }
+    if (!g_axfxNativeEnabled.load(std::memory_order_relaxed)) {
+        // Off: the translated body serves, exactly as if this registration were not here.
+        func_802881C0(ctx);
+        return;
+    }
+    // Armed. The state layout is not derived yet (see the note above), so the translated
+    // body still serves every call; the armed path reports once that the registration is
+    // the one the game reaches and that the frame buffers resolve the way the ABI says.
+    if (!g_axfxNativeLogged.exchange(true, std::memory_order_relaxed)) {
+        const uint32_t buffersAddr = ctx->gpr[3];
+        const uint32_t stateAddr = ctx->gpr[4];
+        const uint8_t* buffers[ReverbHiExp::kChannels]{};
+        bool resolved = false;
+        try {
+            resolved = ReverbHiExp::ResolveBuffers(buffersAddr, buffers);
+        } catch (const Memory::AccessViolation&) {
+            resolved = false;
+        }
+        std::fprintf(stderr,
+                     "[axfxnative] armed: buffers 0x%08x state 0x%08x, frame buffers %s; the "
+                     "HiExp state layout is not derived yet, so the translated body still serves\n",
+                     buffersAddr, stateAddr, resolved ? "resolved" : "did not resolve");
+    }
+    func_802881C0(ctx);
+}
+
+REGISTER_NATIVE_FUNCTION_AS(0x802881C0, AXFXReverbHiExpCallback_802881c0,
+                            "AXFXReverbHiExpCallback_802881c0");
