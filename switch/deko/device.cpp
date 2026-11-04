@@ -52,6 +52,10 @@ extern "C" void spm_gxdedup_set(bool enabled);
 // diag_init and diag_set forward the "dstep" switch to it.
 extern "C" void spm_dstep_set(bool enabled);
 
+// The runtime's DCFlushRange drain coalescing experiment (gx_worker.cpp), declared
+// here the same way: diag_init and diag_set forward the "dflushcoal" switch to it.
+extern "C" void spm_dflushcoal_set(bool enabled);
+
 // The debug server (source/spm_debug_server.cpp), declared here the same way: diag_init
 // hands it the dkserver switch once the file has been read.
 extern "C" void spm_debug_server_boot(bool enabled);
@@ -90,7 +94,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},  {"dkserver", &Diag::dkServer},
     {"rttlog", &Diag::rttLog},        {"pmsmemo", &Diag::pmsMemo},      {"gxskip", &Diag::gxSkip},
     {"dlprobe", &Diag::dlProbe},      {"gxdedup", &Diag::gxDedup},      {"axfxnative", &Diag::axfxNative},
-    {"dstep", &Diag::dstep},
+    {"dstep", &Diag::dstep},          {"dflushcoal", &Diag::dflushCoal},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -221,6 +225,10 @@ void diag_init() {
     // runtime only doubles frames while its gameplay gate is open, so boot and the title
     // are untouched either way.
     if (g_diag.dstep) spm_dstep_set(true);
+    // A dflushcoal=1 in dk_diag.txt arms the runtime's DCFlushRange drain coalescing
+    // from the start. The witness it reads is kept from the first frame either way, so
+    // this only sets the initial switch state; the menu flips it live.
+    if (g_diag.dflushCoal) spm_dflushcoal_set(true);
 }
 
 // diag_set (dk.h): the runtime path for the same switches. Every switch stores its field, which
@@ -247,6 +255,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "axfxnative")) spm_axfx_native_set(on);
     else if (!std::strcmp(key, "gxdedup")) spm_gxdedup_set(on);
     else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
+    else if (!std::strcmp(key, "dflushcoal")) spm_dflushcoal_set(on);
     else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
     else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer") || !std::strcmp(key, "gxthread"))
         apply_gx_worker_mode();
