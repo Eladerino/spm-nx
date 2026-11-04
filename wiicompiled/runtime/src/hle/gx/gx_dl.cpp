@@ -5,14 +5,22 @@ extern "C" void aurora_spm_vtx_state(uint8_t* desc26, uint8_t* fmt8x26x3);
 #include "gx_stream_common.h"
 #include "gx_cp_decode.h"
 #include "isa/big_endian.h"
+#include "dl_probe.h"
 
 #include <dolphin/gx/GXAurora.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <mutex>
 #include <optional>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 // The display-list scan cache validates a cached scan against the live guest
 // bytes with a 64-bit XXH3 digest (see GxDisplayListScanCache::CanReuse).
@@ -1388,6 +1396,172 @@ extern "C" void GxNotifyDisplayListMemoryWrite(uint32_t addr, uint32_t size) {
     return false;
 }
 
+// ---- the dlprobe measurement (dl_probe.h; Switch Diagnostics "dlprobe") -------------------------
+//
+// The accounting GX__CallDisplayList feeds while the switch is on. Submissions can arrive on
+// more than one thread (the guest's own calls, and the FIFO drain's call-DL dispatch), so one
+// mutex guards the map and the window counters; it is only ever taken while the probe is on.
+// The map is keyed by canonical guest address and holds only the last hash per address — no
+// list bytes are kept, so its size follows the count of distinct list addresses, not traffic.
+
+namespace {
+
+std::atomic<bool> g_dlProbeOn{false};
+
+struct DlProbeEntry {
+    uint64_t lastHash = 0;
+    uint32_t lastRawAddr = 0;  // the address as last submitted, for the top list (the map key is canonical)
+    uint64_t windowStamp = 0;  // the window this entry last contributed to
+    uint64_t windowRepeatBytes = 0;
+    uint64_t windowRepeatCalls = 0;
+};
+
+struct DlProbeState {
+    std::mutex mutex;
+    std::unordered_map<uint32_t, DlProbeEntry> byAddress;
+    uint64_t window = 1;  // stamps start at 1 so a fresh entry's 0 never matches
+    uint64_t calls = 0;
+    uint64_t uniqueAddresses = 0;
+    uint64_t repeatCalls = 0;
+    uint64_t changedCalls = 0;
+    uint64_t totalBytes = 0;
+    uint64_t repeatBytes = 0;
+    uint64_t repeatBytesOrtho = 0;
+    uint64_t repeatBytesPersp = 0;
+};
+
+DlProbeState& DlProbeStateRef() {
+    static DlProbeState state;
+    return state;
+}
+
+} // namespace
+
+extern "C" void spm_dlprobe_set(bool enabled) {
+    g_dlProbeOn.store(enabled, std::memory_order_relaxed);
+}
+
+namespace DlProbe {
+
+bool Enabled() noexcept { return g_dlProbeOn.load(std::memory_order_relaxed); }
+
+void Record(uint32_t listAddr, const uint8_t* bytes, uint32_t nbytes, bool orthographic) {
+    const uint64_t hash = static_cast<uint64_t>(XXH3_64bits(bytes, static_cast<size_t>(nbytes)));
+    const uint32_t key = CanonicalizeGxMainRamAddress(listAddr);
+    DlProbeState& state = DlProbeStateRef();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    ++state.calls;
+    state.totalBytes += nbytes;
+    auto it = state.byAddress.find(key);
+    const bool firstSeen = it == state.byAddress.end();
+    if (firstSeen) {
+        it = state.byAddress.emplace(key, DlProbeEntry{}).first;
+    }
+    DlProbeEntry& entry = it->second;
+    entry.lastRawAddr = listAddr;
+    if (entry.windowStamp != state.window) {
+        // First contribution in this window: its per-window repeat totals restart here
+        // rather than in a sweep at the print, and the address counts once as unique.
+        entry.windowStamp = state.window;
+        entry.windowRepeatBytes = 0;
+        entry.windowRepeatCalls = 0;
+        ++state.uniqueAddresses;
+    }
+    if (firstSeen) {
+        entry.lastHash = hash;
+    } else if (entry.lastHash == hash) {
+        ++state.repeatCalls;
+        state.repeatBytes += nbytes;
+        (orthographic ? state.repeatBytesOrtho : state.repeatBytesPersp) += nbytes;
+        entry.windowRepeatBytes += nbytes;
+        ++entry.windowRepeatCalls;
+    } else {
+        ++state.changedCalls;
+        entry.lastHash = hash;
+    }
+}
+
+void PrintWindow(uint64_t firstFrame, uint64_t lastFrame) {
+    if (lastFrame < firstFrame) {
+        return;
+    }
+    DlProbeState& state = DlProbeStateRef();
+    uint64_t calls = 0, uniqueAddresses = 0, repeatCalls = 0, changedCalls = 0, totalBytes = 0,
+             repeatBytes = 0, repeatBytesOrtho = 0, repeatBytesPersp = 0;
+    struct TopEntry {
+        uint32_t address;
+        uint64_t repeatBytes;
+        uint64_t repeatCalls;
+    };
+    std::vector<TopEntry> top;
+    {
+        std::lock_guard<std::mutex> lock(state.mutex);
+        calls = state.calls;
+        uniqueAddresses = state.uniqueAddresses;
+        repeatCalls = state.repeatCalls;
+        changedCalls = state.changedCalls;
+        totalBytes = state.totalBytes;
+        repeatBytes = state.repeatBytes;
+        repeatBytesOrtho = state.repeatBytesOrtho;
+        repeatBytesPersp = state.repeatBytesPersp;
+        for (const auto& [address, entry] : state.byAddress) {
+            if (entry.windowStamp == state.window && entry.windowRepeatBytes != 0) {
+                top.push_back(TopEntry{entry.lastRawAddr, entry.windowRepeatBytes, entry.windowRepeatCalls});
+            }
+        }
+        state.calls = 0;
+        state.uniqueAddresses = 0;
+        state.repeatCalls = 0;
+        state.changedCalls = 0;
+        state.totalBytes = 0;
+        state.repeatBytes = 0;
+        state.repeatBytesOrtho = 0;
+        state.repeatBytesPersp = 0;
+        ++state.window;  // the map itself persists; per-entry window totals restart by stamp
+    }
+    if (!Enabled() && calls == 0) {
+        return;  // the probe was off for the whole window
+    }
+    std::sort(top.begin(), top.end(), [](const TopEntry& a, const TopEntry& b) {
+        return a.repeatBytes != b.repeatBytes ? a.repeatBytes > b.repeatBytes
+                                              : a.address < b.address;
+    });
+    if (top.size() > 5) {
+        top.resize(5);
+    }
+    std::string topText = "none";
+    if (!top.empty()) {
+        topText.clear();
+        for (size_t i = 0; i < top.size(); ++i) {
+            char buffer[96];
+            std::snprintf(buffer, sizeof(buffer), "%s0x%08X %llu KB in %llu calls", i == 0 ? "" : ", ",
+                          top[i].address, static_cast<unsigned long long>(top[i].repeatBytes / 1024),
+                          static_cast<unsigned long long>(top[i].repeatCalls));
+            topText += buffer;
+        }
+    }
+    const double frames = static_cast<double>(lastFrame - firstFrame + 1);
+    std::fprintf(stderr,
+                 "[dlprobe] frames %llu-%llu: %llu calls (%.1f a frame), %llu unique addresses, %llu repeat "
+                 "calls, %llu changed calls, %llu KB submitted, %llu KB repeat bytes (%.1f%% cache-servable); "
+                 "repeat bytes by projection in effect: %llu KB orthographic, %llu KB perspective; top "
+                 "repeats: %s\n",
+                 static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                 static_cast<unsigned long long>(calls),
+                 frames > 0.0 ? static_cast<double>(calls) / frames : 0.0,
+                 static_cast<unsigned long long>(uniqueAddresses),
+                 static_cast<unsigned long long>(repeatCalls),
+                 static_cast<unsigned long long>(changedCalls),
+                 static_cast<unsigned long long>(totalBytes / 1024),
+                 static_cast<unsigned long long>(repeatBytes / 1024),
+                 totalBytes != 0 ? 100.0 * static_cast<double>(repeatBytes) / static_cast<double>(totalBytes)
+                                 : 0.0,
+                 static_cast<unsigned long long>(repeatBytesOrtho / 1024),
+                 static_cast<unsigned long long>(repeatBytesPersp / 1024), topText.c_str());
+}
+
+} // namespace DlProbe
+
 namespace aurora::gfx {
 bool stage_timers_enabled() noexcept;
 void stage_time_add_gxcall(std::chrono::nanoseconds duration) noexcept;
@@ -1414,6 +1588,25 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
     try {
         const uint8_t* list = static_cast<const uint8_t*>(GuestToHostPtr(listAddr, nbytes));
         if (!list) return;
+        if (DlProbe::Enabled()) {
+            // The eligibility probe (dl_probe.h) hashes the bytes this call is about to
+            // decode, here at the one point where the guest address, the length and the
+            // contents are all in hand and every route below — scan cache, flatten,
+            // ParseDisplayList, the register-only and host-list hand-offs — consumes them.
+            // SPM's host-recorded lists arrive as a 32-byte guest stub naming host bytes,
+            // so resolve the stub the way the hand-off below does and hash those bytes,
+            // keyed by the stub's guest address. The probe only reads; nothing is timed,
+            // cached or reordered by it.
+            const uint8_t* probeBytes = list;
+            uint32_t probeBytesLen = nbytes;
+            const uint8_t* hostDl = nullptr;
+            uint32_t hostSize = 0;
+            if (SpmHostDisplayList(list, nbytes, hostDl, hostSize)) {
+                probeBytes = hostDl;
+                probeBytesLen = hostSize;
+            }
+            DlProbe::Record(listAddr, probeBytes, probeBytesLen, g_projectionVector[0] != 0.0f);
+        }
         if (const uint8_t* hostDl = nullptr; true) {
             uint32_t hostSize = 0;
             if (SpmHostDisplayList(list, nbytes, hostDl, hostSize)) {

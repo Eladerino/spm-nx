@@ -191,6 +191,11 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   second gameplay frame's GX output before any of it is decoded and does not show
   that frame, while the game tick itself runs in full, so a perftimer run prices
   what a tick costs when its GX costs nothing.
+  probe rather than a way to play: Display-list cache probe (`dlprobe`) hashes every
+  display list the game submits while on and, with Performance timers on, prints a
+  [dlprobe] line each window saying what share of the submitted list bytes were the
+  same list at the same address as last time — the share a decoded-display-list cache
+  would serve instead of decoding again.
   All of the page's switches start off except the GX decode thread (cpthread, on core 1)
   and the GX worker thread (gxthread), which are on unless turned off there; zcull also
   starts on. One Performance row is an experiment rather than a way to play: the
