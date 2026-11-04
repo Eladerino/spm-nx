@@ -3759,6 +3759,230 @@ void PatchMessageStrings() {
     }
 }
 
+// ---- pmsmemo: the message-string patch memo (Switch Diagnostics "pmsmemo") ----
+//
+// An experiment, off unless the Diagnostics page (or dk_diag.txt) says so; Draw() runs
+// PatchMessageStrings above whenever it is off, and that function is untouched. A pass of
+// PatchMessageStrings costs a std::search of MEM1 (24 MiB) per line, and the Run-4 guest
+// profile put it at 3.6% self on the game thread over a transit-heavy route: the lines
+// and their addresses are stable pass to pass, so the searches mostly re-prove what the
+// last pass already established. The memoised pass below remembers, per line, every
+// occurrence a full search patched (address plus the exact span bytes written). On later
+// passes each remembered occurrence is verified by content at its address: still holding
+// the written span (or the span this pass would write, which differs only if the Shake
+// bindings changed) means the patch is in place and no search runs for that line; holding
+// the original line again means the area's file was re-read into the same buffer, and the
+// patch is re-applied in place, exactly what the search would do at that occurrence.
+// Anything else fails verification and the line falls back to the full original search,
+// which rebuilds its memo. An address is never trusted without the content check, so a
+// different string landing on a remembered address is caught and searched for properly.
+// The memo is trusted in a range only where a search has covered that range and found
+// the line in it: a line never found in a range keeps the full search there, because its
+// first copy can load late (the arcade's sideways line is not loaded until its area is).
+// Known boundary, stated plainly: a second simultaneously resident copy of a line
+// appearing at a fresh address while every remembered copy still verifies would be
+// missed until a remembered copy next fails verification; the game's message files are
+// re-read per area into the same buffers, which is the pattern the in-place case covers.
+// The verify-cheap / search-rare shape follows mkdd-nx's display-list cache design.
+
+// [pmsmemo-core-begin]
+struct PmsMemoEntry {
+    uint32_t rangeBase = 0;
+    size_t offset = 0;
+    std::string written;  // the span bytes the patch wrote there (replacement + space padding)
+};
+
+struct PmsMemoStats {
+    uint64_t verified = 0;      // remembered occurrences whose bytes still matched (search skipped)
+    uint64_t inPlace = 0;       // remembered occurrences holding the original line again, re-patched in place
+    uint64_t verifyFailed = 0;  // lines whose memo check failed and fell back to the full search
+    uint64_t fullSearches = 0;  // full line searches run
+};
+
+// One line of a message-string pass over one range, with the address memo. The search
+// loop mirrors PatchMessageStrings exactly; the memo only decides whether it runs.
+// Returns the number of occurrences patched by this call.
+int PmsPatchLine(uint8_t* mem, size_t rangeSize, uint32_t rangeBase, uint32_t rangeBit,
+                 std::vector<PmsMemoEntry>& memo, uint32_t& memoRanges, bool& seen,
+                 const uint8_t* from, size_t len, const char* to, size_t toLen,
+                 PmsMemoStats& stats) {
+    // The span a patch writes: the replacement, the rest of the line padded with spaces.
+    std::string expected(to, toLen);
+    expected.append(len - toLen, ' ');
+    int patched = 0;
+    bool usable = (memoRanges & rangeBit) != 0;
+    if (usable) {
+        usable = false;
+        for (const PmsMemoEntry& e : memo)
+            if (e.rangeBase == rangeBase) {
+                usable = true;
+                break;
+            }
+    }
+    if (usable) {
+        bool ok = true;
+        for (PmsMemoEntry& entry : memo) {
+            if (entry.rangeBase != rangeBase) continue;
+            if (entry.offset + len >= rangeSize) {
+                ok = false;
+                break;
+            }
+            uint8_t* const p = mem + entry.offset;
+            if (std::memcmp(p, entry.written.data(), len) == 0 ||
+                std::memcmp(p, expected.data(), len) == 0) {
+                ++stats.verified;
+                continue;
+            }
+            const uint8_t next = p[len];
+            if (std::memcmp(p, from, len) == 0 &&
+                (next == '\n' || next == '\r' || next == '\0' || next == '<')) {
+                // The area's file was read into the same buffer again: the original line
+                // is back at the remembered address. Re-apply the patch in place,
+                // exactly what the search below would do at this occurrence.
+                std::copy(to, to + toLen, p);
+                std::fill(p + toLen, p + len, uint8_t{' '});
+                entry.written = expected;
+                ++stats.inPlace;
+                ++patched;
+                continue;
+            }
+            ok = false;
+            break;
+        }
+        if (ok) return patched;
+        ++stats.verifyFailed;
+    }
+    ++stats.fullSearches;
+    memo.erase(std::remove_if(memo.begin(), memo.end(),
+                              [&](const PmsMemoEntry& e) { return e.rangeBase == rangeBase; }),
+               memo.end());
+    for (uint8_t* p = mem; (p = std::search(p, mem + rangeSize, from, from + len)) != mem + rangeSize; p += len) {
+        if (p + len >= mem + rangeSize) break;
+        // Whole lines only, as in PatchMessageStrings.
+        const uint8_t next = p[len];
+        if (next != '\n' && next != '\r' && next != '\0' && next != '<') continue;
+        std::copy(to, to + toLen, p);
+        std::fill(p + toLen, p + len, uint8_t{' '});
+        memo.push_back(PmsMemoEntry{rangeBase, static_cast<size_t>(p - mem), expected});
+        seen = true;
+        ++patched;
+    }
+    memoRanges |= rangeBit;
+    return patched;
+}
+// [pmsmemo-core-end]
+
+std::atomic<bool> g_pmsMemoOn{false};
+PmsMemoStats g_pmsStats;
+
+// The "pmsmemo" diag switch arrives through here (device.cpp's diag_init / diag_set), the
+// same handshake as spm_pose_log_set / spm_rtt_log_set in spm_map_sweep.cpp.
+extern "C" void spm_pmsmemo_set(bool enabled) { g_pmsMemoOn.store(enabled); }
+
+// PatchMessageStrings with the address memo: the same pass structure, the same line
+// table, the same per-pass scaffolding, with PmsPatchLine standing in for the bare
+// search loop. Runs only while pmsmemo is on; the two variants keep separate statics, so
+// flipping the switch mid-session just costs one full pass while the memo warms up.
+void PatchMessageStringsMemoised() {
+    struct Line {
+        const char* from;
+        const char* to;
+        bool seen = false;
+        const char* prefix = nullptr;
+        const char* suffix = nullptr;
+        std::vector<PmsMemoEntry> memo;
+        uint32_t memoRanges = 0;  // bitmask over the pass's ranges a full search has covered
+    };
+    static Line kLines[] = {
+        {"Shake <icon PAD 0.65 1 1 8> up and down!", "Shake the controller, or hold R/ZR!", false,
+         "Shake the controller, or hold ", "!"},
+        {"Shake <icon PAD 0.65 1 1 8> with good timing!", "Shake, or hold R/ZR, with good timing!", false,
+         "Shake, or hold ", ", with good timing!"},
+        {"Tilt <icon PAD 0.65 1 1 8> as shown!", "Tilt the controller as shown!"},
+        {"Point the <icon PAD 0.65 1 1 8> at the screen!", "Aim with the right stick!"},
+        {"Aim with your cursor and fire", "Press <icon PAD_A 0.6 0 0 2>"},
+        {"Shake <icon PAD 0.65 1 1 15> to wake up!", "Shake it, or hold R/ZR, to wake up!", false,
+         "Shake it, or hold ", ", to wake up!"},
+        {"Shake <icon PAD 0.65 1 1 15> to recover!", "Shake it, or hold R/ZR, to recover!", false,
+         "Shake it, or hold ", ", to recover!"},
+        {"Shake <icon PAD 0.65 1 1 15> quickly to escape!", "Shake it fast, or hold R/ZR, to escape!", false,
+         "Shake it fast, or hold ", ", to escape!"},
+        {"Hold the Wii Remote sideways.", "Hold the controller sideways."},
+        {"Simply point your Wii Remote", "Simply point your controller"},
+    };
+    const auto shakeLabels = []() -> std::string {
+        const int style = aurora_button_icon_style();
+        if (style < 0 || style >= 3) return "";
+        const std::vector<std::string> names = GamepadBindingNames(style, 7); // the Shake action
+        std::vector<std::string> distinct;
+        for (const std::string& name : names) {
+            const std::string label = GamepadBindingLabel(name, style);
+            if (!label.empty() && std::find(distinct.begin(), distinct.end(), label) == distinct.end())
+                distinct.push_back(label);
+            if (distinct.size() >= 2) break;
+        }
+        std::string labels;
+        for (const std::string& label : distinct) {
+            if (!labels.empty()) labels += "/";
+            labels += label;
+        }
+        return labels;
+    };
+    const std::string shakeLabelText = shakeLabels();
+    static int lastSeq = -2;  // not a real sequence: the first Draw() call passes
+    static int passes = 0;
+    static bool allSeen = false;
+    static bool gaveUp = false;  // the missing-lines log below has fired
+    const int seq = SpmMapSweep::Seq();
+    const bool seqChanged = seq != lastSeq;
+    lastSeq = seq;
+    if (!seqChanged) return;
+    ++passes;
+    struct Range {
+        uint32_t base;
+        size_t size;
+    };
+    static constexpr Range kRanges[] = {{Memory::kMem1CachedBase, Memory::kMem1Size},
+                                        {Memory::kMem2CachedBase, Memory::kMem2Size}};
+    const size_t rangeCount = passes == 1 ? 2 : 1;
+    int patched = 0;
+    for (size_t r = 0; r < rangeCount; ++r) {
+        const Range range = kRanges[r];
+        uint8_t* const mem = Memory::Contains(range.base, range.size) ? Memory::GetPointer(range.base, range.size) : nullptr;
+        if (mem == nullptr) continue;
+        for (Line& line : kLines) {
+            const auto* from = reinterpret_cast<const uint8_t*>(line.from);  // bytes, as in PatchBootStrings
+            const size_t len = std::strlen(line.from);
+            std::string composed;
+            const char* to = line.to;
+            if (line.prefix != nullptr && !shakeLabelText.empty()) {
+                composed = std::string(line.prefix) + shakeLabelText + line.suffix;
+                if (composed.size() <= len) to = composed.c_str();
+            }
+            const size_t toLen = std::strlen(to);
+            if (toLen > len) continue;  // the table is length-checked by hand; never write long
+            patched += PmsPatchLine(mem, range.size, range.base, uint32_t{1} << r, line.memo, line.memoRanges,
+                                    line.seen, from, len, to, toLen, g_pmsStats);
+        }
+    }
+    allSeen = true;
+    for (const Line& line : kLines) allSeen = allSeen && line.seen;
+    if (patched > 0)
+        RT_LOGF(RT_TAG_RUNTIME, "message strings: %d line(s) rewritten for the controller\n", patched);
+    RT_LOGF(RT_TAG_RUNTIME,
+            "[pmsmemo] pass %d: %llu verified, %llu re-patched in place, %llu verify failures, %llu full searches (cumulative)\n",
+            passes, static_cast<unsigned long long>(g_pmsStats.verified),
+            static_cast<unsigned long long>(g_pmsStats.inPlace),
+            static_cast<unsigned long long>(g_pmsStats.verifyFailed),
+            static_cast<unsigned long long>(g_pmsStats.fullSearches));
+    if (!allSeen && !gaveUp && passes >= 40) {
+        gaveUp = true;
+        int missing = 0;
+        for (const Line& line : kLines) missing += line.seen ? 0 : 1;
+        RT_LOGF(RT_TAG_RUNTIME, "message strings: %d line(s) never found after %d passes\n", missing, passes);
+    }
+}
+
 // ---- Options: the player's settings menu, drawn like the game's own menus (its font, a paper card) ----
 // Opened with HOME / F10 / a controller's Guide button; the game is frozen while it is up. The ImGui panel above is
 // for development only (Options > Game > Developer tools).
@@ -3957,10 +4181,20 @@ constexpr DiagRow kDiagRows[] = {
      "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log, plus the decode thread's time and what the game waited on it for. Use it to measure where frame time goes."},
     {"profile", "Guest profiler (profile)", nullptr,
      "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them)."},
+    {"pmsmemo", "Message-string memo (pmsmemo)", nullptr,
+     "An experiment: the game's instruction lines are rewritten for the controller by searching all of MEM1 for each line on every area change. While this is on, the patcher instead remembers where each line was patched and checks the bytes at that address first, only searching again for a line whose check fails. The wording patched is identical either way; with Performance timers or any trace on, a [pmsmemo] line in the log counts the checks, the fallbacks and the searches still run. For measuring the saving on routes with many area changes; leave off for normal play. Takes effect at once."},
     {"fps30", "30 fps cap (fps30)", nullptr,
      "Caps the picture at 30 frames a second while you play: gameplay frames are shown one in two, each held for two screen refreshes, while the game itself keeps its own pace. For a locked 30 in places that cannot hold 60, or for curiosity. Takes effect at once; the title screen and the Prepare graphics sweep are not capped."},
     {"gxskip", "GX suppression spike (gxskip)", nullptr,
      "A measurement spike, not a way to play: while on, every second gameplay frame's GX output is thrown away before any of it is decoded, and that frame's picture is not shown. The game tick itself still runs in full, so with Performance timers on, the log's [gxskip] line prices what a tick costs with no GX work — the number that decides whether a full-speed frame-skip mode is worth building. Expect judder, and drawing can go wrong around screen-copy effects; turn it off to play. Takes effect at once; the title screen and the Prepare graphics sweep are not skipped."},
+    {"dlprobe", "Display-list cache probe (dlprobe)", nullptr,
+     "A measurement, not a cache: while on, every display list the game submits is hashed and compared with the last list seen at the same address, and every Performance timers window prints a [dlprobe] line giving the share of submitted list bytes that came back unchanged — what a decoded-display-list cache would serve instead of decoding again. It caches nothing and skips nothing; it only makes submitting lists slower while it runs. Use it with Performance timers on, in the place you want priced, then turn it off to play."},
+    {"axfxnative", "AXFX Hi reverb native (axfxnative)", nullptr,
+     "An experiment toward serving the game's AXFXReverbHiExp reverb callback (one of the hottest guest functions) from hand-written native code instead of the translated guest code. In this build the native's reading of the call is armed and reported once in the log, but the reverb itself still runs translated: the effect's state layout has not been derived yet, and a guessed one would sound wrong rather than fail. Leave off for normal play. Takes effect at once."},
+    {"gxdedup", "GX setter dedup (gxdedup)", nullptr,
+     "An experiment: while on, the vertex state setters (vertex descriptions, attribute formats and array bases) skip re-sending a value the graphics state already holds, except while a display list is being recorded, where every call is list content and always goes through. The picture should look exactly the same; if anything draws wrong, turn it off and say what you saw. With Performance timers on, a [gxdedup] line every 600 frames counts how many setter calls were skipped out of how many arrived. Takes effect at once."},
+    {"dstep", "Double-step full speed (dstep)", nullptr,
+     "A full-speed mode for heavy areas: while on, the game runs two ticks for every picture shown. The first tick's GX output is thrown away before any of it is decoded (the GX suppression spike's sink) and its picture is not shown; the second tick renders and shows, so the game advances up to twice as fast as the picture updates. Whether it reaches full speed is set by what a rendered tick costs — in the heaviest rooms it will land short, and with Performance timers on, the log's [dstep] line reports the tick rate and game speed it actually reached. Input is read again on the second tick, so controls answer at tick rate. Exactly two ticks per picture, never more, so a slow room just runs slower rather than spiralling. If the GX suppression spike is on at the same time, the spike wins and this does nothing; the 30 fps cap stands down while this is on. Takes effect at once; the title screen and the Prepare graphics sweep are not doubled."},
     {"cpthread", "GX decode thread (cpthread)", "Threads",
      "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong."},
     {"gxworker", "GX call records (gxworker)", nullptr,
@@ -5428,7 +5662,10 @@ void FilterMenuInput(uint32_t chan, WiiRemoteInput::KpadSample& sample) noexcept
 void Draw() noexcept {
     if (RuntimeFrontend::Active()) return;
     PatchBootStrings();
-    PatchMessageStrings();
+    if (g_pmsMemoOn.load())
+        PatchMessageStringsMemoised();
+    else
+        PatchMessageStrings();
     // Wait for the frame worker's DONE phase: it has replayed the previous frame's ImGui draw lists
     // and started the next ImGui frame, so all overlay callers can now safely issue ImGui commands.
     aurora_wait_for_frame_worker();

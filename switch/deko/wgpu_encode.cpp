@@ -1346,8 +1346,11 @@ bool aurora_switch_dk_present(void* texture) {
     // never changes. Gameplay only (spm_gameplay_present): the Prepare sweep presents
     // through this same call, and the title card's hold counts presented frames, so
     // the sweep, the title, the logo and the loads all keep the panel's full rate.
+    // While dstep is on this divider stands down entirely (the condition below): the
+    // double-step mode owns the shown rate, and stacking a second divider on it would
+    // hold rendered ticks the mode means to show.
     static bool s_fps30HoldNext = false;
-    if (g_diag.fps30 && spm_gameplay_present()) {
+    if (g_diag.fps30 && !g_diag.dstep && spm_gameplay_present()) {
         const bool hold = s_fps30HoldNext;
         s_fps30HoldNext = !s_fps30HoldNext;
         if (hold) return true;
@@ -1368,6 +1371,23 @@ bool aurora_switch_dk_present(void* texture) {
         if (hold) return true;
     } else {
         s_gxSkipHoldNext = false;
+    }
+    // Diag dstep, the double-step mode: the runtime discards the first tick of each
+    // gameplay pair (gx_worker.h), and this divider — its own parity, starting on a hold
+    // because the runtime starts its pairs on a sunk tick — holds that tick's present the
+    // same way, so the panel shows one picture per pair and it is always the rendered
+    // tick's. fps30's divider stands down while dstep is on (its condition above), and
+    // this one stands down while gxskip is on: the runtime yields the frames to the spike
+    // then and the spike's divider holds them. As with the spike's divider, if a run ever
+    // shows the empty picture instead, the two parities are a frame apart and this one's
+    // initial value is the thing to flip.
+    static bool s_dstepHoldNext = true;
+    if (g_diag.dstep && !g_diag.gxSkip && spm_gameplay_present()) {
+        const bool hold = s_dstepHoldNext;
+        s_dstepHoldNext = !s_dstepHoldNext;
+        if (hold) return true;
+    } else {
+        s_dstepHoldNext = true;
     }
     // (the wait for a free image, up to a vsync, outside the lock: the game's submits go on meanwhile)
     DkFence imageFence{};

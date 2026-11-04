@@ -38,10 +38,27 @@ extern "C" void spm_rtt_log_set(bool enabled);
 // The runtime's GX-suppression spike (gx_worker.cpp), declared here the same way:
 // diag_init and diag_set forward the "gxskip" switch to it.
 extern "C" void spm_gxskip_set(bool enabled);
+// The runtime's display-list cache eligibility probe (gx_dl.cpp), declared here the same
+// way: diag_init and diag_set forward the "dlprobe" switch to it.
+extern "C" void spm_dlprobe_set(bool enabled);
+// The runtime's AXFX Hi reverb native experiment (ax_effects.cpp), declared here the same
+// way: diag_init and diag_set forward the "axfxnative" switch to it.
+extern "C" void spm_axfx_native_set(bool enabled);
+// The runtime's GX setter dedup experiment (gx_vertex.cpp), declared here the same way:
+// diag_init and diag_set forward the "gxdedup" switch to it.
+extern "C" void spm_gxdedup_set(bool enabled);
+
+// The runtime's double-step mode (gx_worker.cpp), declared here the same way:
+// diag_init and diag_set forward the "dstep" switch to it.
+extern "C" void spm_dstep_set(bool enabled);
 
 // The debug server (source/spm_debug_server.cpp), declared here the same way: diag_init
 // hands it the dkserver switch once the file has been read.
 extern "C" void spm_debug_server_boot(bool enabled);
+
+// The runtime's message-string patch memo (settings_overlay.cpp), declared here the same
+// way: diag_init and diag_set forward the "pmsmemo" switch to it.
+extern "C" void spm_pmsmemo_set(bool enabled);
 
 // The runtime's GX record ring (gx_worker.h), declared here the same way: the gxworker, gxdefer and gxthread
 // switches pick its mode, which it applies at the next frame boundary.
@@ -68,10 +85,12 @@ constexpr DiagKey kDiagKeys[] = {
     {"texdump", &Diag::texDump},      {"shaderdump", &Diag::shaderDump}, {"nomerge", &Diag::noMerge},
     {"uvlog", &Diag::uvLog},          {"mtxlog", &Diag::mtxLog},        {"perftimer", &Diag::perfTimer},
     {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"fps30", &Diag::fps30},
-    {"gxskip", &Diag::gxSkip},        {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},
-    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},    {"poselog", &Diag::poseLog},
-    {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},
-    {"dkserver", &Diag::dkServer},    {"rttlog", &Diag::rttLog},
+    {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},
+    {"gxthread", &Diag::gxThread},    {"poselog", &Diag::poseLog},      {"dkcmd", &Diag::dkCmd},
+    {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},  {"dkserver", &Diag::dkServer},
+    {"rttlog", &Diag::rttLog},        {"pmsmemo", &Diag::pmsMemo},      {"gxskip", &Diag::gxSkip},
+    {"dlprobe", &Diag::dlProbe},      {"gxdedup", &Diag::gxDedup},      {"axfxnative", &Diag::axfxNative},
+    {"dstep", &Diag::dstep},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -174,6 +193,9 @@ void diag_init() {
     // A poselog=1 in dk_diag.txt arms the runtime's anim pose log from the start, so the
     // session covers the poses drawn during boot and the title as well.
     if (g_diag.poseLog) spm_pose_log_set(true);
+    // A pmsmemo=1 in dk_diag.txt arms the runtime's message-string patch memo from the
+    // start, so the session's first area changes already run memoised passes.
+    if (g_diag.pmsMemo) spm_pmsmemo_set(true);
     // A dkserver=1 in dk_diag.txt starts the debug server (TCP 6543, LAN only, no auth).
     // With the switch off this call returns at once: no socket, no thread.
     spm_debug_server_boot(g_diag.dkServer);
@@ -185,6 +207,20 @@ void diag_init() {
     // runtime only sinks frames while its gameplay gate is open, so boot and the title are
     // untouched either way.
     if (g_diag.gxSkip) spm_gxskip_set(true);
+    // A dlprobe=1 in dk_diag.txt arms the runtime's display-list eligibility probe from
+    // the start. The probe only hashes and counts, so boot and the title are measured the
+    // same as gameplay; the first perftimer window is the warmup either way.
+    if (g_diag.dlProbe) spm_dlprobe_set(true);
+    // An axfxnative=1 in dk_diag.txt arms the runtime's AXFX Hi reverb native wrapper from
+    // the start. The wrapper reads the switch on every callback, so this only sets the
+    // initial state; the menu and the command channel flip it live.
+    if (g_diag.axfxNative) spm_axfx_native_set(true);
+    // A gxdedup=1 in dk_diag.txt arms the runtime's GX setter dedup experiment from the start.
+    if (g_diag.gxDedup) spm_gxdedup_set(true);
+    // A dstep=1 in dk_diag.txt arms the runtime's double-step mode from the start. The
+    // runtime only doubles frames while its gameplay gate is open, so boot and the title
+    // are untouched either way.
+    if (g_diag.dstep) spm_dstep_set(true);
 }
 
 // diag_set (dk.h): the runtime path for the same switches. Every switch stores its field, which
@@ -204,8 +240,13 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "arrayup")) aurora::gx::fifo::nsmbw_set_array_reupload(on);
     else if (!std::strcmp(key, "profile")) GuestProfiler::SetSwitchProfileEnabled(on);
     else if (!std::strcmp(key, "poselog")) spm_pose_log_set(on);
+    else if (!std::strcmp(key, "pmsmemo")) spm_pmsmemo_set(on);
     else if (!std::strcmp(key, "rttlog")) spm_rtt_log_set(on);
     else if (!std::strcmp(key, "gxskip")) spm_gxskip_set(on);
+    else if (!std::strcmp(key, "dlprobe")) spm_dlprobe_set(on);
+    else if (!std::strcmp(key, "axfxnative")) spm_axfx_native_set(on);
+    else if (!std::strcmp(key, "gxdedup")) spm_gxdedup_set(on);
+    else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
     else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
     else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer") || !std::strcmp(key, "gxthread"))
         apply_gx_worker_mode();

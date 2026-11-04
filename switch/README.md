@@ -172,7 +172,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   texture to `Cache/texture_dumps` under the name a replacement would use, for making
   new replacement pictures; takes effect after a restart),
   and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
-  recovery step for a cache that has gone wrong). Diagnostics holds twenty-two of the
+  recovery step for a cache that has gone wrong). Diagnostics holds twenty-seven of the
   renderer's diagnostic switches, grouped under the same headings dk_diag.txt uses
   (each flip also writes all of them back to
   `UserData/dk_diag.txt`, the file the same switches are read from at boot), and Flush logs
@@ -183,7 +183,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   starts the debug server below (edit the `dkserver` line), and rttlog, which logs
   the state the file select waits on when Return to Title hangs, and the state at
   the moment Return to Title is chosen (edit the `rttlog` line). The file knows
-  twenty-six keys in all. One of the page's rows is a display option rather than a
+  thirty-one keys in all. One of the page's rows is a display option rather than a
   check: 30 fps cap (`fps30`), under Performance, shows gameplay frames one in two
   for a locked 30 fps while the game keeps its own pace; the title screen and the
   Prepare graphics sweep are not capped. Another Performance row is a measurement
@@ -191,9 +191,38 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   second gameplay frame's GX output before any of it is decoded and does not show
   that frame, while the game tick itself runs in full, so a perftimer run prices
   what a tick costs when its GX costs nothing.
+  Another Performance row is a measurement probe rather than a way to play:
+  Display-list cache probe (`dlprobe`) hashes every display list the game submits
+  while on and, with Performance timers on, prints a [dlprobe] line each window
+  saying what share of the submitted list bytes were the same list at the same
+  address as last time — the share a decoded-display-list cache would serve
+  instead of decoding again.
+  Another Performance row is an experiment rather than a way to play: AXFX Hi
+  reverb native (`axfxnative`) arms the native wrapper for the game's
+  AXFXReverbHiExp reverb callback; in this build it reports once in the log and
+  the reverb still runs translated, because the effect's state layout has not
+  been derived yet.
+  Another Performance row is an experiment rather than a way to play: GX setter
+  dedup (`gxdedup`) skips re-sending vertex state values the graphics state
+  already holds (never while a display list is being recorded, where every call
+  is list content), and with Performance timers on the log's [gxdedup] lines
+  count how many setter calls that spared.
+  Another Performance row is the mode the spike priced: double-step (`dstep`)
+  runs two game ticks per picture shown — the first sunk through the same
+  discard path, the second rendered — so the game advances at up to twice the
+  shown rate in heavy areas, with input read again on the second tick; a
+  perftimer run's `[dstep]` line reports the tick rate and game speed it
+  reached. If `gxskip` is on at the same time, the spike wins and `dstep`
+  does nothing, and `fps30`'s divider stands down while `dstep` is on.
   All of the page's switches start off except the GX decode thread (cpthread, on core 1)
   and the GX worker thread (gxthread), which are on unless turned off there; zcull also
-  starts on. Three of them are the
+  starts on. One Performance row is an experiment rather than a way to play: the
+  message-string memo (`pmsmemo`) makes the patcher that rewrites the game's instruction
+  lines for the controller check each already-patched line at the address it remembers,
+  and only re-search the lines whose check fails, instead of sweeping all of MEM1 for
+  every line on every area change; the wording patched is identical either way, and its
+  `[pmsmemo]` log line counts the checks, the fallbacks and the searches still run.
+  Three of them are the
   experimental GX call-record switches, best left as they are for play:
 
   | Switch | What it does |
