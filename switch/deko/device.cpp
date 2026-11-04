@@ -39,6 +39,10 @@ extern "C" void spm_rtt_log_set(bool enabled);
 // diag_init and diag_set forward the "gxskip" switch to it.
 extern "C" void spm_gxskip_set(bool enabled);
 
+// The runtime's double-step mode (gx_worker.cpp), declared here the same way:
+// diag_init and diag_set forward the "dstep" switch to it.
+extern "C" void spm_dstep_set(bool enabled);
+
 // The debug server (source/spm_debug_server.cpp), declared here the same way: diag_init
 // hands it the dkserver switch once the file has been read.
 extern "C" void spm_debug_server_boot(bool enabled);
@@ -68,10 +72,10 @@ constexpr DiagKey kDiagKeys[] = {
     {"texdump", &Diag::texDump},      {"shaderdump", &Diag::shaderDump}, {"nomerge", &Diag::noMerge},
     {"uvlog", &Diag::uvLog},          {"mtxlog", &Diag::mtxLog},        {"perftimer", &Diag::perfTimer},
     {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"fps30", &Diag::fps30},
-    {"gxskip", &Diag::gxSkip},        {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},
-    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},    {"poselog", &Diag::poseLog},
-    {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},
-    {"dkserver", &Diag::dkServer},    {"rttlog", &Diag::rttLog},
+    {"gxskip", &Diag::gxSkip},        {"dstep", &Diag::dstep},          {"cpthread", &Diag::cpThread},
+    {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},
+    {"poselog", &Diag::poseLog},      {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},
+    {"guestcore", &Diag::guestCore},  {"dkserver", &Diag::dkServer},    {"rttlog", &Diag::rttLog},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -185,6 +189,10 @@ void diag_init() {
     // runtime only sinks frames while its gameplay gate is open, so boot and the title are
     // untouched either way.
     if (g_diag.gxSkip) spm_gxskip_set(true);
+    // A dstep=1 in dk_diag.txt arms the runtime's double-step mode from the start. The
+    // runtime only doubles frames while its gameplay gate is open, so boot and the title
+    // are untouched either way.
+    if (g_diag.dstep) spm_dstep_set(true);
 }
 
 // diag_set (dk.h): the runtime path for the same switches. Every switch stores its field, which
@@ -206,6 +214,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "poselog")) spm_pose_log_set(on);
     else if (!std::strcmp(key, "rttlog")) spm_rtt_log_set(on);
     else if (!std::strcmp(key, "gxskip")) spm_gxskip_set(on);
+    else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
     else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
     else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer") || !std::strcmp(key, "gxthread"))
         apply_gx_worker_mode();

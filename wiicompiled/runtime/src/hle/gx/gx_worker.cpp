@@ -75,6 +75,23 @@ struct SkipBucket {
 SkipBucket g_sunkBucket;
 SkipBucket g_renderedBucket;
 
+// ---- the dstep mode (gx_worker.h) -------------------------------------------------------------
+// The switch arrives through spm_dstep_set, the same hook pattern as gxskip's. The rest is
+// owner-thread state written at presented-frame boundaries in DstepPresentedFrame: while the
+// mode owns the frames, presented frames pair up as (sunk tick, rendered tick) and only the
+// rendered tick is shown.
+std::atomic<bool> g_dstepRequested{false};
+bool g_dstepEngaged = false;     // the mode owned the frame now being produced
+bool g_dstepSunkNext = true;     // pair parity: the next produced frame is the pair's sunk tick
+bool g_dstepCurValid = false;    // the frame that just ended was produced under the mode
+bool g_dstepCurSunk = false;     // ... and was its pair's sunk tick
+bool g_dstepHaveBoundary = false;
+std::chrono::steady_clock::time_point g_dstepLastBoundary{};
+uint64_t g_dstepPairSunkMicros = 0;  // the open pair's sunk tick, waiting for its rendered tick
+SkipBucket g_dstepSunkBucket;
+SkipBucket g_dstepRenderedBucket;
+SkipBucket g_dstepShownBucket;  // one entry per completed pair: the pair's whole interval
+
 namespace {
 
 constexpr size_t kRingBytes = size_t{2} << 20;  // 2 MiB: a heavy frame's worth is about 1 MiB
@@ -440,9 +457,24 @@ extern "C" bool spm_gameplay_present();
 
 bool GxSkipSunk() noexcept { return g_frameSunk; }
 
+// True while the dstep mode (gx_worker.h), not the spike, owns the presented frames: the
+// mode is requested, the spike is not (both on: dstep yields — the two alternations would
+// stack into a stream with no shown frames at all), and the gameplay gate is open. Read at
+// presented-frame boundaries on the owner thread; the gate cannot move between the two
+// boundary hooks of the same frame, so both hooks see the same answer.
+bool DstepOwnsFrames() {
+    return g_dstepRequested.load(std::memory_order_relaxed) &&
+           !g_gxSkipRequested.load(std::memory_order_relaxed) && spm_gameplay_present();
+}
+
 void GxSkipPresentedFrame() {
     if (!t_owner) {
         return;
+    }
+    if (DstepOwnsFrames()) {
+        return;  // dstep's boundary hook (called just after this one) does the accounting
+                 // and the sink decision for these frames; the [gxskip] buckets stay the
+                 // spike's own, so its line never reports another mode's ticks.
     }
     const auto now = std::chrono::steady_clock::now();
     if (g_haveBoundary) {
@@ -480,6 +512,82 @@ void PrintGxSkipWindow(uint64_t firstFrame, uint64_t lastFrame) {
                  static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
                  static_cast<unsigned long long>(sunk.first), sunk.second,
                  static_cast<unsigned long long>(rendered.first), rendered.second);
+}
+
+void DstepPresentedFrame() {
+    if (!t_owner) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (DstepOwnsFrames()) {
+        // Close the ended tick's interval. The first boundary after the mode engages has
+        // nothing of the mode's to close: the frame that just ended was produced before
+        // it (g_dstepCurValid is false), and the frame that starts now is the pair's
+        // first, sunk, tick.
+        if (g_dstepEngaged && g_dstepHaveBoundary && g_dstepCurValid) {
+            const uint64_t us = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(now - g_dstepLastBoundary).count());
+            if (g_dstepCurSunk) {
+                g_dstepSunkBucket.Add(us);
+                g_dstepPairSunkMicros = us;  // the pair stays open until its rendered tick
+            } else {
+                g_dstepRenderedBucket.Add(us);
+                g_dstepShownBucket.Add(g_dstepPairSunkMicros + us);
+                g_dstepPairSunkMicros = 0;
+            }
+        }
+        g_dstepEngaged = true;
+        g_dstepCurSunk = g_dstepSunkNext;
+        g_dstepSunkNext = !g_dstepSunkNext;
+        g_dstepCurValid = true;
+        // The sink decision for the frame that starts now. FrameBoundary has just drained
+        // the ring and the ended frame's copy already waited for the decode thread, the
+        // same ordering the spike's flip relies on. GxSkipPresentedFrame ran just before
+        // this hook and stood down (DstepOwnsFrames), so this is the boundary's only
+        // decision.
+        g_frameSunk = g_dstepCurSunk;
+        AuroraGxSetSink(g_frameSunk);
+    } else {
+        // Off, gate shut (title, loads, map changes, saves, the Prepare sweep), or yielded
+        // to the spike: the pair state resets, so the first frame back starts a pair and a
+        // half-finished pair is dropped uncounted. There is no sink to undo here:
+        // GxSkipPresentedFrame has already settled this boundary's sink for every
+        // non-dstep case, and a tick in production keeps the state it started with, the
+        // same rule the spike's flips follow.
+        g_dstepEngaged = false;
+        g_dstepSunkNext = true;
+        g_dstepCurValid = false;
+        g_dstepPairSunkMicros = 0;
+    }
+    g_dstepLastBoundary = now;
+    g_dstepHaveBoundary = true;
+}
+
+void PrintDstepWindow(uint64_t firstFrame, uint64_t lastFrame) {
+    if (lastFrame < firstFrame) {
+        return;
+    }
+    const auto sunk = g_dstepSunkBucket.TakeDelta();
+    const auto rendered = g_dstepRenderedBucket.TakeDelta();
+    const auto shown = g_dstepShownBucket.TakeDelta();
+    if (sunk.first == 0) {
+        return;  // the mode was off (or never in gameplay) for this whole window
+    }
+    const uint64_t ticks = sunk.first + rendered.first;
+    // The engaged span is the ticks' own intervals end to end, so the rate below is the
+    // mode's speed while it was on, untouched by whatever else shared the window.
+    const double spanSec = (sunk.second * static_cast<double>(sunk.first) +
+                            rendered.second * static_cast<double>(rendered.first)) /
+                           1000.0 / 1000.0;
+    const double tickRate = spanSec > 0.0 ? static_cast<double>(ticks) / spanSec : 0.0;
+    std::fprintf(stderr,
+                 "[dstep] frames %llu-%llu: %llu shown frames, %llu guest ticks (%.1f ticks/s, %.0f%% of full "
+                 "speed); sunk ticks at %.2f ms mean, rendered ticks at %.2f ms mean, shown frames at %.2f ms "
+                 "mean (%.1f shown fps) (intervals over the engaged span, game thread)\n",
+                 static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                 static_cast<unsigned long long>(shown.first), static_cast<unsigned long long>(ticks), tickRate,
+                 tickRate / 60.0 * 100.0, sunk.second, rendered.second, shown.second,
+                 shown.second > 0.0 ? 1000.0 / shown.second : 0.0);
 }
 
 void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*nameOf)(uint32_t)) {
@@ -566,4 +674,11 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
 // the rest (GxSkipPresentedFrame).
 extern "C" void spm_gxskip_set(bool enabled) {
     GxWorker::g_gxSkipRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The dstep mode's hook from the deko diag layer, declared and forwarded exactly like the
+// spike's (spm_gxskip_set above): diag_init hands it the dk_diag.txt value once, diag_set
+// forwards every flip. The frame boundary does the rest (DstepPresentedFrame).
+extern "C" void spm_dstep_set(bool enabled) {
+    GxWorker::g_dstepRequested.store(enabled, std::memory_order_relaxed);
 }

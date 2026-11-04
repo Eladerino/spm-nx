@@ -989,6 +989,11 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     // not guest frames and never advance the parity.
     if (presentedXfb) {
         GxWorker::GxSkipPresentedFrame();
+        // The dstep double-step mode (gx_worker.h): while it owns the frames its boundary
+        // hook runs just after the spike's and has the last word on the next tick's sink
+        // state; while it does not (off, gate shut, or gxskip on) it only resets its pair
+        // state and changes nothing.
+        GxWorker::DstepPresentedFrame();
     }
     // Frontend frame timing: encode/submit cost, reported apart from guest CPU time.
     struct PresentTimer {
