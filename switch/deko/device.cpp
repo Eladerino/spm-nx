@@ -44,6 +44,9 @@ extern "C" void spm_dlprobe_set(bool enabled);
 // The runtime's AXFX Hi reverb native experiment (ax_effects.cpp), declared here the same
 // way: diag_init and diag_set forward the "axfxnative" switch to it.
 extern "C" void spm_axfx_native_set(bool enabled);
+// The runtime's GX setter dedup experiment (gx_vertex.cpp), declared here the same way:
+// diag_init and diag_set forward the "gxdedup" switch to it.
+extern "C" void spm_gxdedup_set(bool enabled);
 
 // The debug server (source/spm_debug_server.cpp), declared here the same way: diag_init
 // hands it the dkserver switch once the file has been read.
@@ -80,6 +83,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"fps30", &Diag::fps30},
     {"gxskip", &Diag::gxSkip},        {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},
     {"dlprobe", &Diag::dlProbe},      {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},
+    {"gxdedup", &Diag::gxDedup},      {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},
     {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},    {"poselog", &Diag::poseLog},
     {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},
     {"dkserver", &Diag::dkServer},    {"rttlog", &Diag::rttLog},          {"pmsmemo", &Diag::pmsMemo},
@@ -208,6 +212,8 @@ void diag_init() {
     // the start. The wrapper reads the switch on every callback, so this only sets the
     // initial state; the menu and the command channel flip it live.
     if (g_diag.axfxNative) spm_axfx_native_set(true);
+    // A gxdedup=1 in dk_diag.txt arms the runtime's GX setter dedup experiment from the start.
+    if (g_diag.gxDedup) spm_gxdedup_set(true);
 }
 
 // diag_set (dk.h): the runtime path for the same switches. Every switch stores its field, which
@@ -232,6 +238,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "gxskip")) spm_gxskip_set(on);
     else if (!std::strcmp(key, "dlprobe")) spm_dlprobe_set(on);
     else if (!std::strcmp(key, "axfxnative")) spm_axfx_native_set(on);
+    else if (!std::strcmp(key, "gxdedup")) spm_gxdedup_set(on);
     else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
     else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer") || !std::strcmp(key, "gxthread"))
         apply_gx_worker_mode();

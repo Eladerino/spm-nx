@@ -52,11 +52,14 @@ void PrintNativeOverrideCounts(uint64_t firstFrame, uint64_t lastFrame) {
     // The gxskip spike's line (gx_worker.h) shares it too; it prints nothing while no tick in
     // the window was sunk.
     GxWorker::PrintGxSkipWindow(firstFrame, lastFrame);
-=======
     // The dlprobe's line (dl_probe.h) shares it too; it prints nothing while the probe was off
     // for the whole window.
     DlProbe::PrintWindow(firstFrame, lastFrame);
->>>>>>> b/dlprobe
+=======
+    // The gxdedup experiment's line (gx_worker.h) shares this hook; it prints nothing
+    // while no setter call was counted in the window (the switch was off).
+    GxWorker::PrintGxDedupWindow(firstFrame, lastFrame);
+>>>>>>> b/gxdedup
     const double frames = static_cast<double>(lastFrame - firstFrame + 1);
     std::vector<std::pair<uint64_t, const char*>> ran;
     uint64_t total = 0;

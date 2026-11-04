@@ -31,6 +31,9 @@ extern "C" GXFifoObj* GXInit(void* base, u32 size);
  */
 extern "C" uint32_t GX__Init_8016b850(uint32_t fifoBase, uint32_t fifoSize)
 {
+    // gxdedup: GXInit resets Aurora's vertex state; the setters' mirror of it
+    // (gx_vertex.cpp) no longer holds.
+    GxDedup::InvalidateVtxMirror();
     constexpr uint32_t kFifoObjAddr = 0x80521520u;  // FifoObj (NSMBW)
     constexpr uint32_t kGXDataAddr = 0x805215A0u;   // gxData (NSMBW)
     constexpr uint32_t kGXDataSize = 0x600u;
@@ -274,6 +277,11 @@ void GXDL_HLE_LoadState(SaveState::Reader& in) {
 }
 
 extern "C" void GX__BeginDisplayList_80172e00(uint32_t la, uint32_t s) {
+    // gxdedup: a recording boundary — while the list is built, setter calls are
+    // its content (they never skip; GxWorkerRecordingBlocked), and Aurora's
+    // state at the end of it is whatever the recorded calls leave, so the
+    // setters' mirror (gx_vertex.cpp) is void from here.
+    GxDedup::InvalidateVtxMirror();
     try {
         uint32_t gd = Memory::Read32(kGXDataPtrAddr);
         if (!gd) return;
@@ -310,6 +318,8 @@ extern "C" void GX__BeginDisplayList_80172e00(uint32_t la, uint32_t s) {
 PPC_NATIVE_OVERRIDE_VOID(802912fc, GX__BeginDisplayList_80172e00, (uint32_t la, uint32_t s), (la, s));
 
 extern "C" uint32_t GX__EndDisplayList_80172eb4() {
+    // gxdedup: the other recording boundary; see GX__BeginDisplayList above.
+    GxDedup::InvalidateVtxMirror();
     try {
         uint32_t auroraBytes = 0;
         const bool auroraDl = g_spmAuroraDlActive;

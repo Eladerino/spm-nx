@@ -201,6 +201,11 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   wrapper for the game's AXFXReverbHiExp reverb callback; in this build it reports
   once in the log and the reverb still runs translated, because the effect's state
   layout has not been derived yet.
+  Prepare graphics sweep are not capped. Another Performance row is an experiment
+  rather than a way to play: GX setter dedup (`gxdedup`) skips re-sending vertex
+  state values the graphics state already holds (never while a display list is
+  being recorded, where every call is list content), and with Performance timers
+  on the log's [gxdedup] lines count how many setter calls that spared.
   All of the page's switches start off except the GX decode thread (cpthread, on core 1)
   and the GX worker thread (gxthread), which are on unless turned off there; zcull also
   starts on. One Performance row is an experiment rather than a way to play: the

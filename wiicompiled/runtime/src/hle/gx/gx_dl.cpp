@@ -1569,6 +1569,14 @@ void stage_time_add_gxcall(std::chrono::nanoseconds duration) noexcept;
 
 extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes) {
     if (nbytes == 0 || listAddr == 0) return;
+    // gxdedup: a played list's own state ops rewrite Aurora's CP registers
+    // behind the HLE cache's back, so the vertex setters' mirror of Aurora's
+    // state (gx_vertex.cpp) is void for the duration and on exit — the walker
+    // publishes from g_hleGxState mid-playback, then the list's ops run.
+    GxDedup::InvalidateVtxMirror();
+    struct GxDedupMirrorGuard {
+        ~GxDedupMirrorGuard() { GxDedup::InvalidateVtxMirror(); }
+    } gxDedupMirrorGuard;
     // The perftimer's gxcall column: this whole call, aurora's display list decode included.
     struct TimeScope {
         const bool on = aurora::gfx::stage_timers_enabled();
