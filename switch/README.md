@@ -377,6 +377,26 @@ The build compiles 6 jobs in parallel by default, and each translated shard need
 of RAM while it compiles, so allow about 6 GB free (pass `--jobs N` to lower that on a smaller
 machine), plus a few GB of disk for the copied sources and build output under `~/spm-switch`.
 
+**Profile-guided optimization (optional).** Two further variants train the compiler with
+counters recorded on a real Switch, then build with them:
+
+```
+bash switch/scripts/build-switch.sh --variant pgo       # capture build: counts as it plays
+bash switch/scripts/build-switch.sh --variant pgo-use   # normal-speed build using the counts
+```
+
+Build the capture variant, play a representative session with it (its frame rates mean
+nothing and are never quoted; it writes its counters to `UserData/pgo/` on the card every
+five minutes and once more on exit), then copy the last `spm-*.profraw` of the session into
+the `pgo/` folder at the repository root, beside the `manifest.txt` the capture build wrote
+there. The `pgo-use` build merges the raw profiles, checks the manifest (a profile trained
+for another region, another compiler, or without the runtime half is refused), builds with
+the profile, and afterwards counts how many of the profile's functions still match the
+tree: if too much has drifted since training, the build fails instead of quietly shipping
+a half-profiled binary, and the fix is to train again. Profiles are iterative: re-train
+whenever the translated game or the hot runtime code changes, and build `pgo-use` from the
+same tree you trained on whenever you can.
+
 After a full build the script also stages the SD card layout for you: under WSL it lands in the
 Windows profile's `Downloads\spm-nx-sd\switch\spm-nx\` (the NRO plus `dsp_coef.bin`,
 `cacert.pem`, `wii_bootstrap/`, a `licenses/` folder and `UserData/button_icons/`). Copy

@@ -64,6 +64,14 @@ serial), barriers and serials.
   row and no settings_overlay code, feeds its log stream by tailing
   `UserData/Logs/stderr.log` into the core's ring, and runs its threads at priority
   0x3B.
+- PGO comes in two build variants (`build-switch.sh --variant pgo` / `pgo-use`, SpmSwitch.cmake
+  SPM_PGO_INSTRUMENT / SPM_PGO_USE). The capture build instruments the translated shards plus,
+  under SPM_PGO_ALL, the runtime and the aurora_* targets, and `source/pgo_instr_switch.c`
+  writes the counters to `UserData/pgo/`; a game-only profile is the measured ~0-gain shape, so
+  the use side has no narrower scope and its manifest check refuses one. The use build enforces
+  a function-level fit check after compiling (pgo-fit-check.py): a profile that has drifted
+  past the stale limit fails the build rather than shipping quietly, so a red pgo-use build
+  means re-train, not a broken renderer.
 - Changes land on main with the commit message stating what was actually compiled and tested.
 
 ## Known limitations

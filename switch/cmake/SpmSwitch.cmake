@@ -132,6 +132,28 @@ option(SPM_SWITCH_CHECKED_GUEST_MEMORY "Switch: check every guest memory access 
 # its frame rates are never quoted, and no profile is used in this change.
 option(SPM_PGO_INSTRUMENT "Switch: instrumented PGO capture build (counts to UserData/pgo)" OFF)
 option(SPM_PGO_ALL "Switch: with SPM_PGO_INSTRUMENT, also instrument the runtime and Aurora" OFF)
+# The other half of spec E: a build that consumes a trained profile. SPM_PGO_PROFILE is the
+# merged .profdata (llvm-profdata output over the capture build's .profraw files), given as a
+# path the build machine sees; build-switch.sh's pgo-use variant merges into the build tree
+# and passes /work/pgo/spm.profdata. The profile's manifest.txt (written next to the raw
+# profiles by the capture build: region, tree commit, clang major, scope, shards fingerprint)
+# must sit in the same directory: a profile with no provenance is refused, in the shape of
+# SwitchWakerHD's manifest fit check. Function-level staleness inside the profile is clang's
+# per-function hash job; build-switch.sh counts its out-of-date warnings after the build and
+# fails the variant when too much of the profile no longer fits (see pgo-fit-check.py).
+option(SPM_PGO_USE "Switch: build with a trained PGO profile (SPM_PGO_PROFILE)" OFF)
+set(SPM_PGO_PROFILE "" CACHE FILEPATH
+    "Switch: merged .profdata for SPM_PGO_USE, with its manifest.txt beside it")
+if(SPM_PGO_USE AND SPM_SWITCH_AUDIT)
+    message(FATAL_ERROR
+        "spm-nx: SPM_PGO_USE with SPM_SWITCH_AUDIT compiles nothing the profile covers; "
+        "the audit target takes no PGO flags. Build a product variant instead.")
+endif()
+if(SPM_PGO_USE AND SPM_PGO_INSTRUMENT)
+    message(FATAL_ERROR
+        "spm-nx: SPM_PGO_USE and SPM_PGO_INSTRUMENT are opposite builds (one consumes a "
+        "profile, the other records one); enable exactly one.")
+endif()
 if(SPM_SWITCH_CHECKED_GUEST_MEMORY)
     add_compile_definitions(SPM_SWITCH_CHECKED_GUEST_MEMORY=1)
 endif()
@@ -326,6 +348,85 @@ function(spm_switch_configure_products)
         set_source_files_properties("${SPM_SWITCH_DIR}/source/pgo_instr_switch.c"
             PROPERTIES SKIP_PRECOMPILE_HEADERS ON SKIP_UNITY_BUILD_INCLUSION ON)
         message(STATUS "spm-nx: instrumented PGO capture build (SPM_PGO_ALL=${SPM_PGO_ALL})")
+    endif()
+    # PGO use (spec E, the consuming half): the trained profile applies to the same scope the
+    # capture build records (shards + runtime + Aurora, always: a game-only profile is the
+    # measured ~0-gain shape, so there is no SPM_PGO_ALL split on this side and the manifest
+    # check below refuses a profile trained without the runtime half). The two -mllvm options
+    # match the capture side so function names and the (absent) value profiles line up with
+    # what the writer recorded. Fit is checked here at the provenance level (manifest beside
+    # the profile: right region, right scope, recorded at all) and in build-switch.sh after
+    # the build at the function level (clang's out-of-date warnings counted against the
+    # profile's function total; too stale fails the build instead of shipping quietly).
+    if(SPM_PGO_USE)
+        if(NOT SPM_PGO_PROFILE)
+            message(FATAL_ERROR
+                "spm-nx: SPM_PGO_USE needs SPM_PGO_PROFILE=<merged .profdata>; "
+                "build-switch.sh --variant pgo-use sets it after merging the raw profiles.")
+        endif()
+        if(NOT EXISTS "${SPM_PGO_PROFILE}")
+            message(FATAL_ERROR
+                "spm-nx: SPM_PGO_PROFILE does not exist: ${SPM_PGO_PROFILE}. Merge the "
+                "capture build's .profraw files first (build-switch.sh --variant pgo-use "
+                "does this from the repo's pgo/ folder).")
+        endif()
+        cmake_path(GET SPM_PGO_PROFILE PARENT_PATH _spm_pgo_dir)
+        set(_spm_pgo_manifest "${_spm_pgo_dir}/manifest.txt")
+        if(NOT EXISTS "${_spm_pgo_manifest}")
+            message(FATAL_ERROR
+                "spm-nx: no manifest.txt beside the profile (${_spm_pgo_manifest}). A "
+                "profile without provenance is not used: it could belong to another tree, "
+                "region or compiler and clang would apply only the parts that still hash, "
+                "silently. The --variant pgo capture build writes the manifest into the "
+                "repo's pgo/ folder; keep it with the raw profiles.")
+        endif()
+        file(READ "${_spm_pgo_manifest}" _spm_pgo_manifest_text)
+        foreach(_spm_pgo_key IN ITEMS region commit clang_major scope)
+            string(REGEX MATCH "(^|\n)${_spm_pgo_key}=([^\r\n]*)" _spm_pgo_m
+                "${_spm_pgo_manifest_text}")
+            if(NOT CMAKE_MATCH_2)
+                message(FATAL_ERROR
+                    "spm-nx: the profile manifest (${_spm_pgo_manifest}) has no "
+                    "${_spm_pgo_key}= line; it is not a manifest this build can check. "
+                    "Re-run the --variant pgo capture build to regenerate it.")
+            endif()
+            set(_spm_pgo_${_spm_pgo_key} "${CMAKE_MATCH_2}")
+        endforeach()
+        if(NOT _spm_pgo_region STREQUAL "R8PE01-USA")
+            message(FATAL_ERROR
+                "spm-nx: the profile was trained for region '${_spm_pgo_region}', but the "
+                "Switch build is the USA game (R8PE01) only: generated code differs per "
+                "region, so this profile cannot fit. Train a USA profile.")
+        endif()
+        if(NOT _spm_pgo_scope MATCHES "game\\+runtime\\+aurora")
+            message(FATAL_ERROR
+                "spm-nx: the profile's scope is '${_spm_pgo_scope}', not "
+                "game+runtime+aurora. A game-only profile is the shape SwitchWakerHD "
+                "measured at +0.11 fps against +1.95 for game+runtime; refusing it rather "
+                "than shipping a PGO build that cannot gain. Re-train with SPM_PGO_ALL.")
+        endif()
+        if(NOT _spm_pgo_clang_major STREQUAL "19")
+            message(FATAL_ERROR
+                "spm-nx: the profile was recorded with clang major "
+                "'${_spm_pgo_clang_major}', but this build's toolchain is clang 19 "
+                "(switch/scripts/Containerfile): raw profile formats are version-locked. "
+                "Re-train with the current toolchain.")
+        endif()
+        set(_spm_pgo_use_flags "-fprofile-instr-use=${SPM_PGO_PROFILE}"
+            "SHELL:-mllvm -disable-vp=true"
+            "SHELL:-mllvm -static-func-full-module-prefix=false")
+        foreach(_spm_pgo_target IN ITEMS
+                mkw_base_shared mkw_base_sensitive mkw_retro_sensitive mkw_retro_rewind_functions
+                mkw_runtime_common WiiCompiled RetroRewind
+                aurora_core aurora_gx aurora_pad aurora_si aurora_mtx aurora_vi aurora_main)
+            if(TARGET ${_spm_pgo_target})
+                target_compile_options(${_spm_pgo_target} PRIVATE ${_spm_pgo_use_flags})
+            endif()
+        endforeach()
+        message(STATUS
+            "spm-nx: PGO USE build: profile ${SPM_PGO_PROFILE} (trained on tree "
+            "${_spm_pgo_commit}, clang ${_spm_pgo_clang_major}, scope ${_spm_pgo_scope}); "
+            "build-switch.sh enforces the function-level fit check after the build")
     endif()
     set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME "${SPM_SWITCH_NRO_NAME}" SUFFIX ".elf")
     # The game links the vendored deko3d (through spm_deko) instead of devkitPro's libdeko3d.
