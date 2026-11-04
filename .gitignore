@@ -12,6 +12,11 @@
 /resources/
 .DS_Store
 /UserData/
+# PGO training data (build-switch.sh --variant pgo / pgo-use): the manifest is the
+# profile's provenance and may be committed; the profiles are regenerable binaries.
+/pgo/*.profraw
+/pgo/*.profdata
+/pgo/profdata-show.txt
 /_to_delete/
 /extras/
 /graphify-out/
