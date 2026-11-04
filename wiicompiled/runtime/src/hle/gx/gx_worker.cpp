@@ -15,6 +15,8 @@
 
 #include "gx_worker.h"
 
+#include <dolphin/gx/GXAurora.h>  // AuroraGxSetSink: the gxskip spike's Aurora-side sink
+
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -37,6 +39,41 @@ namespace GxWorker {
 
 std::atomic<uint8_t> g_engaged{0};
 thread_local bool t_selfDeferArmed = false;
+
+// ---- the gxskip spike (gx_worker.h) -----------------------------------------------------------
+// The switch itself arrives through spm_gxskip_set (device.cpp's diag_init / diag_set), the
+// same extern "C" hook pattern as the pose and rtt logs. Everything else here is owner-thread
+// state, written at presented-frame boundaries in GxSkipPresentedFrame.
+std::atomic<bool> g_gxSkipRequested{false};
+bool g_frameSunk = false;   // the frame being produced has its GX output discarded
+bool g_skipNext = false;    // parity: the next gameplay frame is the sunk one
+bool g_haveBoundary = false;
+std::chrono::steady_clock::time_point g_lastBoundary{};
+// Present-to-present intervals of ended frames, by bucket, for the [gxskip] window line. The
+// owner writes; the perftimer's printing thread reads and keeps what it last printed (the Stat
+// pattern below, with microseconds in place of a plain count).
+struct SkipBucket {
+    std::atomic<uint64_t> frames{0};
+    std::atomic<uint64_t> micros{0};
+    uint64_t printedFrames = 0;
+    uint64_t printedMicros = 0;
+    void Add(uint64_t us) noexcept {
+        frames.store(frames.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        micros.store(micros.load(std::memory_order_relaxed) + us, std::memory_order_relaxed);
+    }
+    // {frames, mean ms} since the last call.
+    std::pair<uint64_t, double> TakeDelta() noexcept {
+        const uint64_t f = frames.load(std::memory_order_relaxed);
+        const uint64_t us = micros.load(std::memory_order_relaxed);
+        const uint64_t df = f - printedFrames;
+        const uint64_t dus = us - printedMicros;
+        printedFrames = f;
+        printedMicros = us;
+        return {df, df != 0 ? static_cast<double>(dus) / 1000.0 / static_cast<double>(df) : 0.0};
+    }
+};
+SkipBucket g_sunkBucket;
+SkipBucket g_renderedBucket;
 
 namespace {
 
@@ -159,7 +196,8 @@ void RequestMode(Mode mode) noexcept { g_requestedMode.store(static_cast<uint8_t
 Mode RequestedMode() noexcept { return static_cast<Mode>(g_requestedMode.load(std::memory_order_relaxed)); }
 
 bool CanRecord() noexcept {
-    return t_owner && CurrentMode() != Mode::Off && !g_draining && !GxWorkerRecordingBlocked();
+    // gxskip: a sunk frame records nothing (gx_worker.h); its calls run inline into the sink.
+    return t_owner && CurrentMode() != Mode::Off && !g_draining && !g_frameSunk && !GxWorkerRecordingBlocked();
 }
 
 bool Pending() noexcept { return t_owner && g_write != 0; }
@@ -396,6 +434,54 @@ void FrameBoundary() {
     }
 }
 
+// The fps30 cap's gate, defined by the runtime (spm_prepare_graphics.cpp) and declared the
+// same way in the deko present path: true only in a map with no Prepare sweep running.
+extern "C" bool spm_gameplay_present();
+
+bool GxSkipSunk() noexcept { return g_frameSunk; }
+
+void GxSkipPresentedFrame() {
+    if (!t_owner) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (g_haveBoundary) {
+        const uint64_t us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(now - g_lastBoundary).count());
+        (g_frameSunk ? g_sunkBucket : g_renderedBucket).Add(us);
+    }
+    g_lastBoundary = now;
+    g_haveBoundary = true;
+    // The next frame's sink state. FrameBoundary has just drained the ring, and the copy that
+    // ended this frame already waited for the decode thread (GXCopyDisp's GXDrawDone), so
+    // flipping Aurora's sink here cannot catch the frame that just ended mid-replay.
+    if (!g_gxSkipRequested.load(std::memory_order_relaxed) || !spm_gameplay_present()) {
+        g_frameSunk = false;
+        g_skipNext = false;  // parity reset: the first sunk frame is never the first frame back
+    } else {
+        g_frameSunk = g_skipNext;
+        g_skipNext = !g_skipNext;
+    }
+    AuroraGxSetSink(g_frameSunk);
+}
+
+void PrintGxSkipWindow(uint64_t firstFrame, uint64_t lastFrame) {
+    if (lastFrame < firstFrame) {
+        return;
+    }
+    const auto sunk = g_sunkBucket.TakeDelta();
+    const auto rendered = g_renderedBucket.TakeDelta();
+    if (sunk.first == 0) {
+        return;  // the spike was off (or never in gameplay) for this whole window
+    }
+    std::fprintf(stderr,
+                 "[gxskip] frames %llu-%llu: %llu sunk ticks at %.2f ms mean, %llu rendered ticks at %.2f ms "
+                 "mean (present-to-present intervals, game thread)\n",
+                 static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                 static_cast<unsigned long long>(sunk.first), sunk.second,
+                 static_cast<unsigned long long>(rendered.first), rendered.second);
+}
+
 void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*nameOf)(uint32_t)) {
     if (lastFrame < firstFrame) {
         return;
@@ -473,3 +559,11 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
 }
 
 } // namespace GxWorker
+
+// The gxskip switch's hook from the deko diag layer (switch/deko/device.cpp), declared there
+// the same way as this runtime's other hooks (spm_pose_log_set, spm_rtt_log_set): diag_init
+// hands it the dk_diag.txt value once, diag_set forwards every flip. The frame boundary does
+// the rest (GxSkipPresentedFrame).
+extern "C" void spm_gxskip_set(bool enabled) {
+    GxWorker::g_gxSkipRequested.store(enabled, std::memory_order_relaxed);
+}

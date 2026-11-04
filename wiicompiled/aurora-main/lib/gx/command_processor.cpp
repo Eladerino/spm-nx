@@ -6,6 +6,7 @@
 #include <absl/container/flat_hash_set.h>
 #include <array>
 #include "command_processor.hpp"
+#include "fifo.hpp"  // for the gxskip sink (fifo::sink_on), checked in submit_raw_draw below
 
 #include "../gfx/common.hpp"
 #include "../dolphin/gx/__gx.h"
@@ -2828,6 +2829,9 @@ static bool admit_draw(GXPrimitive prim, GXVtxFmt fmt, u16 count, uint32_t verte
 
 bool submit_raw_draw(GXPrimitive prim, GXVtxFmt fmt, const uint8_t* vertices, uint16_t vtxCount,
                      uint32_t vertexBytes) {
+  if (sink_on()) {
+    return true;  // gxskip sink: the draw is discarded; true, so the caller consumes its vertices
+  }
   ZoneScoped;
   ProcessTimer timer;
   g_statDraws.fetch_add(1, std::memory_order_relaxed);

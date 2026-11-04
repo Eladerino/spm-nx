@@ -3959,6 +3959,8 @@ constexpr DiagRow kDiagRows[] = {
      "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them)."},
     {"fps30", "30 fps cap (fps30)", nullptr,
      "Caps the picture at 30 frames a second while you play: gameplay frames are shown one in two, each held for two screen refreshes, while the game itself keeps its own pace. For a locked 30 in places that cannot hold 60, or for curiosity. Takes effect at once; the title screen and the Prepare graphics sweep are not capped."},
+    {"gxskip", "GX suppression spike (gxskip)", nullptr,
+     "A measurement spike, not a way to play: while on, every second gameplay frame's GX output is thrown away before any of it is decoded, and that frame's picture is not shown. The game tick itself still runs in full, so with Performance timers on, the log's [gxskip] line prices what a tick costs with no GX work — the number that decides whether a full-speed frame-skip mode is worth building. Expect judder, and drawing can go wrong around screen-copy effects; turn it off to play. Takes effect at once; the title screen and the Prepare graphics sweep are not skipped."},
     {"cpthread", "GX decode thread (cpthread)", "Threads",
      "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong."},
     {"gxworker", "GX call records (gxworker)", nullptr,

@@ -35,6 +35,10 @@ extern "C" void spm_pose_log_set(bool enabled);
 // diag_init and diag_set forward the "rttlog" switch to it.
 extern "C" void spm_rtt_log_set(bool enabled);
 
+// The runtime's GX-suppression spike (gx_worker.cpp), declared here the same way:
+// diag_init and diag_set forward the "gxskip" switch to it.
+extern "C" void spm_gxskip_set(bool enabled);
+
 // The debug server (source/spm_debug_server.cpp), declared here the same way: diag_init
 // hands it the dkserver switch once the file has been read.
 extern "C" void spm_debug_server_boot(bool enabled);
@@ -64,8 +68,8 @@ constexpr DiagKey kDiagKeys[] = {
     {"texdump", &Diag::texDump},      {"shaderdump", &Diag::shaderDump}, {"nomerge", &Diag::noMerge},
     {"uvlog", &Diag::uvLog},          {"mtxlog", &Diag::mtxLog},        {"perftimer", &Diag::perfTimer},
     {"arrayup", &Diag::arrayUp},      {"profile", &Diag::profile},      {"fps30", &Diag::fps30},
-    {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},    {"gxdefer", &Diag::gxDefer},
-    {"gxthread", &Diag::gxThread},   {"poselog", &Diag::poseLog},
+    {"gxskip", &Diag::gxSkip},        {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},
+    {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},    {"poselog", &Diag::poseLog},
     {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},
     {"dkserver", &Diag::dkServer},    {"rttlog", &Diag::rttLog},
 };
@@ -177,6 +181,10 @@ void diag_init() {
     // so the session covers the boot's own file select too: the working arrival the hanging
     // one gets compared against.
     if (g_diag.rttLog) spm_rtt_log_set(true);
+    // A gxskip=1 in dk_diag.txt arms the runtime's GX-suppression spike from the start. The
+    // runtime only sinks frames while its gameplay gate is open, so boot and the title are
+    // untouched either way.
+    if (g_diag.gxSkip) spm_gxskip_set(true);
 }
 
 // diag_set (dk.h): the runtime path for the same switches. Every switch stores its field, which
@@ -197,6 +205,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "profile")) GuestProfiler::SetSwitchProfileEnabled(on);
     else if (!std::strcmp(key, "poselog")) spm_pose_log_set(on);
     else if (!std::strcmp(key, "rttlog")) spm_rtt_log_set(on);
+    else if (!std::strcmp(key, "gxskip")) spm_gxskip_set(on);
     else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
     else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer") || !std::strcmp(key, "gxthread"))
         apply_gx_worker_mode();

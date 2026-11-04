@@ -1,5 +1,6 @@
 // gx_copy.cpp - Framebuffer Copy Operations
 #include "gx_internal.h"
+#include "gx_worker.h"  // GxWorker::GxSkipSunk: the gxskip spike's per-frame sink state
 #include "runtime_log.h"
 
 #include "settings_overlay.h"
@@ -146,6 +147,19 @@ uint64_t g_copyDispWorkerWaitNanos = 0;
 
 extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
     EnsureAuroraFrameActive();
+    // The gxskip spike (gx_worker.h): a sunk frame produced no draws, so there is nothing to
+    // wait for and nothing to copy — the draw-done wait, the EFB copy and the frame-worker
+    // join are all skipped. The frame still counts, the XFB is still marked ready, the
+    // overlay still draws and the present still runs (its picture is held at the swapchain
+    // by the gxskip divider in aurora_switch_dk_present), so the tick's pacing, timing and
+    // frame boundary are exactly a normal frame's.
+    if (GxWorker::GxSkipSunk()) {
+        ++g_gxFrameCount;
+        VI_HLE_SetXfbReady(da);
+        settings_overlay::Draw();
+        VI_HLE_PresentFrame(/*presentedXfb=*/true, /*paceToRetrace=*/true);
+        return;
+    }
     {
         // Perftimer: a wait on Aurora's decode thread in here is the XFB copy's, not a draw done's.
         const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_DISP);

@@ -361,6 +361,12 @@ static NativeOverrideCounter s_fifoBurstCalls{"(GX FIFO burst)"};
 
 void HleFifoWrite(u32 val, uint32_t sizeBytes) {
     s_fifoStoreCalls.Hit();
+    // The gxskip spike (gx_worker.h): on a sunk frame the immediate FIFO stream is discarded
+    // before it is parsed. Stores into a display list being recorded are not sunk: the list
+    // is guest memory the game may call again on a frame that is not sunk.
+    if (GxWorker::GxSkipSunk() && !IsDisplayListActive()) {
+        return;
+    }
     const bool recordOnly = IsDisplayListActive();
     if (recordOnly) {
         WriteDisplayListData(val, sizeBytes);
@@ -835,6 +841,10 @@ extern "C" void GX_HLE_FIFO_WriteBurst(const uint8_t* data, uint32_t sizeBytes) 
         return;
     }
     s_fifoBurstCalls.Hit();
+    // The gxskip spike, as in HleFifoWrite above: sunk unless a display list is recording.
+    if (GxWorker::GxSkipSunk() && !IsDisplayListActive()) {
+        return;
+    }
     if (GxWorker::Engaged() && RecordFifoBurst(data, sizeBytes)) {
         return;
     }

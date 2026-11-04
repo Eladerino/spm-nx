@@ -1,5 +1,6 @@
 extern "C" void aurora_spm_vtx_state(uint8_t* desc26, uint8_t* fmt8x26x3);
 #include "gx_internal.h"
+#include "gx_worker.h"  // GxWorker::GxSkipSunk: the gxskip spike's per-frame sink state
 #include "runtime_log.h"
 #include "gx_stream_common.h"
 #include "gx_cp_decode.h"
@@ -1403,6 +1404,11 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
             if (on) aurora::gfx::stage_time_add_gxcall(std::chrono::steady_clock::now() - start);
         }
     } timeScope;
+    // The gxskip spike (gx_worker.h): on a sunk frame the list is not walked, scanned or
+    // decoded at all — that walk is most of what this call costs, and pricing its absence is
+    // the spike's whole point. The TimeScope above still runs, so the gxcall column shows
+    // these calls at ~0 rather than pretending they never happened.
+    if (GxWorker::GxSkipSunk()) return;
     static const int s_skipId = std::getenv("SPM_SKIP_MATDL") ? std::atoi(std::getenv("SPM_SKIP_MATDL")) : -1;  // diagnostic: drop the geometry list drawn after material list <id>
     static bool s_skipNext = false;
     try {

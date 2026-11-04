@@ -179,6 +179,8 @@ void GXSetViewportScissorRenderSafeArea(f32 aspect) {
 
 void AuroraGxSync() { aurora::gx::fifo::sync(); }
 
+void AuroraGxSetSink(bool on) { aurora::gx::fifo::set_sink(on); }
+
 AuroraGxWaitSite AuroraGxBeginWaitSite(AuroraGxWaitSite site) { return aurora::gx::fifo::begin_wait_site(site); }
 
 void AuroraGxEndWaitSite(AuroraGxWaitSite previous) { aurora::gx::fifo::end_wait_site(previous); }
