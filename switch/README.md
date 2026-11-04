@@ -172,7 +172,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   texture to `Cache/texture_dumps` under the name a replacement would use, for making
   new replacement pictures; takes effect after a restart),
   and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
-  recovery step for a cache that has gone wrong). Diagnostics holds twenty-seven of the
+  recovery step for a cache that has gone wrong). Diagnostics holds twenty-eight of the
   renderer's diagnostic switches, grouped under the same headings dk_diag.txt uses
   (each flip also writes all of them back to
   `UserData/dk_diag.txt`, the file the same switches are read from at boot), and Flush logs
@@ -183,7 +183,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   starts the debug server below (edit the `dkserver` line), and rttlog, which logs
   the state the file select waits on when Return to Title hangs, and the state at
   the moment Return to Title is chosen (edit the `rttlog` line). The file knows
-  thirty-one keys in all. One of the page's rows is a display option rather than a
+  thirty-two keys in all. One of the page's rows is a display option rather than a
   check: 30 fps cap (`fps30`), under Performance, shows gameplay frames one in two
   for a locked 30 fps while the game keeps its own pace; the title screen and the
   Prepare graphics sweep are not capped. Another Performance row is a measurement
@@ -217,6 +217,15 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   perftimer run's `[dstep]` line reports the tick rate and game speed it
   reached. If `gxskip` is on at the same time, the spike wins and `dstep`
   does nothing, and `fps30`'s divider stands down while `dstep` is on.
+  Another Performance row is an experiment rather than a way to play: DCFlush
+  drain coalescing (`dflushcoal`) skips the GX worker drain of a `DCFlushRange`
+  call when an earlier flush in the same frame has already drained and no GX
+  calls have been recorded since — the first flush of a frame always drains,
+  and any recorded call re-arms the next flush. The drain it skips is the
+  heaviest single wait in heavy 2D scenes (about 15.5 of 18.4 ms of worker wait
+  a frame in the November 4 lab run), and with Performance timers on the
+  `[gxworker]` block counts the drains skipped, so the same scene with the
+  switch off and on prices it.
   All of the page's switches start off except the GX decode thread (cpthread, on core 1)
   and the GX worker thread (gxthread), which are on unless turned off there; zcull also
   starts on. One Performance row is an experiment rather than a way to play: the
