@@ -6,6 +6,7 @@
 // to tell which GX calls run often enough that the game thread must not wait on them.
 
 #include "hle_stubs.h"
+#include "dl_probe.h"
 
 #include <dolphin/gx/GXAurora.h>
 
@@ -47,6 +48,9 @@ void PrintNativeOverrideCounts(uint64_t firstFrame, uint64_t lastFrame) {
     }
     // The GX record ring's line (gx_worker.h) shares this hook; it prints nothing while records are off.
     GxWorker::PrintPerfWindow(firstFrame, lastFrame, &GuestAddressName);
+    // The dlprobe's line (dl_probe.h) shares it too; it prints nothing while the probe was off
+    // for the whole window.
+    DlProbe::PrintWindow(firstFrame, lastFrame);
     const double frames = static_cast<double>(lastFrame - firstFrame + 1);
     std::vector<std::pair<uint64_t, const char*>> ran;
     uint64_t total = 0;
