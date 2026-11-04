@@ -5196,7 +5196,8 @@ void DrawOptionsMenu() {
     // overflows at 8 falls back to the old shrunk one-liner.
     const char* help = g_optRow >= 0 && g_optRow < int(rows.size()) ? rows[static_cast<size_t>(g_optRow)].help
                                                                      : "Left and right pick a page.";
-    constexpr float kHelpSize = 15.0f, kHelpLineStep = 20.0f, kHelpMaxW = 2 * hw - 40.0f;
+    constexpr float kHelpSize = 15.0f, kHelpLineStep = 20.0f;
+    const float kHelpMaxW = 2 * hw - 40.0f;  // not constexpr: hw is a runtime value
     constexpr int kHelpMaxLines = 4;
     auto helpWidth = [&](const std::string& s, float size) {
         // Measured the way Txt will draw it: the game font's own measure, or
