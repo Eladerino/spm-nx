@@ -95,7 +95,7 @@ Stat g_records;
 Stat g_drains;
 Stat g_ringFull;
 Stat g_replayErrors;
-Stat g_waitMs;           // Threaded: milliseconds the game thread waited on the worker, rounded up per drain
+Stat g_waitMs;           // Threaded: microseconds the game thread waited on the worker, totalled per drain
 Stat g_unsafeDrains;     // Threaded: a drain reached while one was already waiting; the call ran unsynchronised
 std::atomic<uint64_t> g_peakBytes{0};  // since the last print; the printer swaps it back to zero
 
@@ -106,27 +106,47 @@ constexpr size_t kCauseSlots = 512;
 struct CauseSlot {
     std::atomic<uint32_t> key{kNoCause};
     Stat count;
+    Stat waitMicros;                         // Threaded: this cause's share of the g_waitMs total
+    std::atomic<uint64_t> waitMaxMicros{0};  // longest single wait; the printer exchanges it to zero
+    void AddWait(uint64_t micros) noexcept {
+        waitMicros.Add(micros);
+        if (micros > waitMaxMicros.load(std::memory_order_relaxed)) {
+            waitMaxMicros.store(micros, std::memory_order_relaxed);
+        }
+    }
 };
 CauseSlot g_causes[kCauseSlots];
 
-void CountCause(uint32_t cause) noexcept {
+// Finds the slot a cause counts in, claiming an empty one if needed. Null only when the table is
+// full and the cause is not already in it.
+CauseSlot* FindCauseSlot(uint32_t cause) noexcept {
     size_t index = (cause * 2654435761u) % kCauseSlots;
     for (size_t probe = 0; probe < kCauseSlots; ++probe) {
         CauseSlot& slot = g_causes[(index + probe) % kCauseSlots];
         const uint32_t key = slot.key.load(std::memory_order_relaxed);
         if (key == cause) {
-            slot.count.Add();
-            return;
+            return &slot;
         }
         if (key == kNoCause) {
             slot.key.store(cause, std::memory_order_release);
-            slot.count.Add();
-            return;
+            return &slot;
         }
     }
-    if (cause != DrainCause::kOther) {
-        CountCause(DrainCause::kOther);
+    return nullptr;
+}
+
+// Counts a drain under its cause and returns the slot it counted in (a full table folds the cause
+// into kOther's slot, as before; null only when even that has no slot, in which case the drain is
+// not counted at all, also as before).
+CauseSlot* CountCause(uint32_t cause) noexcept {
+    CauseSlot* slot = FindCauseSlot(cause);
+    if (slot == nullptr && cause != DrainCause::kOther) {
+        slot = FindCauseSlot(DrainCause::kOther);
     }
+    if (slot != nullptr) {
+        slot->count.Add();
+    }
+    return slot;
 }
 
 const char* FixedCauseName(uint32_t cause) {
@@ -261,8 +281,10 @@ void Publish() {
 }
 
 // Waits until the worker has replayed everything published, servicing the guest's timing about once
-// a millisecond as Aurora's own waits do, then rewinds the ring.
-void WaitForWorker() {
+// a millisecond as Aurora's own waits do, then rewinds the ring. Returns the microseconds waited
+// (the same figure g_waitMs totals), or zero when the worker had already caught up. Reuses the
+// start time read below: timing a drain costs no extra clock read.
+uint64_t WaitForWorker() {
     Worker& w = *g_worker;
     const auto start = std::chrono::steady_clock::now();
     bool waited = false;
@@ -283,9 +305,12 @@ void WaitForWorker() {
     lock.unlock();
     g_publishedLocal = 0;
     if (waited) {
-        const auto ms = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
-        g_waitMs.Add(static_cast<uint64_t>(ms.count()));
+        const uint64_t micros =
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+        g_waitMs.Add(micros);
+        return micros;
     }
+    return 0;
 }
 
 } // namespace
@@ -308,7 +333,7 @@ void Drain(uint32_t cause) {
     }
     g_draining = true;
     g_drains.Add();
-    CountCause(cause);
+    CauseSlot* causeSlot = CountCause(cause);
     if (g_write > g_peakBytes.load(std::memory_order_relaxed)) {
         g_peakBytes.store(g_write, std::memory_order_relaxed);
     }
@@ -321,7 +346,10 @@ void Drain(uint32_t cause) {
     } done;
     if (Threaded()) {
         Publish();
-        WaitForWorker();
+        const uint64_t waitedMicros = WaitForWorker();
+        if (causeSlot != nullptr && waitedMicros != 0) {
+            causeSlot->AddWait(waitedMicros);
+        }
         return;
     }
     ReplayRange(0, g_write, CurrentMode() == Mode::Immediate);
@@ -428,32 +456,33 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     }
 
     // What made pending records run, busiest first, as drains a frame. Immediate mode's per-record
-    // drains are left out: they say nothing about what the worker will have to wait for.
-    std::vector<std::pair<uint64_t, uint32_t>> causes;
+    // drains are left out: they say nothing about what the worker will have to wait for. The wait
+    // deltas are taken for every claimed slot here (kCommit included), so each window starts clean
+    // even for a cause the lines leave out.
+    struct CauseWindow {
+        uint64_t count;
+        uint64_t waitMicros;
+        uint64_t waitMaxMicros;
+        uint32_t key;
+    };
+    std::vector<CauseWindow> causes;
     for (CauseSlot& slot : g_causes) {
         const uint32_t key = slot.key.load(std::memory_order_acquire);
         if (key == kNoCause) {
             continue;
         }
-        const uint64_t delta = slot.count.TakeDelta();
-        if (delta != 0 && key != DrainCause::kCommit) {
-            causes.emplace_back(delta, key);
+        CauseWindow window{slot.count.TakeDelta(), slot.waitMicros.TakeDelta(),
+                           slot.waitMaxMicros.exchange(0, std::memory_order_relaxed), key};
+        if (window.count != 0 && key != DrainCause::kCommit) {
+            causes.push_back(window);
         }
     }
     if (causes.empty()) {
         return;
     }
-    std::sort(causes.begin(), causes.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-    if (causes.size() > kCauseMaxEntries) {
-        causes.resize(kCauseMaxEntries);
-    }
-    std::fprintf(stderr, "[gxworker] frames %llu-%llu: drains a frame by cause, busiest first:\n",
-                 static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame));
-    std::string line;
-    for (size_t i = 0; i < causes.size(); ++i) {
-        const uint32_t key = causes[i].second;
+    char hex[16];
+    const auto nameFor = [&hex, nameOf](uint32_t key) -> const char* {
         const char* name = FixedCauseName(key);
-        char hex[16];
         if (name == nullptr && nameOf != nullptr) {
             name = nameOf(key);
         }
@@ -461,11 +490,51 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
             std::snprintf(hex, sizeof(hex), "%08X", key);
             name = hex;
         }
+        return name;
+    };
+    std::sort(causes.begin(), causes.end(),
+              [](const CauseWindow& a, const CauseWindow& b) { return a.count > b.count; });
+    if (causes.size() > kCauseMaxEntries) {
+        causes.resize(kCauseMaxEntries);
+    }
+    std::fprintf(stderr, "[gxworker] frames %llu-%llu: drains a frame by cause, busiest first:\n",
+                 static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame));
+    std::string line;
+    for (size_t i = 0; i < causes.size(); ++i) {
         char item[160];
-        std::snprintf(item, sizeof(item), "%s%s %.1f", line.empty() ? "" : ", ", name,
-                      static_cast<double>(causes[i].first) / frames);
+        std::snprintf(item, sizeof(item), "%s%s %.1f", line.empty() ? "" : ", ", nameFor(causes[i].key),
+                      static_cast<double>(causes[i].count) / frames);
         line += item;
         if ((i + 1) % kCausesPerLine == 0 || i + 1 == causes.size()) {
+            std::fprintf(stderr, "[gxworker]   %s\n", line.c_str());
+            line.clear();
+        }
+    }
+
+    // How long those drains kept the game thread waiting on the worker, busiest first, as ms a
+    // frame; max is the longest single wait in ms. The entries sum to the window's share of the
+    // "game thread waited on the worker" line above, so the two lines cross-check.
+    std::vector<const CauseWindow*> waits;
+    for (const CauseWindow& window : causes) {
+        if (window.waitMicros != 0) {
+            waits.push_back(&window);
+        }
+    }
+    if (waits.empty()) {
+        return;
+    }
+    std::sort(waits.begin(), waits.end(),
+              [](const CauseWindow* a, const CauseWindow* b) { return a->waitMicros > b->waitMicros; });
+    std::fprintf(stderr,
+                 "[gxworker] frames %llu-%llu: drain wait ms a frame by cause, busiest first (max = longest single wait, ms):\n",
+                 static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame));
+    for (size_t i = 0; i < waits.size(); ++i) {
+        char item[192];
+        std::snprintf(item, sizeof(item), "%s%s %.2f (max %.2f)", line.empty() ? "" : ", ",
+                      nameFor(waits[i]->key), static_cast<double>(waits[i]->waitMicros) / 1000.0 / frames,
+                      static_cast<double>(waits[i]->waitMaxMicros) / 1000.0);
+        line += item;
+        if ((i + 1) % kCausesPerLine == 0 || i + 1 == waits.size()) {
             std::fprintf(stderr, "[gxworker]   %s\n", line.c_str());
             line.clear();
         }
