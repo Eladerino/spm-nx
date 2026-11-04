@@ -197,11 +197,14 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   saying what share of the submitted list bytes were the same list at the same
   address as last time — the share a decoded-display-list cache would serve
   instead of decoding again.
-  Another Performance row is an experiment rather than a way to play: AXFX Hi
-  reverb native (`axfxnative`) arms the native wrapper for the game's
-  AXFXReverbHiExp reverb callback; in this build it reports once in the log and
-  the reverb still runs translated, because the effect's state layout has not
-  been derived yet.
+  Another Performance row is a reserved switch rather than a way to play: AXFX
+  Hi reverb native (`axfxnative`) currently does nothing. The game's
+  AXFXReverbHiExp reverb callback is reached through a function table, and the
+  runtime refuses to boot with a hand native registered for a table-called
+  function (the first lab build crashed on exactly that), so serving it needs
+  a different mechanism; the effect's state layout has not been derived yet
+  either. The switch stays so the Diagnostics page's key set does not churn
+  when the real work lands.
   Another Performance row is an experiment rather than a way to play: GX setter
   dedup (`gxdedup`) skips re-sending vertex state values the graphics state
   already holds (never while a display list is being recorded, where every call
