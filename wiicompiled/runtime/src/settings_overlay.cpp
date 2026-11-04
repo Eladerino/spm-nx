@@ -3959,6 +3959,8 @@ constexpr DiagRow kDiagRows[] = {
      "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them)."},
     {"fps30", "30 fps cap (fps30)", nullptr,
      "Caps the picture at 30 frames a second while you play: gameplay frames are shown one in two, each held for two screen refreshes, while the game itself keeps its own pace. For a locked 30 in places that cannot hold 60, or for curiosity. Takes effect at once; the title screen and the Prepare graphics sweep are not capped."},
+    {"axfxnative", "AXFX Hi reverb native (axfxnative)", nullptr,
+     "An experiment toward serving the game's AXFXReverbHiExp reverb callback (one of the hottest guest functions) from hand-written native code instead of the translated guest code. In this build the native's reading of the call is armed and reported once in the log, but the reverb itself still runs translated: the effect's state layout has not been derived yet, and a guessed one would sound wrong rather than fail. Leave off for normal play. Takes effect at once."},
     {"cpthread", "GX decode thread (cpthread)", "Threads",
      "Decodes GX commands on core 1 while the game thread runs on, instead of on the game thread. On unless turned off here or in dk_diag.txt; switches at the end of the frame. Turn it off if anything draws wrong."},
     {"gxworker", "GX call records (gxworker)", nullptr,
