@@ -91,6 +91,26 @@ uint64_t g_dstepPairSunkMicros = 0;  // the open pair's sunk tick, waiting for i
 SkipBucket g_dstepSunkBucket;
 SkipBucket g_dstepRenderedBucket;
 SkipBucket g_dstepShownBucket;  // one entry per completed pair: the pair's whole interval
+// The engaged span the [dstep] rate divides by: the same intervals the two tick buckets
+// take, accumulated in microseconds at the moment each is closed, so ticks, shown frames
+// and span always describe the same owned ticks. It grows only while the mode owns the
+// frames — a disengagement (switch off, gate shut, yield to the spike) closes the span
+// where it stands, and the next engagement's ticks start a fresh span from their own
+// first boundary — and PrintDstepWindow takes its per-window delta like the buckets do.
+struct SpanMicros {
+    std::atomic<uint64_t> micros{0};
+    uint64_t printed = 0;
+    void Add(uint64_t us) noexcept {
+        micros.store(micros.load(std::memory_order_relaxed) + us, std::memory_order_relaxed);
+    }
+    uint64_t TakeDelta() noexcept {
+        const uint64_t now = micros.load(std::memory_order_relaxed);
+        const uint64_t delta = now - printed;
+        printed = now;
+        return delta;
+    }
+};
+SpanMicros g_dstepSpan;
 
 // ---- the dflushcoal experiment (gx_worker.h) ---------------------------------------------------
 // The switch itself arrives through spm_dflushcoal_set (device.cpp's diag_init / diag_set),
@@ -618,6 +638,7 @@ void DstepPresentedFrame() {
         if (g_dstepEngaged && g_dstepHaveBoundary && g_dstepCurValid) {
             const uint64_t us = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(now - g_dstepLastBoundary).count());
+            g_dstepSpan.Add(us);  // the span takes exactly the intervals the buckets take
             if (g_dstepCurSunk) {
                 g_dstepSunkBucket.Add(us);
                 g_dstepPairSunkMicros = us;  // the pair stays open until its rendered tick
@@ -661,15 +682,19 @@ void PrintDstepWindow(uint64_t firstFrame, uint64_t lastFrame) {
     const auto sunk = g_dstepSunkBucket.TakeDelta();
     const auto rendered = g_dstepRenderedBucket.TakeDelta();
     const auto shown = g_dstepShownBucket.TakeDelta();
+    const uint64_t spanMicros = g_dstepSpan.TakeDelta();
     if (sunk.first == 0) {
         return;  // the mode was off (or never in gameplay) for this whole window
     }
     const uint64_t ticks = sunk.first + rendered.first;
-    // The engaged span is the ticks' own intervals end to end, so the rate below is the
-    // mode's speed while it was on, untouched by whatever else shared the window.
-    const double spanSec = (sunk.second * static_cast<double>(sunk.first) +
-                            rendered.second * static_cast<double>(rendered.first)) /
-                           1000.0 / 1000.0;
+    // The engaged span is the ticks' own intervals end to end (accumulated in
+    // microseconds as each tick closed, g_dstepSpan), so the rate below is the mode's
+    // speed while it was on, untouched by whatever else shared the window. The first
+    // hardware print divided a millisecond sum by a million and reported a rate 1000x
+    // too high (28078% of full speed for 56 ticks); the span is now counted in the
+    // same unit it is divided in, from the same Add calls as the tick buckets, so
+    // ticks, shown frames and span cannot drift apart across a disengagement.
+    const double spanSec = static_cast<double>(spanMicros) / 1000000.0;
     const double tickRate = spanSec > 0.0 ? static_cast<double>(ticks) / spanSec : 0.0;
     std::fprintf(stderr,
                  "[dstep] frames %llu-%llu: %llu shown frames, %llu guest ticks (%.1f ticks/s, %.0f%% of full "
