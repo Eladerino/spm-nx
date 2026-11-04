@@ -189,6 +189,16 @@ void GXApplyBPReg(u8 reg, u32 value);
 void AuroraGxSync(void);
 
 /**
+ * The gxskip measurement spike (Switch Diagnostics "gxskip"): while on, everything the GX
+ * layer would hand the renderer for the current frame is discarded instead — FIFO writes,
+ * display-list decode, raw draws — so the frame produces no renderer work. The runtime sets
+ * it at a frame boundary, for alternate gameplay frames only, and turns it back off the same
+ * way. Writes into a display list being recorded are not sunk (the list is guest memory the
+ * game may call again on a frame that is not sunk). Measurement only; not a rendering mode.
+ */
+void AuroraGxSetSink(bool on);
+
+/**
  * Where the game thread waited on the decode thread, for the perftimer's [cpwait] line. Waits
  * outside every named site count as AURORA_GX_WAIT_OTHER.
  */

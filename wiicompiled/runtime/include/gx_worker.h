@@ -106,6 +106,32 @@ void* ExtendLast(ReplayFn replay, size_t extra, void** extraOut);
 // cause's guest address (null: printed as hex).
 void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*nameOf)(uint32_t) = nullptr);
 
+// ---- the gxskip spike (Switch Diagnostics "gxskip"; state in gx_worker.cpp) --------------------
+//
+// A measurement, not a feature: while the switch is on, alternate gameplay frames (the gate is
+// the fps30 cap's: in a map, no Prepare sweep running) have their GX output discarded. Nothing
+// is recorded for a sunk frame, the FIFO sink in Aurora drops what its calls write, display
+// lists are not walked, and the frame's picture is not shown (the present divider in
+// aurora_switch_dk_present). The guest tick itself runs in full — input, audio, game logic —
+// so the perftimer prices a tick whose GX costs (nearly) nothing: L, the number that decides
+// whether a double-step full-speed mode is worth building. Sunk frames alternate with rendered
+// ones starting rendered, and the parity resets whenever the switch is off or the gate shuts.
+
+// True while the frame being produced is a sunk one. Owner (game) thread only, like CanRecord.
+bool GxSkipSunk() noexcept;
+
+// Called from VI_HLE_PresentFrame for every presented (XFB) frame, just after FrameBoundary:
+// closes the present-to-present interval of the frame that just ended into the sunk or rendered
+// bucket, decides the next frame's sink state, and hands it to Aurora's FIFO sink. The interval
+// includes the ended frame's own pace wait; in a heavy scene that wait is zero (the frame
+// missed its retrace), which is the case this spike measures.
+void GxSkipPresentedFrame();
+
+// The [gxskip] line for a perftimer window, printed with the [calls] lines: how many ticks in
+// the window were sunk, and the mean present-to-present interval of the sunk and the rendered
+// ticks in the same window, so L is read off one log with its own control group.
+void PrintGxSkipWindow(uint64_t firstFrame, uint64_t lastFrame);
+
 template <auto Fn, typename Tuple>
 void ReplayTuple(void* payload) {
     Tuple* args = static_cast<Tuple*>(payload);

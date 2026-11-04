@@ -21,10 +21,19 @@ extern bool sAsyncDecode;
 
 void init();
 
+// The gxskip spike's sink (GXAurora.h's AuroraGxSetSink, set by the runtime at a frame
+// boundary): while on, everything written to the FIFO is discarded and display lists are
+// not decoded, so the frame being built produces no renderer work at all. Writes into a
+// display list being recorded are NOT sunk: the list is guest memory the game may call
+// again on a frame that is not sunk.
+void set_sink(bool on) noexcept;
+bool sink_on() noexcept;
+
 // Out-of-line slow path: grows internal buffer then appends data
 void write_data_grow(const void* data, uint32_t length);
 
 inline void write_data(const void* data, const uint32_t length) {
+  if (sink_on() && !detail::sInDisplayList) return;  // gxskip sink: see set_sink above
   if (!detail::sInDisplayList)
     LIKELY {
       if (detail::sBufferSize + length <= detail::sBufferCapacity)
@@ -42,6 +51,7 @@ inline void write_data(const void* data, const uint32_t length) {
 }
 
 inline void write_u8(const uint8_t val) {
+  if (sink_on() && !detail::sInDisplayList) return;  // gxskip sink: see set_sink above
   if (!detail::sInDisplayList)
     LIKELY {
       if (detail::sBufferSize < detail::sBufferCapacity)

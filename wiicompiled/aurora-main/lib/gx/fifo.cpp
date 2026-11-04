@@ -174,6 +174,9 @@ void clear_buffer() {
 // resume there, as fifo::drain does. Ignoring that return dropped the rest of the list (SPM: back walls and floors of
 // big map display lists never drew).
 void process_display_list(const uint8_t* data, uint32_t nbytes, bool bigEndian) {
+  if (sink_on()) {
+    return;  // gxskip sink: the list is not decoded at all; the dlprocess timer sees nothing
+  }
   struct ReplayScope {
     bool prev = g_replayingDisplayList;
     ReplayScope() { g_replayingDisplayList = true; }
@@ -249,6 +252,9 @@ Decoder& decoder() {
 
 std::atomic<bool> g_requested{false};
 std::atomic<bool> g_stopping{false};
+// The gxskip spike's sink (fifo.hpp): written by the game thread at a frame boundary, read
+// by every FIFO write and by the decode thread's display-list path.
+std::atomic<bool> g_sink{false};
 // What the game thread's waits on the decode thread count under (AuroraGxBeginWaitSite).
 AuroraGxWaitSite sWaitSite = AURORA_GX_WAIT_OTHER;
 // The decode thread's kernel handle while it runs (Switch), for the guest profiler's sampler.
@@ -518,6 +524,10 @@ void hand_off_if_full() {
 }
 } // namespace
 
+void set_sink(bool on) noexcept { g_sink.store(on, std::memory_order_relaxed); }
+
+bool sink_on() noexcept { return g_sink.load(std::memory_order_relaxed); }
+
 void set_decode_thread_requested(bool on) noexcept { g_requested.store(on, std::memory_order_relaxed); }
 
 bool decode_thread_requested() noexcept { return g_requested.load(std::memory_order_relaxed); }
@@ -575,8 +585,8 @@ void flush() {
 }
 
 void queue_display_list(const uint8_t* data, uint32_t nbytes, bool bigEndian) {
-  if (data == nullptr || nbytes == 0) {
-    return;
+  if (data == nullptr || nbytes == 0 || sink_on()) {
+    return;  // gxskip sink: the list's bytes are not even copied into a batch
   }
   close_fifo_item(detail::sBufferSize);
   sItems.push_back({ItemKind::DisplayList, bigEndian, 0, 0, 0, detail::sBufferSize, nbytes});
@@ -587,6 +597,9 @@ void queue_display_list(const uint8_t* data, uint32_t nbytes, bool bigEndian) {
 }
 
 void queue_raw_draw(uint8_t prim, uint8_t fmt, const uint8_t* vertices, uint16_t vtxCount, uint32_t vertexBytes) {
+  if (sink_on()) {
+    return;  // gxskip sink
+  }
   close_fifo_item(detail::sBufferSize);
   sItems.push_back({ItemKind::RawDraw, true, prim, fmt, vtxCount, detail::sBufferSize, vertexBytes});
   append_recorded(vertices, vertexBytes);
@@ -596,6 +609,9 @@ void queue_raw_draw(uint8_t prim, uint8_t fmt, const uint8_t* vertices, uint16_t
 }
 
 void insert_at_drain_point(const void* data, uint32_t length) {
+  if (sink_on()) {
+    return;  // gxskip sink: a direct command for the decoder is still GX output
+  }
   const uint32_t needed = detail::sBufferSize + length;
   if (needed > detail::sBufferCapacity) {
     const uint32_t newCap = std::max(detail::sBufferCapacity * 2, needed);

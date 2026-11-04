@@ -1354,6 +1354,21 @@ bool aurora_switch_dk_present(void* texture) {
     } else {
         s_fps30HoldNext = false;
     }
+    // Diag gxskip, the GX-suppression spike: the runtime discards alternate gameplay
+    // frames' GX output (gx_worker.h), and this divider — its own parity, independent of
+    // fps30's — holds those frames' presents the same way, so the panel keeps the last
+    // rendered picture instead of showing the sunk frame's empty one. The runtime starts
+    // its alternation on a rendered frame and so does this parity; if a run ever shows a
+    // black flicker instead, the two parities are a frame apart and this one's initial
+    // value is the thing to flip. With both switches on, both dividers apply.
+    static bool s_gxSkipHoldNext = false;
+    if (g_diag.gxSkip && spm_gameplay_present()) {
+        const bool hold = s_gxSkipHoldNext;
+        s_gxSkipHoldNext = !s_gxSkipHoldNext;
+        if (hold) return true;
+    } else {
+        s_gxSkipHoldNext = false;
+    }
     // (the wait for a free image, up to a vsync, outside the lock: the game's submits go on meanwhile)
     DkFence imageFence{};
     const uint64_t a0 = now_ns();
