@@ -43,6 +43,10 @@ extern "C" void spm_gxskip_set(bool enabled);
 // hands it the dkserver switch once the file has been read.
 extern "C" void spm_debug_server_boot(bool enabled);
 
+// The runtime's message-string patch memo (settings_overlay.cpp), declared here the same
+// way: diag_init and diag_set forward the "pmsmemo" switch to it.
+extern "C" void spm_pmsmemo_set(bool enabled);
+
 // The runtime's GX record ring (gx_worker.h), declared here the same way: the gxworker, gxdefer and gxthread
 // switches pick its mode, which it applies at the next frame boundary.
 namespace GxWorker {
@@ -71,7 +75,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"gxskip", &Diag::gxSkip},        {"cpthread", &Diag::cpThread},    {"gxworker", &Diag::gxWorker},
     {"gxdefer", &Diag::gxDefer},      {"gxthread", &Diag::gxThread},    {"poselog", &Diag::poseLog},
     {"dkcmd", &Diag::dkCmd},          {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},
-    {"dkserver", &Diag::dkServer},    {"rttlog", &Diag::rttLog},
+    {"dkserver", &Diag::dkServer},    {"rttlog", &Diag::rttLog},          {"pmsmemo", &Diag::pmsMemo},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -174,6 +178,9 @@ void diag_init() {
     // A poselog=1 in dk_diag.txt arms the runtime's anim pose log from the start, so the
     // session covers the poses drawn during boot and the title as well.
     if (g_diag.poseLog) spm_pose_log_set(true);
+    // A pmsmemo=1 in dk_diag.txt arms the runtime's message-string patch memo from the
+    // start, so the session's first area changes already run memoised passes.
+    if (g_diag.pmsMemo) spm_pmsmemo_set(true);
     // A dkserver=1 in dk_diag.txt starts the debug server (TCP 6543, LAN only, no auth).
     // With the switch off this call returns at once: no socket, no thread.
     spm_debug_server_boot(g_diag.dkServer);
@@ -204,6 +211,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "arrayup")) aurora::gx::fifo::nsmbw_set_array_reupload(on);
     else if (!std::strcmp(key, "profile")) GuestProfiler::SetSwitchProfileEnabled(on);
     else if (!std::strcmp(key, "poselog")) spm_pose_log_set(on);
+    else if (!std::strcmp(key, "pmsmemo")) spm_pmsmemo_set(on);
     else if (!std::strcmp(key, "rttlog")) spm_rtt_log_set(on);
     else if (!std::strcmp(key, "gxskip")) spm_gxskip_set(on);
     else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
