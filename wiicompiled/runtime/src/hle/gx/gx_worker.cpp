@@ -91,6 +91,32 @@ uint64_t g_dstepPairSunkMicros = 0;  // the open pair's sunk tick, waiting for i
 SkipBucket g_dstepSunkBucket;
 SkipBucket g_dstepRenderedBucket;
 SkipBucket g_dstepShownBucket;  // one entry per completed pair: the pair's whole interval
+// The engaged span the [dstep] rate divides by: the same intervals the two tick buckets
+// take, accumulated in microseconds at the moment each is closed, so ticks, shown frames
+// and span always describe the same owned ticks. It grows only while the mode owns the
+// frames — a disengagement (switch off, gate shut, yield to the spike) closes the span
+// where it stands, and the next engagement's ticks start a fresh span from their own
+// first boundary — and PrintDstepWindow takes its per-window delta like the buckets do.
+struct SpanMicros {
+    std::atomic<uint64_t> micros{0};
+    uint64_t printed = 0;
+    void Add(uint64_t us) noexcept {
+        micros.store(micros.load(std::memory_order_relaxed) + us, std::memory_order_relaxed);
+    }
+    uint64_t TakeDelta() noexcept {
+        const uint64_t now = micros.load(std::memory_order_relaxed);
+        const uint64_t delta = now - printed;
+        printed = now;
+        return delta;
+    }
+};
+SpanMicros g_dstepSpan;
+
+// ---- the dflushcoal experiment (gx_worker.h) ---------------------------------------------------
+// The switch itself arrives through spm_dflushcoal_set (device.cpp's diag_init / diag_set),
+// the same extern "C" hook pattern as the spike's. The witness it reads is owner-thread
+// state down with the ring's other totals (NoteDcFlushDrained / DcFlushRedundant there).
+std::atomic<bool> g_dflushCoalRequested{false};
 
 namespace {
 
@@ -151,6 +177,40 @@ Stat g_ringFull;
 Stat g_replayErrors;
 Stat g_waitMs;           // Threaded: microseconds the game thread waited on the worker, totalled per drain
 Stat g_unsafeDrains;     // Threaded: a drain reached while one was already waiting; the call ran unsynchronised
+
+// The dflushcoal witness (gx_worker.h): owner-thread state, kept whether or not the
+// switch is on (it records facts, so a mid-frame flip reads a current witness) and read
+// only by the skip decision. The drain cause DCFlushRange carries is its guest address,
+// the same key the cause table prints its name from.
+constexpr uint32_t kDcFlushRangeCause = 0x8026D800u;  // DCFlushRange_801a162c
+uint64_t g_dflushFrame = 0;          // the production interval in progress; FrameBoundary advances it
+uint64_t g_dflushDrainFrame = 0;     // the interval of the last completed DCFlushRange drain
+bool g_dflushDrainSeen = false;      // ... if one has completed at all
+uint64_t g_dflushRecordsAtDrain = 0; // the g_records total at that completion
+Stat g_dflushCoalesced;              // DCFlushRange drains skipped while the switch was on
+
+// Records that a DCFlushRange drain has completed in the current production interval:
+// the worker has consumed everything submitted so far, and the record total says what
+// "so far" was. Called on Drain's completion paths for the flush's cause only (the
+// empty-ring return included: with nothing pending the guarantee the drain exists to
+// give already holds).
+void NoteDcFlushDrained() noexcept {
+    g_dflushDrainSeen = true;
+    g_dflushDrainFrame = g_dflushFrame;
+    g_dflushRecordsAtDrain = g_records.value.load(std::memory_order_relaxed);
+}
+
+// True when a DCFlushRange arriving now would only re-wait for work an earlier flush
+// in this same interval already waited out: the switch is on, a flush drain completed
+// in this interval, and no record has been submitted since it completed (a Reserve is
+// the only way in, and the first record after a drain must Reserve — a drained ring
+// has no last record to extend). Nothing else about the call changes: the native body
+// still runs, after the records that were actually pending.
+bool DcFlushRedundant() noexcept {
+    return g_dflushCoalRequested.load(std::memory_order_relaxed) && g_dflushDrainSeen &&
+           g_dflushDrainFrame == g_dflushFrame &&
+           g_records.value.load(std::memory_order_relaxed) == g_dflushRecordsAtDrain;
+}
 std::atomic<uint64_t> g_peakBytes{0};  // since the last print; the printer swaps it back to zero
 
 // Drains that had work, by cause (DrainCause or a guest address): an open-addressed table the owner
@@ -375,7 +435,20 @@ bool OnWorkerThread() noexcept { return t_worker; }
 void SetWaitService(void (*service)()) noexcept { g_waitService = service; }
 
 void Drain(uint32_t cause) {
-    if (!t_owner || g_write == 0) {
+    if (!t_owner) {
+        return;
+    }
+    if (cause == kDcFlushRangeCause && DcFlushRedundant()) {
+        // dflushcoal: an earlier flush this frame already drained, and nothing has
+        // been recorded since, so there is nothing new for this flush to wait out.
+        // Counted apart: never as a drain, never as wait.
+        g_dflushCoalesced.Add();
+        return;
+    }
+    if (g_write == 0) {
+        if (cause == kDcFlushRangeCause) {
+            NoteDcFlushDrained();
+        }
         return;
     }
     if (g_draining) {
@@ -405,9 +478,14 @@ void Drain(uint32_t cause) {
         if (causeSlot != nullptr && waitedMicros != 0) {
             causeSlot->AddWait(waitedMicros);
         }
-        return;
+    } else {
+        ReplayRange(0, g_write, CurrentMode() == Mode::Immediate);
     }
-    ReplayRange(0, g_write, CurrentMode() == Mode::Immediate);
+    if (cause == kDcFlushRangeCause) {
+        // The flush's drain completed (an Immediate replay that throws does not reach
+        // this: the drain did not complete, and the witness keeps its earlier word).
+        NoteDcFlushDrained();
+    }
 }
 
 void* Reserve(ReplayFn replay, size_t size, size_t align) {
@@ -466,6 +544,11 @@ void FrameBoundary() {
     if (!t_owner || g_draining) {
         return;
     }
+    // The production interval that starts now gets the next frame number: the
+    // dflushcoal witness only speaks for the interval its drain completed in. This is
+    // the presented-frame boundary every [gxworker] window is counted in — the same
+    // one the mode switch below applies at.
+    ++g_dflushFrame;
     Drain(DrainCause::kFrame);
     const Mode requested = RequestedMode();
     const Mode current = CurrentMode();
@@ -555,6 +638,7 @@ void DstepPresentedFrame() {
         if (g_dstepEngaged && g_dstepHaveBoundary && g_dstepCurValid) {
             const uint64_t us = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(now - g_dstepLastBoundary).count());
+            g_dstepSpan.Add(us);  // the span takes exactly the intervals the buckets take
             if (g_dstepCurSunk) {
                 g_dstepSunkBucket.Add(us);
                 g_dstepPairSunkMicros = us;  // the pair stays open until its rendered tick
@@ -598,15 +682,19 @@ void PrintDstepWindow(uint64_t firstFrame, uint64_t lastFrame) {
     const auto sunk = g_dstepSunkBucket.TakeDelta();
     const auto rendered = g_dstepRenderedBucket.TakeDelta();
     const auto shown = g_dstepShownBucket.TakeDelta();
+    const uint64_t spanMicros = g_dstepSpan.TakeDelta();
     if (sunk.first == 0) {
         return;  // the mode was off (or never in gameplay) for this whole window
     }
     const uint64_t ticks = sunk.first + rendered.first;
-    // The engaged span is the ticks' own intervals end to end, so the rate below is the
-    // mode's speed while it was on, untouched by whatever else shared the window.
-    const double spanSec = (sunk.second * static_cast<double>(sunk.first) +
-                            rendered.second * static_cast<double>(rendered.first)) /
-                           1000.0 / 1000.0;
+    // The engaged span is the ticks' own intervals end to end (accumulated in
+    // microseconds as each tick closed, g_dstepSpan), so the rate below is the mode's
+    // speed while it was on, untouched by whatever else shared the window. The first
+    // hardware print divided a millisecond sum by a million and reported a rate 1000x
+    // too high (28078% of full speed for 56 ticks); the span is now counted in the
+    // same unit it is divided in, from the same Add calls as the tick buckets, so
+    // ticks, shown frames and span cannot drift apart across a disengagement.
+    const double spanSec = static_cast<double>(spanMicros) / 1000000.0;
     const double tickRate = spanSec > 0.0 ? static_cast<double>(ticks) / spanSec : 0.0;
     std::fprintf(stderr,
                  "[dstep] frames %llu-%llu: %llu shown frames, %llu guest ticks (%.1f ticks/s, %.0f%% of full "
@@ -629,6 +717,7 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t peak = g_peakBytes.exchange(0, std::memory_order_relaxed);
     const uint64_t waitMicros = g_waitMs.TakeDelta();
     const uint64_t unsafeDrains = g_unsafeDrains.TakeDelta();
+    const uint64_t coalesced = g_dflushCoalesced.TakeDelta();
     const Mode mode = CurrentMode();
     if (mode == Mode::Off && records == 0) {
         return;
@@ -647,6 +736,16 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                      "drains\n",
                      static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
                      static_cast<double>(waitMicros) / 1000.0 / frames, static_cast<unsigned long long>(unsafeDrains));
+    }
+    if (coalesced != 0) {
+        // dflushcoal's scoreboard (gx_worker.h): flushes that returned without draining
+        // in this window. They are in no drain count and no wait figure above or below;
+        // the A/B is this count and the DCFlushRange entry in the wait-by-cause lines
+        // against the same window with the switch off.
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: dflushcoal skipped %llu DCFlushRange drains (%.1f a frame)\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<unsigned long long>(coalesced), static_cast<double>(coalesced) / frames);
     }
 
     // What made pending records run, busiest first, as drains a frame. Immediate mode's per-record
@@ -750,4 +849,12 @@ extern "C" void spm_gxskip_set(bool enabled) {
 // forwards every flip. The frame boundary does the rest (DstepPresentedFrame).
 extern "C" void spm_dstep_set(bool enabled) {
     GxWorker::g_dstepRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The dflushcoal experiment's hook from the deko diag layer, declared and forwarded
+// exactly like the spike's: diag_init hands it the dk_diag.txt value once, diag_set
+// forwards every flip. Drain reads it on the flush's own path, so a flip lands on the
+// next DCFlushRange.
+extern "C" void spm_dflushcoal_set(bool enabled) {
+    GxWorker::g_dflushCoalRequested.store(enabled, std::memory_order_relaxed);
 }
