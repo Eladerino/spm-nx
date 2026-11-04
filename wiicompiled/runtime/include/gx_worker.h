@@ -174,6 +174,27 @@ void DstepPresentedFrame();
 // no tick in the window was sunk by the mode.
 void PrintDstepWindow(uint64_t firstFrame, uint64_t lastFrame);
 
+// ---- the dflushcoal experiment (Switch Diagnostics "dflushcoal"; state in gx_worker.cpp) -------
+//
+// In Threaded mode the game's DCFlushRange (guest 0x8026D800) is the heaviest drain cause
+// there is: it arrives ~46 times a frame in heavy 2D and every call that finds records
+// pending drains the ring, which waits for the worker to chew through everything
+// submitted so far (stderr-49: 15.5 of 18.4 ms of worker wait a frame). The drain is a
+// sync point, there so the native body runs after everything recorded before it. While
+// this switch is on, a DCFlushRange whose drain would find nothing new to wait for
+// returns without draining: the witness kept in gx_worker.cpp remembers the frame of
+// the last DCFlushRange drain to complete and the record total at that moment, and a
+// later DCFlushRange in the same frame — the frame counter FrameBoundary advances at
+// the presented-frame boundary — with no record submitted since skips its drain. The
+// first flush of a frame always drains, and any record submission re-arms the next
+// flush, so a skipped drain never lets the body run ahead of a record it had to wait
+// for. While the switch is off the witness is still kept (it records facts, so a
+// mid-frame flip takes effect at once) but never read: drains, counts and waits are
+// exactly the unmodified behaviour. Skipped flushes are counted apart — never as
+// drains or waits — and PrintPerfWindow's [gxworker] block reports the window's skip
+// count, so a hardware A/B reads the DCFlushRange wait with the switch off against
+// the same wait plus the skip count with it on.
+
 template <auto Fn, typename Tuple>
 void ReplayTuple(void* payload) {
     Tuple* args = static_cast<Tuple*>(payload);
