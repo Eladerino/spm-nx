@@ -4721,15 +4721,13 @@ std::vector<OptRow> OptionsRows(int tab) {
     return rows;
 }
 
-// Splits one notice line into pieces no wider than maxWidth layout units at the given text
-// size, breaking at spaces where it can (a single longer word is cut mid-word). The notices
-// used to size their card from the one measured line, so a long line ran off both edges of
-// the screen: the Prepare banner did exactly that on hardware (Brandon's screenshot, Nov 1).
-std::vector<std::string> WrapNoticeLine(const GameLayout::Font& font, const std::string& line, float size,
-                                        float maxWidth) {
-    auto widthOf = [&](const std::string& s) {
-        return GameLayout::MeasureText(font, GameLayout::Utf16(s), size);
-    };
+// Greedy word wrap, measured by the caller's own width function: splits text into pieces no
+// wider than maxWidth layout units, breaking at spaces where it can (a single longer word
+// is cut mid-word). The measurement is the caller's because two text paths draw in this
+// file — the game font (GameLayout::MeasureText) and the ImGui fallback — and a wrap is
+// only honest measured the way the text it wraps will be drawn.
+std::vector<std::string> WrapTextLines(const std::string& line, float maxWidth,
+                                       const std::function<float(const std::string&)>& widthOf) {
     std::vector<std::string> out;
     std::string cur;
     size_t i = 0;
@@ -4757,6 +4755,17 @@ std::vector<std::string> WrapNoticeLine(const GameLayout::Font& font, const std:
     }
     if (!cur.empty() || out.empty()) out.push_back(cur);
     return out;
+}
+
+// Splits one notice line into pieces no wider than maxWidth layout units at the given text
+// size. The notices used to size their card from the one measured line, so a long line ran
+// off both edges of the screen: the Prepare banner did exactly that on hardware (Brandon's
+// screenshot, Nov 1).
+std::vector<std::string> WrapNoticeLine(const GameLayout::Font& font, const std::string& line, float size,
+                                        float maxWidth) {
+    return WrapTextLines(line, maxWidth, [&](const std::string& s) {
+        return GameLayout::MeasureText(font, GameLayout::Utf16(s), size);
+    });
 }
 
 // The paper banner the title notices share: a cream card with an ink border, centred at
@@ -5175,9 +5184,40 @@ void DrawOptionsMenu() {
     }
 
     const std::vector<OptRow> rows = OptionsRows(g_optTab);
-    float rowsBottom = bottom + 76.0f;
+    // The selected row's help, wrapped at its full size before the rows are
+    // placed, because the rows give up whatever room the wrapped block takes.
+    // Help used to be drawn as one line with the font shrunk until the whole
+    // string fit the card, so a long help (the 30 fps cap's is the longest of
+    // the Diagnostics rows) rendered far too small to read. Wrapped at the
+    // full 15 the longest helps take up to four lines; the block stacks
+    // upward from the one-line position, so a short help sits exactly where
+    // it always did. If a help ever needs more than four lines the whole
+    // block steps down a point at a time first, and only a help that still
+    // overflows at 8 falls back to the old shrunk one-liner.
+    const char* help = g_optRow >= 0 && g_optRow < int(rows.size()) ? rows[static_cast<size_t>(g_optRow)].help
+                                                                     : "Left and right pick a page.";
+    constexpr float kHelpSize = 15.0f, kHelpLineStep = 20.0f, kHelpMaxW = 2 * hw - 40.0f;
+    constexpr int kHelpMaxLines = 4;
+    auto helpWidth = [&](const std::string& s, float size) {
+        // Measured the way Txt will draw it: the game font's own measure, or
+        // the fallback's CalcTextSizeA at the pixel size Txt asks for, back
+        // in layout units (the plate labels above convert the same way).
+        return gameFont ? GameLayout::MeasureText(*font, GameLayout::Utf16(s), size)
+                        : ImGui::GetFont()->CalcTextSizeA(size * k * 0.9f, FLT_MAX, 0.0f, s.c_str()).x / k;
+    };
+    float helpSize = kHelpSize;
+    std::vector<std::string> helpLines =
+        WrapTextLines(help, kHelpMaxW, [&](const std::string& s) { return helpWidth(s, helpSize); });
+    while (int(helpLines.size()) > kHelpMaxLines && helpSize > 8.0f) {
+        helpSize -= 1.0f;
+        helpLines = WrapTextLines(help, kHelpMaxW, [&](const std::string& s) { return helpWidth(s, helpSize); });
+    }
+    const bool helpOneLine = int(helpLines.size()) > kHelpMaxLines;  // still overflowing: the old behaviour
+    const int helpBlockLines = helpOneLine ? 1 : int(helpLines.size());
+    const float helpRise = (helpBlockLines - 1) * kHelpLineStep;
+    float rowsBottom = bottom + 76.0f + helpRise;
 #if defined(__SWITCH__)
-    if (g_optTab == 3) rowsBottom = bottom + 104.0f;  // the Controls page's footer line sits under the rows
+    if (g_optTab == 3) rowsBottom = bottom + 104.0f + helpRise;  // the Controls page's footer line sits under the rows
 #endif
     const float rowH = 33.0f, rowsTop = tabY - 50.0f;
     const int visible = std::max(1, int((rowsTop - rowsBottom) / rowH) + 1);
@@ -5268,17 +5308,24 @@ void DrawOptionsMenu() {
     if (first > 0) list->AddTriangleFilled(S(-8, rowsTop + 26), S(8, rowsTop + 26), S(0, rowsTop + 36), more);
     if (first + visible < int(rows.size()))
         list->AddTriangleFilled(S(-8, y + rowH - 22), S(8, y + rowH - 22), S(0, y + rowH - 32), more);
-    // What the selected row does, and the buttons.
-    const char* help = g_optRow >= 0 && g_optRow < int(rows.size()) ? rows[static_cast<size_t>(g_optRow)].help
-                                                                     : "Left and right pick a page.";
-    Txt(help, 0, bottom + 50.0f, Fit(help, 15.0f, 2 * hw - 40.0f), 0x5A4A38FFu, 1);
+    // What the selected row does, and the buttons. The help lines stack
+    // upward from the one-line position (bottom + 50) by the rise the rows
+    // already gave up, so the bottom line never moves.
+    if (helpOneLine) {
+        Txt(help, 0, bottom + 50.0f, Fit(help, kHelpSize, kHelpMaxW), 0x5A4A38FFu, 1);
+    } else {
+        for (int i = 0; i < helpBlockLines; ++i)
+            Txt(helpLines[static_cast<size_t>(i)], 0, bottom + 50.0f + helpRise - i * kHelpLineStep, helpSize,
+                0x5A4A38FFu, 1);
+    }
 #if defined(__SWITCH__)
     if (g_optTab == 3) {
         // The Controls page's own footer, always on the page rather than
         // in a row's help: how the binding table works is the thing
-        // players could not discover here before.
+        // players could not discover here before. It rides above the help
+        // block, risen by the same amount the block rose.
         const char* footer = "Select: set the highlighted slot. Right stick: cancel. Left stick: back to default.";
-        Txt(footer, 0, bottom + 78.0f, Fit(footer, 14.0f, 2 * hw - 40.0f), 0x8A7A68FFu, 1);
+        Txt(footer, 0, bottom + 78.0f + helpRise, Fit(footer, 14.0f, 2 * hw - 40.0f), 0x8A7A68FFu, 1);
     }
 #endif
     Txt("Up/Down choose   Left/Right change   A / 2 select   B / 1 / HOME close", 0, bottom + 22.0f, 14.0f, 0x8A7A68FFu, 1);
