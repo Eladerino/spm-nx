@@ -450,6 +450,19 @@ if(NOT MKW_PLATFORM_SWITCH)
     add_test(NAME mkw_gx_worker_tests COMMAND mkw_gx_worker_tests)
 endif()
 
+# The input recorder's stream format and ring on their own: the fixture drives the
+# real format code in src/input_recorder.cpp through synthesised samples (scope
+# SCOPE-INPUT-RECORDER-2026-11-05 §7 Phase 0). A host test only.
+if(NOT MKW_PLATFORM_SWITCH)
+    add_executable(mkw_input_recorder_tests
+        "${CMAKE_CURRENT_LIST_DIR}/tests/input_recorder_tests.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/input_recorder.cpp")
+    target_include_directories(mkw_input_recorder_tests PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+    target_compile_features(mkw_input_recorder_tests PRIVATE cxx_std_20)
+    set_target_properties(mkw_input_recorder_tests PROPERTIES UNITY_BUILD OFF)
+    add_test(NAME mkw_input_recorder_tests COMMAND mkw_input_recorder_tests)
+endif()
+
 add_executable(mkw_runtime_config_tests "${CMAKE_CURRENT_LIST_DIR}/tests/runtime_config_tests.cpp")
 target_include_directories(mkw_runtime_config_tests PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/include"
