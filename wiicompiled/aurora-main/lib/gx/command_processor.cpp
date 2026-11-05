@@ -7,6 +7,7 @@
 #include <array>
 #include "command_processor.hpp"
 #include "fifo.hpp"  // for the gxskip sink (fifo::sink_on), checked in submit_raw_draw below
+#include "vcache_core.hpp"  // the vcache lab piece: eligibility scan + bounded store
 
 #include "../gfx/common.hpp"
 #include "../dolphin/gx/__gx.h"
@@ -3070,6 +3071,50 @@ static bool handle_draw(u8 cmd, const u8* data, u32& pos, u32 size, bool bigEndi
   return true;
 }
 
+// The indexed-attribute ranges of a draw's bind groups: for every attribute the
+// vertex descriptor marks indexed, the staging range of its array — the cached
+// upload when one is live, otherwise this epoch's shared upload of the same array,
+// uploading it first when this epoch has none that covers it. Extracted verbatim
+// from handle_draw_unmerged so the vcache replay resolves ranges through the exact
+// code (and the exact sequence of cache mutations) the decode path performs.
+static BindGroupRanges resolve_bind_group_ranges() {
+  BindGroupRanges ranges{};
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
+      continue;
+    }
+    auto& array = g_gxState.arrays[i];
+    if (array.cachedRange.size > 0) {
+      ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
+    } else {
+      // SPM re-binds the same big map arrays per object, each time with the size its display list needs
+      // (highest index used). Re-copying ~200 KB per draw filled the 8 MB storage staging every ~40 draws,
+      // forcing a mid-frame GPU submit each time (gn3_12: 14 fps). Reuse this staging epoch's upload of
+      // the same array when it already covers the requested size.
+      struct StagedArray {
+        gfx::Range range;
+        u32 size;
+      };
+      static absl::flat_hash_map<const void*, StagedArray> s_staged;
+      static u32 s_stagedEpoch = 0;
+      if (s_stagedEpoch != g_arrayUploadEpoch) {
+        s_staged.clear();
+        s_stagedEpoch = g_arrayUploadEpoch;
+      }
+      gfx::Range range;
+      if (const auto it = s_staged.find(array.data); it != s_staged.end() && it->second.size >= array.size) {
+        range = it->second.range;
+      } else {
+        range = gfx::push_storage(static_cast<const uint8_t*>(array.data), array.size);
+        s_staged[array.data] = StagedArray{range, array.size};
+      }
+      ranges.vaRanges[i - GX_VA_POS] = range;
+      array.cachedRange = range;
+    }
+  }
+  return ranges;
+}
+
 static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
                                  gfx::Range vertRange, uint16_t usedPnMtxMask,
                                  HashType matrixTopologySignature,
@@ -3139,40 +3184,7 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
       indexTemplate.indices.data(), indexTemplate.indices.size()});
 
   // Build pipeline, bind groups, and push draw command
-  BindGroupRanges ranges{};
-  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
-    if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) {
-      continue;
-    }
-    auto& array = g_gxState.arrays[i];
-    if (array.cachedRange.size > 0) {
-      ranges.vaRanges[i - GX_VA_POS] = array.cachedRange;
-    } else {
-      // SPM re-binds the same big map arrays per object, each time with the size its display list needs
-      // (highest index used). Re-copying ~200 KB per draw filled the 8 MB storage staging every ~40 draws,
-      // forcing a mid-frame GPU submit each time (gn3_12: 14 fps). Reuse this staging epoch's upload of
-      // the same array when it already covers the requested size.
-      struct StagedArray {
-        gfx::Range range;
-        u32 size;
-      };
-      static absl::flat_hash_map<const void*, StagedArray> s_staged;
-      static u32 s_stagedEpoch = 0;
-      if (s_stagedEpoch != g_arrayUploadEpoch) {
-        s_staged.clear();
-        s_stagedEpoch = g_arrayUploadEpoch;
-      }
-      gfx::Range range;
-      if (const auto it = s_staged.find(array.data); it != s_staged.end() && it->second.size >= array.size) {
-        range = it->second.range;
-      } else {
-        range = gfx::push_storage(static_cast<const uint8_t*>(array.data), array.size);
-        s_staged[array.data] = StagedArray{range, array.size};
-      }
-      ranges.vaRanges[i - GX_VA_POS] = range;
-      array.cachedRange = range;
-    }
-  }
+  const BindGroupRanges ranges = resolve_bind_group_ranges();
 
   const auto& pipelineState = resolve_pipeline_state(prim, fmt);
   const auto& info = pipelineState.shaderInfo;
@@ -3240,6 +3252,805 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount,
     g_gxState.pipelineStateGeneration = next_gx_state_epoch();
     g_gxState.stateDirty = true;
   }
+}
+
+// --- The decoded display-list vertex cache (vcache) --------------------------------------
+//
+// The build-out of what dlprobe measured (stderr-49): in he2_03, 99.4% of submitted
+// display-list bytes were exact repeats and decoding them cost ~11.7 ms/frame. While
+// the vcache diag switch is on, process_display_list (fifo.cpp) asks here first
+// whether the list's last decode can be replayed, and otherwise records the decode
+// it is about to watch. The pattern follows mkdd-nx's vertex cache: whole-list
+// capture, content key, state signature, bounded store, churn backoff, verify mode.
+//
+// What a decode produces, at this layer, is: bytes appended to the vertex, uniform
+// and index staging arenas, a sequence of DrawData commands in the current render
+// pass, and a handful of state transients (lastVtxFmt/lastVtxSize, stateDirty, the
+// zfreeze plane). A recording captures exactly those; a replay re-appends the arena
+// bytes verbatim, re-resolves the two things that are genuinely positional (each
+// uniform's staged vertex offset, and an indexed draw's array ranges, through
+// resolve_bind_group_ranges — the same code the decode runs), shifts the recorded
+// ranges by the append deltas, and re-pushes the draws. GPU-side vertex conversion
+// reads the same bytes from the same-shaped ranges, so the picture is the decode's
+// picture. Two honest differences from a real decode, both batching-only: a replayed
+// list never merges its first draw into a draw from before the list, and its draws
+// are not re-merged among themselves (the recorded set is already the post-merge
+// set). Draw merging groups draws that share pipeline, bind groups and consecutive
+// ranges; splitting a merged run back into its recorded draws changes draw-call
+// boundaries, never pixels. Frame interpolation — the one consumer that gives
+// merged draws an identity — bypasses the cache entirely while it is active.
+//
+// The key is the list's XXH3-64 content hash plus a digest of every piece of state
+// the decode path reads (vcache_state_digest below enumerates them). Any doubt is a
+// miss: the scan in vcache_core.hpp only accepts lists of NOPs and draws (decoding
+// them cannot change the state the key was taken under), indexed lists additionally
+// ride on the guest write-generation hooks so an array write the digest cannot see
+// still misses, and a stack of diagnostic modes bypasses the cache outright
+// (vcache_bypass_stamp). Lists over 64 KB are not cached, matching the runtime's
+// own display-list scan cache cap.
+
+namespace {
+
+constexpr uint32_t kVCacheMaxListBytes = 64 * 1024;
+constexpr uint64_t kVCacheMaxEntryBytes = 1024 * 1024;
+static_assert(MaxVtxAttr <= 26, "the vcache generation table is sized for the attribute count");
+
+// SPM_VCACHE_VERIFY=1: never replay; re-decode and byte-compare against the stored
+// entry instead, the way mkdd's MKDD_VCACHECK re-decodes and compares. A mismatch
+// prints CHECK FAILED and drops the entry. Latched at first use, like SPM_FLAT_TEST.
+bool vcache_verify_mode() {
+  static const bool on = [] {
+    const char* e = std::getenv("SPM_VCACHE_VERIFY");
+    return e != nullptr && e[0] == '1';
+  }();
+  return on;
+}
+
+// SPM_FLAT_TEST rewrites tev state per draw inside handle_draw_unmerged; any value
+// bypasses the cache. This is a twin of that function's own latch (same env, same
+// parse), read here because the original is function-local there.
+int vcache_flat_test() {
+  static const int value = [] {
+    const char* e = std::getenv("SPM_FLAT_TEST");
+    return e ? std::atoi(e) : 0;
+  }();
+  return value;
+}
+
+// The conditions under which a decode has observable behaviour a replay cannot
+// reproduce, as a stamp so a recording can also spot one flipping mid-list:
+// frame interpolation (merged draws gain identities and snapshot state a replay
+// cannot rebuild), array re-upload (every draw invalidates the array caches),
+// flat-test rewrites, the draw limit, and the per-draw diagnostic consumers
+// (draw dumps, the sweep dump, and the bounding-box accumulation the game reads
+// back through GXReadBoundingBox).
+uint32_t vcache_bypass_stamp() {
+  uint32_t stamp = 0;
+  if (frame_interpolation_active()) stamp |= 1u << 0;
+  if (array_reupload_flag().load(std::memory_order_relaxed)) stamp |= 1u << 1;
+  if (vcache_flat_test() != 0) stamp |= 1u << 2;
+  if (g_spmDrawLimit != ~0u) stamp |= 1u << 3;
+  if (g_spmDrawDump != 0) stamp |= 1u << 4;
+  if (g_spmSweepDump != 0) stamp |= 1u << 5;
+  if (g_spmBBoxArmed != 0) stamp |= 1u << 6;
+  return stamp;
+}
+
+struct VCacheCounters {
+  std::atomic<uint64_t> calls{0};        // process_display_list calls while on
+  std::atomic<uint64_t> lookups{0};      // calls that reached the store
+  std::atomic<uint64_t> hits{0};         // replays
+  std::atomic<uint64_t> hitDraws{0};     // draws served by replays
+  std::atomic<uint64_t> hitListBytes{0}; // submitted list bytes served by replays
+  std::atomic<uint64_t> missNoEntry{0};  // no variant of this content stored
+  std::atomic<uint64_t> missDigest{0};   // content known, state digest differs
+  std::atomic<uint64_t> missBackoff{0};  // content backed off after digest churn
+  std::atomic<uint64_t> missGeneration{0}; // an indexed array was written since
+  std::atomic<uint64_t> missBindGroup{0};  // a texture bind group was swept
+  std::atomic<uint64_t> missCapacity{0};   // staging could not take the replay
+  std::atomic<uint64_t> records{0};        // decodes stored
+  std::atomic<uint64_t> rejectScanState{0}; // list holds a state-writing opcode
+  std::atomic<uint64_t> rejectScanOther{0}; // unknown opcode / overrun / no draws
+  std::atomic<uint64_t> rejectSplit{0};     // staging split (or a bypass flag flipped) mid-list
+  std::atomic<uint64_t> rejectForeignMerge{0}; // first draw merged into an earlier draw
+  std::atomic<uint64_t> rejectInterleave{0};   // a non-draw command, or a range outside the segments
+  std::atomic<uint64_t> rejectNoDraws{0};      // the decode produced no draws (culled, no pass, ...)
+  std::atomic<uint64_t> rejectOversize{0};     // decoded output over the per-entry cap
+  std::atomic<uint64_t> rejectGeneration{0};  // arrays untracked, or written during the decode
+  std::atomic<uint64_t> evictions{0};
+  std::atomic<uint64_t> verifyChecks{0}; // verify mode: re-decodes that matched
+  std::atomic<uint64_t> verifyFails{0};  // verify mode: re-decodes that differed
+  std::atomic<uint64_t> entries{0};      // gauges, mirrored from the store
+  std::atomic<uint64_t> storedBytes{0};
+};
+VCacheCounters g_vcacheCounters;
+
+void vcache_bump(std::atomic<uint64_t>& field) { field.fetch_add(1, std::memory_order_relaxed); }
+
+struct VCacheEntry {
+  std::vector<uint8_t> verts;    // the vertex arena segment, verbatim
+  std::vector<uint8_t> uniforms; // the uniform arena segment, verbatim
+  std::vector<uint8_t> indices;  // the index arena segment, verbatim
+  std::vector<DrawData> draws;   // the pass's draws, ranges still record-time absolute
+  uint32_t vertBase = 0;
+  uint32_t uniformBase = 0;
+  uint32_t indexBase = 0;
+  // State the decode left behind, restored by a replay.
+  bool endStateDirty = false;
+  GXVtxFmt endLastVtxFmt = GX_MAX_VTXFMT;
+  uint16_t endLastVtxSize = 0;
+  Vec4<float> endZFreezePlane{};
+  bool endLastDrawRecordedInterpolation = false;
+  // Per-list counter deltas, re-applied by a replay so the audit and stat lines
+  // describe the same frame either way.
+  uint32_t auditDraws = 0;
+  uint64_t statDraws = 0;
+  uint32_t mergedDraws = 0;
+  bool indexed = false;
+  std::array<uint64_t, 26> arrayGen{};
+  uint32_t arrayGenMask = 0;
+};
+
+using VCacheStore = vcache::Store<VCacheEntry>;
+// One store per processing thread, like the runtime's display-list scan cache: sync
+// mode decodes on the game thread, cpthread on the decode thread, and a toggle just
+// starts the new thread's store cold.
+VCacheStore& vcache_store() {
+  thread_local VCacheStore store;
+  return store;
+}
+
+void vcache_sync_gauges() {
+  VCacheStore& store = vcache_store();
+  g_vcacheCounters.entries.store(store.Size(), std::memory_order_relaxed);
+  g_vcacheCounters.storedBytes.store(store.Bytes(), std::memory_order_relaxed);
+  thread_local uint64_t lastEvictions = 0;
+  const uint64_t evictions = store.Evictions();
+  if (evictions > lastEvictions) {
+    g_vcacheCounters.evictions.fetch_add(evictions - lastEvictions, std::memory_order_relaxed);
+    lastEvictions = evictions;
+  }
+}
+
+// calculate_last_vtx_size's arithmetic without its state writes, for the scan:
+// the scan runs before the decode and may not disturb lastVtxFmt/lastVtxSize/stateDirty.
+uint32_t vcache_vtx_size_for_fmt(uint8_t fmt, void*) {
+  u32 vtxSize = 0;
+  const auto& vtxFmt = g_gxState.vtxFmts[fmt];
+  for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+    const auto attr = static_cast<GXAttr>(i);
+    const auto& attrFmt = vtxFmt.attrs[i];
+    switch (g_gxState.vtxDesc[i]) {
+    case GX_NONE:
+      break;
+    case GX_DIRECT: {
+      vtxSize += comp_type_size(attr, attrFmt.type) * comp_cnt_count(attr, attrFmt.cnt);
+      break;
+    }
+    case GX_INDEX8:
+      vtxSize += (attr == GX_VA_NRM && attrFmt.cnt == GX_NRM_NBT3) ? 3 : 1;
+      break;
+    case GX_INDEX16:
+      vtxSize += (attr == GX_VA_NRM && attrFmt.cnt == GX_NRM_NBT3) ? 6 : 2;
+      break;
+    }
+  }
+  return vtxSize;
+}
+
+bool vcache_state_indexed() {
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    if (g_gxState.vtxDesc[i] == GX_INDEX8 || g_gxState.vtxDesc[i] == GX_INDEX16) return true;
+  }
+  return false;
+}
+
+// Sample the guest write generation of every indexed attribute's array. False when
+// any is untracked (no hooks, or a null/empty array): such a list is never cached,
+// because its array contents could change with nothing the digest can see.
+bool vcache_sample_generations(std::array<uint64_t, 26>& out, uint32_t& mask) {
+  mask = 0;
+  bool ok = true;
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    if (g_gxState.vtxDesc[i] != GX_INDEX8 && g_gxState.vtxDesc[i] != GX_INDEX16) continue;
+    const auto& array = g_gxState.arrays[i];
+    const uint64_t gen = guest_write_generation(array.data, array.size);
+    out[i] = gen;
+    mask |= 1u << i;
+    if (gen == kGuestWriteUntracked) ok = false;
+  }
+  return ok;
+}
+
+bool vcache_generations_current(const std::array<uint64_t, 26>& stored, uint32_t mask) {
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    if ((mask & (1u << i)) == 0) continue;
+    const auto& array = g_gxState.arrays[i];
+    if (!guest_write_generation_matches(stored[i], guest_write_generation(array.data, array.size))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The state half of the key: a digest of everything the decode of a draws+ NOPs list
+// can read. Assembled in a fixed order and folded chunk by chunk the way the
+// pipeline config hash is (unseeded XXH3 per chunk, hash_combine between them, so
+// nothing takes XXH3's seeded long path). Fields are hashed as raw bytes; a type
+// whose padding or cached pointer differs between two logically equal states can
+// only cost a hit, never cause a wrong one, because every field that decides the
+// output is in here by value.
+uint64_t vcache_state_digest() {
+  const GXState& s = g_gxState;
+  HashType h = 0;
+  const auto addBytes = [&h](const void* p, size_t n) { h = hash_combine(h, xxh3_hash_s(p, n)); };
+  const auto addU64 = [&addBytes](uint64_t v) { addBytes(&v, sizeof(v)); };
+  const auto addU32 = [&addBytes](uint32_t v) { addBytes(&v, sizeof(v)); };
+  const auto addField = [&addBytes](const auto& field) { addBytes(&field, sizeof(field)); };
+
+  // Vertex layout: what a draw's payload bytes mean.
+  addField(s.vtxDesc);
+  addField(s.sourceVtxDesc);
+  addField(s.vtxFmts);
+  // Indexed array identities. Their contents are covered separately by the write
+  // generations; cachedRange is deliberately out (the replay re-resolves ranges
+  // against the live cache, exactly as a decode now would).
+  for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+    if (s.vtxDesc[i] != GX_INDEX8 && s.vtxDesc[i] != GX_INDEX16) continue;
+    addU32(static_cast<uint32_t>(i));
+    addU64(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(s.arrays[i].data)));
+    addU32(s.arrays[i].size);
+    addU32(s.arrays[i].stride);
+    addU64(s.arrays[i].le ? 1 : 0);
+  }
+  // Decode transients the first draw reads: format-size memo and merge eligibility.
+  addField(s.lastVtxFmt);
+  addField(s.lastVtxSize);
+  addField(s.stateDirty);
+  // Tripwire: bumped by the register writes that feed the pipeline config.
+  addField(s.pipelineStateGeneration);
+  // Matrices and viewport: the uniform contents.
+  addField(s.currentPnMtx);
+  addField(s.pnMtx);
+  addField(s.texMtxs);
+  addField(s.ptTexMtxs);
+  addField(s.proj);
+  addField(s.projType);
+  addField(s.xfViewport);
+  addField(s.xfProjection);
+  addField(s.renderViewport);
+  addField(s.logicalViewport);
+  const auto addF32 = [&addBytes](float v) { addBytes(&v, sizeof(v)); };
+  addF32(g_spmProjWiden);
+  addF32(g_spmScreenWiden);
+  // Fixed-function state: pipeline selection and uniform contents.
+  addField(s.fog);
+  addField(s.fogRange);
+  addField(s.cullMode);
+  addField(s.lineWidth);
+  addField(s.pointSize);
+  addField(s.lineTexOffset);
+  addField(s.pointTexOffset);
+  addField(s.lineHalfAspect);
+  addField(s.blendMode);
+  addField(s.blendFacSrc);
+  addField(s.blendFacDst);
+  addField(s.blendOp);
+  addField(s.depthFunc);
+  addField(s.pixelFmt);
+  addField(s.zFmt);
+  addField(s.zCompLocBeforeTex);
+  addField(s.zTextureOp);
+  addField(s.zTextureFmt);
+  addField(s.zTextureBias);
+  addField(s.dstAlpha);
+  addField(s.alphaCompare);
+  addField(s.colorRegs);
+  addField(s.kcolors);
+  addField(s.colorChannelConfig);
+  addField(s.colorChannelState);
+  addField(s.lights);
+  addField(s.tevStages);
+  addField(s.tevSwapTable);
+  addField(s.indStages);
+  addField(s.indTexMtxs);
+  addField(s.indTexMask);
+  addField(s.tcgs);
+  addField(s.texCoordScales);
+  addField(s.numChans);
+  addField(s.numIndStages);
+  addField(s.numTevStages);
+  addField(s.numTexGens);
+  addField(s.depthCompare);
+  addField(s.depthUpdate);
+  addField(s.colorUpdate);
+  addField(s.alphaUpdate);
+  // zfreeze: the flag decides whether draws refresh the plane, and build_uniform's
+  // shader selection reads the mode; the plane itself is a decode input (it is the
+  // depth reference) as well as an output, so the start value is keyed and the end
+  // value is recorded.
+  addField(s.zFreeze);
+  addField(s.zFreezePlane);
+  addField(s.zScale);
+  addField(s.zOffset);
+  addField(s.scissorOffsetX);
+  addField(s.scissorOffsetY);
+  addField(s.dualTex);
+  addField(s.viewportPolicy);
+  // Textures: the bind identity (the TextureRef pointer, the same identity the
+  // engine's own texture bind-group cache key uses) plus the full texobj, and the
+  // loaded texture/tlut state resolve_sampled_textures reads.
+  for (uint32_t i = 0; i < MaxTextures; ++i) {
+    addU64(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(s.textures[i].ref.get())));
+    addField(s.textures[i].texObj);
+  }
+  addField(s.loadedTextures);
+  addField(s.loadedTluts);
+  // The register caches behind the cooked fields: insurance for any reader of the
+  // raw banks the enumeration above might have missed.
+  addField(s.xfRegCache);
+  addField(s.xfRegCacheValid);
+  addField(s.bpRegCache);
+  // Draw merging shapes the recorded draw set; a replay does not re-merge, so the
+  // mode the set was recorded under is part of its identity.
+  addU32(static_cast<uint32_t>(no_merge_mode_flag().load(std::memory_order_relaxed)));
+  return static_cast<uint64_t>(h);
+}
+
+} // namespace
+
+bool vcache_try_replay(const uint8_t* data, uint32_t nbytes, bool bigEndian) {
+  VCacheCounters& c = g_vcacheCounters;
+  const uint64_t call = c.calls.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (nbytes == 0 || nbytes > kVCacheMaxListBytes) return false;
+  if (vcache_bypass_stamp() != 0) return false;
+  vcache::Key key;
+  key.listHash = static_cast<uint64_t>(xxh3_hash_s(data, nbytes));
+  key.nbytes = nbytes;
+  key.bigEndian = bigEndian;
+  const vcache::ContentKey content(key);
+  VCacheStore& store = vcache_store();
+  if (store.BackedOff(content, call)) {
+    vcache_bump(c.missBackoff);
+    return false;
+  }
+  vcache_bump(c.lookups);
+  if (!store.HasContent(content)) {
+    vcache_bump(c.missNoEntry);
+    return false;
+  }
+  key.stateDigest = vcache_state_digest();
+  VCacheEntry* entry = store.Find(key);
+  if (entry == nullptr) {
+    vcache_bump(c.missDigest);
+    store.NoteDigestMiss(content, call);
+    return false;
+  }
+  store.NoteContentServed(content);
+  if (vcache_verify_mode()) {
+    // Verify mode never replays: vcache_begin/end re-decode and compare instead.
+    return false;
+  }
+  if (entry->indexed && !vcache_generations_current(entry->arrayGen, entry->arrayGenMask)) {
+    vcache_bump(c.missGeneration);
+    store.Erase(key);
+    vcache_sync_gauges();
+    return false;
+  }
+  // Every recorded texture bind group must still resolve; a swept one is a miss,
+  // not an error (find_bind_group would CHECK-fail, so this goes through the
+  // non-fatal lookup). Resolving here also refreshes each group's last-used frame,
+  // exactly as build_bind_groups' bind_group_ref does on the decode path.
+  std::vector<WGPUBindGroup> resolved(entry->draws.size(), nullptr);
+  for (size_t i = 0; i < entry->draws.size(); ++i) {
+    const gfx::BindGroupRef ref = entry->draws[i].bindGroups.textureBindGroup;
+    if (ref == 0) continue;
+    wgpu::BindGroup* bindGroup = gfx::try_find_bind_group(ref);
+    if (bindGroup == nullptr) {
+      vcache_bump(c.missBindGroup);
+      return false;
+    }
+    resolved[i] = bindGroup->Get();
+  }
+  // Capacity, mirroring process_display_list's own split-then-retry: the demand is
+  // the segment sizes (re-pushing a recorded segment re-pads to exactly its recorded
+  // size: vertex and index pushes are unaligned, and a uniform segment is a sum of
+  // already-aligned uniform ranges) plus an upper bound on what the array resolver
+  // may still upload for an indexed entry.
+  gfx::StagingSizes demand{entry->verts.size(), entry->uniforms.size(), entry->indices.size(), 0};
+  if (entry->indexed) {
+    uint64_t storage = 0;
+    for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+      if ((entry->arrayGenMask & (1u << i)) != 0) storage += g_gxState.arrays[i].size;
+    }
+    demand[3] = storage;
+  }
+  bool space = false;
+  try {
+    space = gfx::staging_has_space(demand);
+  } catch (const gfx::StagingCapacityError&) {
+    space = false;
+  }
+  if (!space) {
+    gfx::split_staging_batch();
+    try {
+      space = gfx::staging_has_space(demand);
+    } catch (const gfx::StagingCapacityError&) {
+      space = false;
+    }
+  }
+  if (!space) {
+    vcache_bump(c.missCapacity);
+    return false;
+  }
+  // Vertex and index pushes are unaligned, so pushing even an empty segment is a
+  // no-op that returns the current arena offset — exactly the range a zero-byte
+  // draw received on the decode path, which keeps the deltas below honest for
+  // zero-size ranges too. (A uniform push of length 0 would append alignment
+  // zeroes instead, but a recorded entry with draws always has uniforms: every
+  // unmerged draw maps one.)
+  const gfx::Range vertPush = gfx::push_verts(entry->verts.data(), entry->verts.size());
+  const gfx::Range uniformPush = entry->uniforms.empty()
+                                     ? gfx::Range{}
+                                     : gfx::push_uniform(entry->uniforms.data(), entry->uniforms.size());
+  const gfx::Range indexPush = gfx::push_indices(entry->indices.data(), entry->indices.size());
+  if (vertPush.size != entry->verts.size() || uniformPush.size != entry->uniforms.size() ||
+      indexPush.size != entry->indices.size()) {
+    // Cannot happen given the padding argument above; the pushed bytes are simply
+    // unreferenced staging, and the decode below proceeds as if there were no cache.
+    vcache_bump(c.missCapacity);
+    return false;
+  }
+  const uint32_t deltaV = vertPush.offset - entry->vertBase;
+  const uint32_t deltaU = entry->uniforms.empty() ? 0 : uniformPush.offset - entry->uniformBase;
+  const uint32_t deltaI = indexPush.offset - entry->indexBase;
+  // Patch the positional words inside the replayed uniforms: the staged vertex
+  // offset at byte 0 of each draw's uniform, and — for indexed draws — the array
+  // range offsets at bytes 32.. that build_uniform staged from the resolver. The
+  // resolver runs once here; on the decode path it runs per draw, but its result
+  // depends only on the array state, which a cached list cannot change, and its
+  // own cache mutations make it idempotent.
+  try {
+    BindGroupRanges ranges{};
+    if (entry->indexed) ranges = resolve_bind_group_ranges();
+    for (const DrawData& draw : entry->draws) {
+      const uint32_t uniformAt = draw.uniformRange.offset + deltaU;
+      const uint32_t newVertStart = draw.vertRange.offset + deltaV;
+      gfx::staging_copy_in(1, uniformAt, reinterpret_cast<const uint8_t*>(&newVertStart), sizeof(newVertStart));
+      if (entry->indexed) {
+        for (uint32_t slot = 0; slot < MaxIndexAttr; ++slot) {
+          const uint32_t rangeOffset = ranges.vaRanges[slot].offset;
+          gfx::staging_copy_in(1, uniformAt + 32 + 4 * slot, reinterpret_cast<const uint8_t*>(&rangeOffset),
+                               sizeof(rangeOffset));
+        }
+      }
+    }
+  } catch (const gfx::StagingBatchFull&) {
+    vcache_bump(c.missCapacity);
+    return false;
+  } catch (const gfx::StagingCapacityError&) {
+    vcache_bump(c.missCapacity);
+    return false;
+  }
+  for (size_t i = 0; i < entry->draws.size(); ++i) {
+    DrawData draw = entry->draws[i];
+    draw.vertRange.offset += deltaV;
+    draw.idxRange.offset += deltaI;
+    draw.uniformRange.offset += deltaU;
+    if (draw.bindGroups.textureBindGroup != 0) {
+      draw.bindGroups.resolvedTextureBindGroup = resolved[i];
+    }
+    gfx::push_draw_command(draw);
+  }
+  g_gxState.stateDirty = entry->endStateDirty;
+  g_gxState.lastVtxFmt = entry->endLastVtxFmt;
+  g_gxState.lastVtxSize = entry->endLastVtxSize;
+  g_gxState.zFreezePlane = entry->endZFreezePlane;
+  s_lastDrawRecordedInterpolation = entry->endLastDrawRecordedInterpolation;
+  g_spmAudit[0] += entry->auditDraws;
+  g_statDraws.fetch_add(entry->statDraws, std::memory_order_relaxed);
+  gfx::g_mergedDrawCallCount += entry->mergedDraws;
+  vcache_bump(c.hits);
+  c.hitDraws.fetch_add(entry->draws.size(), std::memory_order_relaxed);
+  c.hitListBytes.fetch_add(nbytes, std::memory_order_relaxed);
+  return true;
+}
+
+VCacheRecording vcache_begin(const uint8_t* data, uint32_t nbytes, bool bigEndian) {
+  VCacheRecording rec;
+  if (nbytes == 0 || nbytes > kVCacheMaxListBytes) return rec;
+  rec.bypassStamp = vcache_bypass_stamp();
+  if (rec.bypassStamp != 0) return rec;
+  const vcache::ScanEnv env{.vtxSizeForFmt = &vcache_vtx_size_for_fmt, .ctx = nullptr};
+  const vcache::ScanResult scan = vcache::ScanList(data, nbytes, bigEndian, env);
+  if (scan.reject != vcache::ScanReject::None) {
+    if (scan.reject == vcache::ScanReject::StateOpcode) {
+      vcache_bump(g_vcacheCounters.rejectScanState);
+    } else {
+      vcache_bump(g_vcacheCounters.rejectScanOther);
+    }
+    return rec;
+  }
+  rec.listHash = static_cast<uint64_t>(xxh3_hash_s(data, nbytes));
+  rec.nbytes = nbytes;
+  rec.bigEndian = bigEndian;
+  rec.indexed = vcache_state_indexed();
+  if (rec.indexed) rec.arrayGenOk = vcache_sample_generations(rec.arrayGen0, rec.arrayGenMask);
+  rec.stateDigest = vcache_state_digest();
+  rec.usage0 = gfx::staging_usage();
+  rec.epoch0 = gfx::staging_epoch();
+  rec.passIndex0 = gfx::pass_index();
+  rec.commandCount0 = gfx::pass_command_count();
+  if (rec.commandCount0 > 0) {
+    DrawData last;
+    if (gfx::pass_draw_command(rec.commandCount0 - 1, last)) {
+      rec.hadDraw0 = true;
+      rec.draw0VtxCount = last.vtxCount;
+      rec.draw0VertRangeSize = last.vertRange.size;
+      rec.draw0IdxRangeSize = last.idxRange.size;
+    }
+  }
+  rec.statDraws0 = g_statDraws.load(std::memory_order_relaxed);
+  rec.audit0 = g_spmAudit[0];
+  rec.merged0 = gfx::g_mergedDrawCallCount;
+  if (vcache_verify_mode()) {
+    vcache::Key key;
+    key.listHash = rec.listHash;
+    key.stateDigest = rec.stateDigest;
+    key.nbytes = nbytes;
+    key.bigEndian = bigEndian;
+    rec.verify = vcache_store().Peek(key) != nullptr;
+  }
+  rec.active = true;
+  return rec;
+}
+
+namespace {
+
+// Whether a fresh decode (b) reproduces a stored recording (a) exactly: segment
+// bytes identical, and draws identical in everything but the absolute staging
+// offsets of their ranges (compared relative to each recording's own bases).
+bool vcache_entry_matches(const VCacheEntry& a, const VCacheEntry& b) {
+  if (a.verts != b.verts || a.uniforms != b.uniforms || a.indices != b.indices) return false;
+  if (a.draws.size() != b.draws.size()) return false;
+  for (size_t i = 0; i < a.draws.size(); ++i) {
+    const DrawData& x = a.draws[i];
+    const DrawData& y = b.draws[i];
+    if (x.pipeline != y.pipeline || x.dstAlpha != y.dstAlpha) return false;
+    if (x.vertRange.size != y.vertRange.size || x.idxRange.size != y.idxRange.size ||
+        x.uniformRange.size != y.uniformRange.size) {
+      return false;
+    }
+    if (x.vertRange.offset - a.vertBase != y.vertRange.offset - b.vertBase ||
+        x.idxRange.offset - a.indexBase != y.idxRange.offset - b.indexBase ||
+        x.uniformRange.offset - a.uniformBase != y.uniformRange.offset - b.uniformBase) {
+      return false;
+    }
+    if (x.vtxCount != y.vtxCount || x.indexCount != y.indexCount || x.instanceCount != y.instanceCount ||
+        x.expandedPrimitive != y.expandedPrimitive) {
+      return false;
+    }
+    if (x.bindGroups.textureBindGroup != y.bindGroups.textureBindGroup) return false;
+  }
+  if (a.endStateDirty != b.endStateDirty || a.endLastVtxFmt != b.endLastVtxFmt ||
+      a.endLastVtxSize != b.endLastVtxSize) {
+    return false;
+  }
+  if (std::memcmp(&a.endZFreezePlane, &b.endZFreezePlane, sizeof(a.endZFreezePlane)) != 0) return false;
+  return a.auditDraws == b.auditDraws && a.statDraws == b.statDraws && a.mergedDraws == b.mergedDraws &&
+         a.indexed == b.indexed;
+}
+
+} // namespace
+
+void vcache_end(VCacheRecording& rec, bool splitOccurred) {
+  if (!rec.active) return;
+  rec.active = false;
+  VCacheCounters& c = g_vcacheCounters;
+  if (splitOccurred || gfx::staging_epoch() != rec.epoch0 || gfx::pass_index() != rec.passIndex0 ||
+      vcache_bypass_stamp() != rec.bypassStamp) {
+    // The decode submitted mid-list (its output spans two batches), moved to a new
+    // pass, or a bypass condition flipped while it ran: none of it is one replayable
+    // unit.
+    vcache_bump(c.rejectSplit);
+    return;
+  }
+  const uint32_t count1 = gfx::pass_command_count();
+  if (count1 < rec.commandCount0) {
+    vcache_bump(c.rejectSplit);
+    return;
+  }
+  if (rec.hadDraw0) {
+    DrawData last;
+    if (!gfx::pass_draw_command(rec.commandCount0 - 1, last)) {
+      vcache_bump(c.rejectInterleave);
+      return;
+    }
+    if (last.vtxCount != rec.draw0VtxCount || last.vertRange.size != rec.draw0VertRangeSize ||
+        last.idxRange.size != rec.draw0IdxRangeSize) {
+      // The list's first draw merged into a draw that started before the list.
+      // The merged result belongs to that draw, not to this list.
+      vcache_bump(c.rejectForeignMerge);
+      return;
+    }
+  }
+  std::vector<DrawData> draws;
+  draws.reserve(count1 - rec.commandCount0);
+  for (uint32_t i = rec.commandCount0; i < count1; ++i) {
+    DrawData draw;
+    if (!gfx::pass_draw_command(i, draw)) {
+      vcache_bump(c.rejectInterleave);
+      return;
+    }
+    draws.push_back(draw);
+  }
+  if (draws.empty()) {
+    vcache_bump(c.rejectNoDraws);
+    return;
+  }
+  const gfx::StagingSizes usage1 = gfx::staging_usage();
+  const uint64_t segV = usage1[0] - rec.usage0[0];
+  const uint64_t segU = usage1[1] - rec.usage0[1];
+  const uint64_t segI = usage1[2] - rec.usage0[2];
+  // The storage arena's delta is deliberately not captured: array uploads in it are
+  // the resolver's, and a replay re-resolves them against the live caches instead.
+  if (segV + segU + segI > kVCacheMaxEntryBytes) {
+    vcache_bump(c.rejectOversize);
+    return;
+  }
+  const uint32_t baseV = static_cast<uint32_t>(rec.usage0[0]);
+  const uint32_t baseU = static_cast<uint32_t>(rec.usage0[1]);
+  const uint32_t baseI = static_cast<uint32_t>(rec.usage0[2]);
+  for (const DrawData& draw : draws) {
+    if (draw.vertRange.offset < baseV || draw.vertRange.offset + draw.vertRange.size > baseV + segV ||
+        draw.uniformRange.offset < baseU || draw.uniformRange.offset + draw.uniformRange.size > baseU + segU ||
+        draw.idxRange.offset < baseI || draw.idxRange.offset + draw.idxRange.size > baseI + segI) {
+      vcache_bump(c.rejectInterleave);
+      return;
+    }
+    for (const gfx::Range& range : draw.interpolatedUniformRanges) {
+      if (range.size != 0) { // interpolation bypasses the cache; a nonzero range here
+        vcache_bump(c.rejectInterleave); // means that bypass was somehow stepped around
+        return;
+      }
+    }
+  }
+  if (rec.indexed) {
+    if (!rec.arrayGenOk) {
+      vcache_bump(c.rejectGeneration);
+      return;
+    }
+    std::array<uint64_t, 26> nowGen{};
+    uint32_t nowMask = 0;
+    vcache_sample_generations(nowGen, nowMask);
+    if (nowMask != rec.arrayGenMask) {
+      vcache_bump(c.rejectGeneration);
+      return;
+    }
+    for (int i = GX_VA_POS; i <= GX_VA_TEX7; ++i) {
+      if ((rec.arrayGenMask & (1u << i)) == 0) continue;
+      if (!guest_write_generation_matches(rec.arrayGen0[i], nowGen[i])) {
+        // A write raced the recording: what was decoded may not match the bytes
+        // the generations now describe.
+        vcache_bump(c.rejectGeneration);
+        return;
+      }
+    }
+  }
+  VCacheEntry entry;
+  entry.verts.resize(static_cast<size_t>(segV));
+  entry.uniforms.resize(static_cast<size_t>(segU));
+  entry.indices.resize(static_cast<size_t>(segI));
+  if (segV > 0) gfx::staging_copy_out(0, baseV, entry.verts.data(), static_cast<size_t>(segV));
+  if (segU > 0) gfx::staging_copy_out(1, baseU, entry.uniforms.data(), static_cast<size_t>(segU));
+  if (segI > 0) gfx::staging_copy_out(2, baseI, entry.indices.data(), static_cast<size_t>(segI));
+  entry.draws = std::move(draws);
+  entry.vertBase = baseV;
+  entry.uniformBase = baseU;
+  entry.indexBase = baseI;
+  entry.endStateDirty = g_gxState.stateDirty;
+  entry.endLastVtxFmt = g_gxState.lastVtxFmt;
+  entry.endLastVtxSize = g_gxState.lastVtxSize;
+  entry.endZFreezePlane = g_gxState.zFreezePlane;
+  entry.endLastDrawRecordedInterpolation = s_lastDrawRecordedInterpolation;
+  entry.auditDraws = g_spmAudit[0] - rec.audit0;
+  entry.statDraws = g_statDraws.load(std::memory_order_relaxed) - rec.statDraws0;
+  entry.mergedDraws = gfx::g_mergedDrawCallCount - rec.merged0;
+  entry.indexed = rec.indexed;
+  entry.arrayGen = rec.arrayGen0;
+  entry.arrayGenMask = rec.arrayGenMask;
+
+  vcache::Key key;
+  key.listHash = rec.listHash;
+  key.stateDigest = rec.stateDigest;
+  key.nbytes = rec.nbytes;
+  key.bigEndian = rec.bigEndian;
+  VCacheStore& store = vcache_store();
+  if (rec.verify) {
+    const VCacheEntry* stored = store.Peek(key);
+    if (stored != nullptr && stored->indexed &&
+        !vcache_generations_current(stored->arrayGen, stored->arrayGenMask)) {
+      // The arrays moved on since the recording; a difference would be legitimate.
+      store.Erase(key);
+      vcache_bump(c.missGeneration);
+      vcache_sync_gauges();
+      return;
+    }
+    if (stored != nullptr && vcache_entry_matches(*stored, entry)) {
+      vcache_bump(c.verifyChecks);
+      return;
+    }
+    if (stored != nullptr) {
+      std::fprintf(stderr,
+                   "vcache: CHECK FAILED for list hash %llx (%u bytes): the fresh decode differs from the "
+                   "stored recording; dropping the entry\n",
+                   static_cast<unsigned long long>(rec.listHash), rec.nbytes);
+      store.Erase(key);
+      vcache_bump(c.verifyFails);
+      vcache_sync_gauges();
+      return;
+    }
+    // The entry was evicted between begin and end: fall through and store fresh.
+  }
+  if (store.Insert(key, std::move(entry), segV + segU + segI)) {
+    vcache_bump(c.records);
+    store.NoteContentServed(vcache::ContentKey(key));
+  }
+  vcache_sync_gauges();
+}
+
+// AuroraVCachePrintWindow (GXAurora.h): the runtime's perftimer window print calls
+// this next to dlprobe's line. Silent while the switch is off and nothing happened.
+extern "C" void AuroraVCachePrintWindow(uint64_t firstFrame, uint64_t lastFrame) {
+  VCacheCounters& c = g_vcacheCounters;
+  const auto take = [](std::atomic<uint64_t>& field) { return field.exchange(0, std::memory_order_relaxed); };
+  const uint64_t calls = take(c.calls);
+  const uint64_t lookups = take(c.lookups);
+  const uint64_t hits = take(c.hits);
+  const uint64_t hitDraws = take(c.hitDraws);
+  const uint64_t hitListBytes = take(c.hitListBytes);
+  const uint64_t missNoEntry = take(c.missNoEntry);
+  const uint64_t missDigest = take(c.missDigest);
+  const uint64_t missBackoff = take(c.missBackoff);
+  const uint64_t missGeneration = take(c.missGeneration);
+  const uint64_t missBindGroup = take(c.missBindGroup);
+  const uint64_t missCapacity = take(c.missCapacity);
+  const uint64_t records = take(c.records);
+  const uint64_t rejectScanState = take(c.rejectScanState);
+  const uint64_t rejectScanOther = take(c.rejectScanOther);
+  const uint64_t rejectSplit = take(c.rejectSplit);
+  const uint64_t rejectForeignMerge = take(c.rejectForeignMerge);
+  const uint64_t rejectInterleave = take(c.rejectInterleave);
+  const uint64_t rejectNoDraws = take(c.rejectNoDraws);
+  const uint64_t rejectOversize = take(c.rejectOversize);
+  const uint64_t rejectGeneration = take(c.rejectGeneration);
+  const uint64_t evictions = take(c.evictions);
+  const uint64_t verifyChecks = take(c.verifyChecks);
+  const uint64_t verifyFails = take(c.verifyFails);
+  if (!vcache_enabled() && calls == 0 && hits == 0 && records == 0 && verifyChecks == 0 && verifyFails == 0) {
+    return;
+  }
+  const uint64_t entries = c.entries.load(std::memory_order_relaxed);
+  const uint64_t storedBytes = c.storedBytes.load(std::memory_order_relaxed);
+  std::fprintf(stderr,
+               "[vcache] frames %llu-%llu: calls %llu lookups %llu hits %llu (draws %llu, list bytes %llu) "
+               "miss noentry %llu digest %llu backoff %llu gen %llu bind %llu cap %llu; recorded %llu "
+               "reject stateop %llu scan %llu split %llu foreign %llu interleave %llu nodraws %llu oversize "
+               "%llu gen %llu; evict %llu entries %llu stored %llu KB verify %llu ok %llu FAILED\n",
+               static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+               static_cast<unsigned long long>(calls), static_cast<unsigned long long>(lookups),
+               static_cast<unsigned long long>(hits), static_cast<unsigned long long>(hitDraws),
+               static_cast<unsigned long long>(hitListBytes), static_cast<unsigned long long>(missNoEntry),
+               static_cast<unsigned long long>(missDigest), static_cast<unsigned long long>(missBackoff),
+               static_cast<unsigned long long>(missGeneration), static_cast<unsigned long long>(missBindGroup),
+               static_cast<unsigned long long>(missCapacity), static_cast<unsigned long long>(records),
+               static_cast<unsigned long long>(rejectScanState), static_cast<unsigned long long>(rejectScanOther),
+               static_cast<unsigned long long>(rejectSplit), static_cast<unsigned long long>(rejectForeignMerge),
+               static_cast<unsigned long long>(rejectInterleave), static_cast<unsigned long long>(rejectNoDraws),
+               static_cast<unsigned long long>(rejectOversize), static_cast<unsigned long long>(rejectGeneration),
+               static_cast<unsigned long long>(evictions), static_cast<unsigned long long>(entries),
+               static_cast<unsigned long long>(storedBytes / 1024),
+               static_cast<unsigned long long>(verifyChecks), static_cast<unsigned long long>(verifyFails));
 }
 
 std::string read_string(const u8* data, u32& pos, u32 size, bool bigEndian) {

@@ -301,6 +301,46 @@ void set_staging_capacity_limits_for_testing(const StagingSizes& limits) {
   g_stagingCapacity = limits;
   g_stagingHighWater = {};
 }
+
+namespace {
+// The vcache's arena selector (common.hpp): StagingSizes order.
+ByteBuffer& staging_arena(uint32_t arena) noexcept {
+  switch (arena) {
+  case 1:
+    return g_uniforms;
+  case 2:
+    return g_indices;
+  case 3:
+    return g_storage;
+  default:
+    return g_verts;
+  }
+}
+} // namespace
+
+void staging_copy_out(uint32_t arena, uint32_t offset, uint8_t* dst, size_t length) noexcept {
+  const ByteBuffer& source = staging_arena(arena);
+  std::memcpy(dst, source.data() + offset, length);
+}
+void staging_copy_in(uint32_t arena, uint32_t offset, const uint8_t* src, size_t length) noexcept {
+  ByteBuffer& target = staging_arena(arena);
+  std::memcpy(target.data() + offset, src, length);
+}
+
+uint32_t pass_index() noexcept { return g_currentRenderPass; }
+uint32_t pass_command_count() noexcept {
+  if (g_currentRenderPass >= g_renderPasses.size()) return 0;
+  return static_cast<uint32_t>(g_renderPasses[g_currentRenderPass].commands.size());
+}
+bool pass_draw_command(uint32_t index, gx::DrawData& out) noexcept {
+  if (g_currentRenderPass >= g_renderPasses.size()) return false;
+  const auto& commands = g_renderPasses[g_currentRenderPass].commands;
+  if (index >= commands.size()) return false;
+  const Command& command = commands[index];
+  if (command.type != CommandType::Draw || command.data.draw.type != ShaderType::GX) return false;
+  out = command.data.draw.gx;
+  return true;
+}
 bool staging_has_space(const StagingSizes& demand) {
   // Async readback preparation runs in the worker's noexcept seal prologue.
   // Reserve all 32 slots plus the uniform binding's 3840-byte trailing window.
@@ -2130,6 +2170,13 @@ wgpu::BindGroup& find_bind_group(BindGroupRef id) {
   const auto it = g_cachedBindGroups.find(id);
   CHECK(it != g_cachedBindGroups.end(), "get_bind_group: failed to locate {:x}", id);
   return it->second.bindGroup;
+}
+
+wgpu::BindGroup* try_find_bind_group(BindGroupRef id) noexcept {
+  const auto it = g_cachedBindGroups.find(id);
+  if (it == g_cachedBindGroups.end()) return nullptr;
+  it->second.lastUsedFrame = g_frameIndex;
+  return &it->second.bindGroup;
 }
 
 wgpu::Sampler& sampler_ref(const wgpu::SamplerDescriptor& descriptor) {

@@ -303,6 +303,18 @@ uint64_t staging_uniform_bytes(uint64_t value) { return staging_padded(value, 25
 uint64_t staging_storage_bytes(uint64_t value) { return staging_padded(value, 256); }
 bool staging_has_space(const StagingSizes&) { return true; }
 void split_staging_batch() { throw StagingCapacityError("Unexpected split in FIFO unit test"); }
+// The vcache's gfx surface (common.hpp): the stub staging model has no arenas or
+// render-pass command list to record from, and the tests never enable the cache, so
+// these only need to link. Usage and epoch stay at zero, which reads as "nothing was
+// staged"; the pass readback reports no commands; a bind group never resolves.
+StagingSizes staging_usage() noexcept { return {}; }
+uint64_t staging_epoch() noexcept { return 0; }
+void staging_copy_out(uint32_t, uint32_t, uint8_t*, size_t) noexcept {}
+void staging_copy_in(uint32_t, uint32_t, const uint8_t*, size_t) noexcept {}
+uint32_t pass_index() noexcept { return 0; }
+uint32_t pass_command_count() noexcept { return 0; }
+bool pass_draw_command(uint32_t, gx::DrawData&) noexcept { return false; }
+wgpu::BindGroup* try_find_bind_group(BindGroupRef) noexcept { return nullptr; }
 
 Vec2<uint32_t> get_render_target_size() noexcept { return s_renderTargetSize; }
 Vec2<uint32_t> get_frame_buffer_size() noexcept { return s_renderTargetSize; }
