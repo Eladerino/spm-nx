@@ -185,6 +185,12 @@ constexpr uint32_t kNowSeq = 0x8056D0D8, kNextSeq = 0x8056D0DC, kGp = 0x8056D198
 constexpr uint32_t kSeqWorkStage = 0x804CF364, kSeqLoadSubWp = 0x8056D0F0, kMsgDrvMsgW = 0x8056CF38,
                    kPauseWinWp = 0x8056D950;
 
+// The guide subsystem's work struct (guest 0x804CD398, guide.c): +8 holds the
+// guide pose's AnimPose slot and +12 the current animation's name pointer. Every
+// message/event teaching demo draws through that one pose, so the pose log reads
+// both (wiimote-logic-trace-2026-11-04.md).
+constexpr uint32_t kGuidePoseSlot = 0x804CD3A0, kGuideAnimName = 0x804CD3A4;
+
 // Debug menu warps (settings_overlay.cpp): the request is stored by the UI and served here, on the game's own frame.
 std::mutex g_warpMutex;
 bool g_warpPending = false, g_warpHasDoor = false;
@@ -1314,9 +1320,38 @@ bool FlagValue(int flag) {
 // each AnimPose is 392 bytes, its group id is at + 16, the group array is at AnimWork
 // + 0 with 16-byte entries whose file entry pointer is at + 8, and FileEntry.path is
 // at + 0x20 (64 bytes). Only poses drawn from an n_controler archive are logged (the
-// demo Wii Remote's); each distinct (file, group, pose, place) combination logs once,
-// with the map and sequence it was seen in riding along, so a teaching pose can be told
+// demo Wii Remote's); each distinct combination of the logged fields logs once, with
+// the map and sequence it was seen in riding along, so a teaching pose can be told
 // apart from the Controls screen's and the shake command's in the same run.
+//
+// Enrichment (lab-poselog2, still log-only): the line also carries the gate signals
+// the Nov 4 source audit named and the pose's animation identity, so one hardware
+// session can settle which poses are which. msgwin / pausewin are presence flags
+// for the message-window and pause-window work pointers (kMsgDrvMsgW / kPauseWinWp,
+// the same variables RttLogStep logs raw): teaching poses are presented under a
+// message window, the Controls screen's remote under the pause window. nextseq is
+// kNextSeq beside the existing seq. anim is AnimPose + 20, the pose's current
+// animation index within its group's animation table -- animPoseSetAnim stores
+// the name/index resolver's result there (func_80042DB0: a passthrough index, or
+// the strcmp match over the group's AnimData table), and animPoseDrawMtx's own
+// anim-switch sequence compares and rewrites it, so the game itself treats +20
+// as "the current anim". link is AnimPose + 152, the linked pose slot
+// animPoseDrawMtx follows before drawing (bounds-checked against the pose count,
+// -1 = no link); when it names a valid slot, lgroup / lanim are the linked pose's
+// group id and animation index, the identity of what is actually drawn. All of
+// these are table/slot indices, never addresses, so they are stable across boots
+// in a way the (group, pose) slot pair alone was never proven to be.
+//
+// The guide fields come from the Nov 4 logic trace: every message/event
+// teaching demo draws through ONE AnimPose owned by guide.c, whose work struct
+// (guest 0x804CD398) holds that pose's slot at +8 and the current animation's
+// name pointer at +12. guide is 1 when the slot being drawn equals the live
+// slot word (gvalid is 0, and guide forced to 0, when that word cannot be
+// read), and ganim is the name the guide last set -- the archive's clip name
+// (A_1, C_1, ...), so a teaching draw identifies itself by clip. The shake
+// command and the Controls window pose the model on separate paths that never
+// touch guide work, so a guide=1 row is a teaching draw by construction and a
+// guide=0 row in a protected context is the control sample.
 //
 // The switch is the "poselog" dk_diag key: device.cpp forwards it here through
 // spm_pose_log_set, from diag_init at boot and from the Diagnostics page at runtime.
@@ -1362,24 +1397,99 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
     char place[48] = {};
     SpmMapSweep::CurrentPlace(place, sizeof place);
     const int seq = SpmMapSweep::Seq();
-    // One log line per distinct (file, group, pose, place), so a test run names every
-    // pose the demo remote is drawn in without flooding the log at 60 draws a second.
-    static char seenPath[64][64] = {};
-    static uint32_t seenGroup[64] = {};
-    static uint32_t seenPose[64] = {};
-    static char seenPlace[64][48] = {};
+    // Enrichment reads, all TryRead32 like everything else here. Presence flags are
+    // 1 = pointer non-null, 0 = null, -1 = unreadable; nextseq is -1 when unreadable
+    // (the Seq() convention). anim / link are the raw AnimPose words as signed
+    // values (link's -1 is a real value, "no link"); -2 marks an unreadable word.
+    uint32_t msgwRaw = 0, pauseRaw = 0, nextRaw = 0;
+    const int msgwin = Memory::TryRead32(SpmMapSweep::kMsgDrvMsgW, msgwRaw) ? (msgwRaw != 0 ? 1 : 0) : -1;
+    const int pausewin = Memory::TryRead32(SpmMapSweep::kPauseWinWp, pauseRaw) ? (pauseRaw != 0 ? 1 : 0) : -1;
+    const int nextseq = Memory::TryRead32(SpmMapSweep::kNextSeq, nextRaw) ? int(nextRaw) : -1;
+    const uint32_t poseBase = poses + id * 392;
+    uint32_t animRaw = 0, linkRaw = 0;
+    const int anim = Memory::TryRead32(poseBase + 20, animRaw) ? int(static_cast<int32_t>(animRaw)) : -2;
+    const int link = Memory::TryRead32(poseBase + 152, linkRaw) ? int(static_cast<int32_t>(linkRaw)) : -2;
+    int lgroup = -1, lanim = -1;
+    if (link >= 0 && uint32_t(link) < count) {
+        uint32_t lgRaw = 0, laRaw = 0;
+        if (Memory::TryRead32(poses + uint32_t(link) * 392 + 16, lgRaw)) lgroup = int(lgRaw);
+        if (Memory::TryRead32(poses + uint32_t(link) * 392 + 20, laRaw)) lanim = int(static_cast<int32_t>(laRaw));
+    }
+    // The guide match: guide=1 when the slot being drawn is the guide pose's
+    // live slot (guide work +8). On any doubt the match is 0 and gvalid is 0,
+    // so a bad read can never masquerade as a guide draw. ganim is the guide's
+    // current animation name (guide work +12): the archive clip name the
+    // guide subsystem last set (A_1, C_1, ...), copied with the same
+    // Contains-then-bytes pattern as the file path above, bounded at 24
+    // printable-ASCII bytes; when the pointer or the bytes fail those checks
+    // it falls back to the pointer's hex form.
+    uint32_t guideSlotRaw = 0;
+    const int gvalid = Memory::TryRead32(SpmMapSweep::kGuidePoseSlot, guideSlotRaw) ? 1 : 0;
+    const int guide = (gvalid && guideSlotRaw == id) ? 1 : 0;
+    char ganim[25] = {};
+    uint32_t namePtr = 0;
+    bool nameOk = Memory::TryRead32(SpmMapSweep::kGuideAnimName, namePtr) && namePtr != 0 &&
+                  Memory::Contains(namePtr, 24);
+    if (nameOk) {
+        int n = 0;
+        for (int i = 0; i < 24; ++i) {
+            const uint8_t b = Memory::Read8(namePtr + uint32_t(i));
+            if (b == 0) break;
+            if (b < 0x20 || b > 0x7E) {
+                nameOk = false;
+                break;
+            }
+            ganim[n++] = static_cast<char>(b);
+        }
+        if (n == 0) nameOk = false;
+    }
+    if (!nameOk) std::snprintf(ganim, sizeof ganim, "0x%08X", namePtr);
+    // One log line per distinct combination of every logged field, so a test run
+    // names every pose the demo remote is drawn in -- and the same pose seen under
+    // a message window and again without one logs twice, which is the point --
+    // without flooding the log at 60 draws a second.
+    static char seenPath[128][64] = {};
+    static uint32_t seenGroup[128] = {};
+    static uint32_t seenPose[128] = {};
+    static char seenPlace[128][48] = {};
+    static int seenMsgwin[128] = {};
+    static int seenPausewin[128] = {};
+    static int seenNextseq[128] = {};
+    static int seenAnim[128] = {};
+    static int seenLink[128] = {};
+    static int seenLgroup[128] = {};
+    static int seenLanim[128] = {};
+    static int seenGuide[128] = {};
+    static int seenGvalid[128] = {};
+    static char seenGanim[128][25] = {};
     static int seenCount = 0;
     for (int i = 0; i < seenCount; ++i)
-        if (seenGroup[i] == groupId && seenPose[i] == id && p == seenPath[i] && std::strcmp(place, seenPlace[i]) == 0)
+        if (seenGroup[i] == groupId && seenPose[i] == id && p == seenPath[i] && std::strcmp(place, seenPlace[i]) == 0 &&
+            seenMsgwin[i] == msgwin && seenPausewin[i] == pausewin && seenNextseq[i] == nextseq &&
+            seenAnim[i] == anim && seenLink[i] == link && seenLgroup[i] == lgroup && seenLanim[i] == lanim &&
+            seenGuide[i] == guide && seenGvalid[i] == gvalid && std::strcmp(ganim, seenGanim[i]) == 0)
             return false;
-    if (seenCount < 64) {
+    if (seenCount < 128) {
         std::snprintf(seenPath[seenCount], 64, "%s", p.c_str());
         seenGroup[seenCount] = groupId;
         seenPose[seenCount] = id;
         std::snprintf(seenPlace[seenCount], 48, "%s", place);
+        seenMsgwin[seenCount] = msgwin;
+        seenPausewin[seenCount] = pausewin;
+        seenNextseq[seenCount] = nextseq;
+        seenAnim[seenCount] = anim;
+        seenLink[seenCount] = link;
+        seenLgroup[seenCount] = lgroup;
+        seenLanim[seenCount] = lanim;
+        seenGuide[seenCount] = guide;
+        seenGvalid[seenCount] = gvalid;
+        std::snprintf(seenGanim[seenCount], 25, "%s", ganim);
         ++seenCount;
-        RT_LOGF(RT_TAG_RUNTIME, "[poselog] file '%s' group %u pose %u at %s (seq %d)\n", p.c_str(), groupId, id,
-                place, seq);
+        RT_LOGF(RT_TAG_RUNTIME,
+                "[poselog] file '%s' group %u pose %u at %s (seq %d) msgwin %d pausewin %d nextseq %d anim %d "
+                "link %d lgroup %d lanim %d guide %d gvalid %d ganim %s\n",
+                p.c_str(), groupId, id, place, seq, msgwin, pausewin, nextseq, anim, link, lgroup, lanim, guide,
+                gvalid, ganim);
     }
     return false;
 }
