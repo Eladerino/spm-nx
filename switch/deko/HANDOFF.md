@@ -48,8 +48,9 @@ serial), barriers and serials.
 - Diagnostics follow one pattern: a switch in `UserData/dk_diag.txt`, read once at renderer init
   (see `dk.h`), then flippable at runtime from the Options menu's Diagnostics page and the
   `UserData/dk_cmd.txt` command channel. A flip in the menu writes all twenty-nine page switches back
-  to `dk_diag.txt`; the file knows thirty-three keys in all, four of them (zcull,
-  guestcore, dkserver, rttlog) boot-time only. No file means a normal build. Every switch is off by default except
+  to `dk_diag.txt`; the file knows thirty-four keys in all, four of them (zcull,
+  guestcore, dkserver, rttlog) boot-time only and one (`abtoggle`, the automatic A/B
+  alternator) carrying its parameters in its value, with no page row. No file means a normal build. Every switch is off by default except
   `cpthread` (Aurora's GX decode thread, core 1), `gxthread` and `zcull`, which are on. The lines that move a build
   away from normal are the ones to name in a test report: `cpthread=0`, `gxthread=0`,
   `zcull=0`, and the experimental

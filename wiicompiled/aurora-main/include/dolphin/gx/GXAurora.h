@@ -240,7 +240,9 @@ void AuroraSetPerfPlace(const char* place);
 
 /**
  * Called at the end of each perftimer window's lines with the window's first and last frame, so the
- * host can print its own lines for the same window. Null removes it. Set it before frames run.
+ * host can print its own lines for the same window. Registrations chain: every distinct function
+ * registered is called, in registration order; passing null removes them all. Set it before
+ * frames run.
  */
 void AuroraSetPerfWindowHook(void (*hook)(uint64_t firstFrame, uint64_t lastFrame));
 
