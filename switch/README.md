@@ -172,7 +172,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   texture to `Cache/texture_dumps` under the name a replacement would use, for making
   new replacement pictures; takes effect after a restart),
   and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
-  recovery step for a cache that has gone wrong). Diagnostics holds twenty-eight of the
+  recovery step for a cache that has gone wrong). Diagnostics holds twenty-nine of the
   renderer's diagnostic switches, grouped under the same headings dk_diag.txt uses
   (each flip also writes all of them back to
   `UserData/dk_diag.txt`, the file the same switches are read from at boot), and Flush logs
@@ -183,7 +183,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   starts the debug server below (edit the `dkserver` line), and rttlog, which logs
   the state the file select waits on when Return to Title hangs, and the state at
   the moment Return to Title is chosen (edit the `rttlog` line). The file knows
-  thirty-two keys in all. One of the page's rows is a display option rather than a
+  thirty-three keys in all. One of the page's rows is a display option rather than a
   check: 30 fps cap (`fps30`), under Performance, shows gameplay frames one in two
   for a locked 30 fps while the game keeps its own pace; the title screen and the
   Prepare graphics sweep are not capped. Another Performance row is a measurement
@@ -197,6 +197,15 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   saying what share of the submitted list bytes were the same list at the same
   address as last time — the share a decoded-display-list cache would serve
   instead of decoding again.
+  Another Performance row is the cache that probe was measuring for: Decoded-list
+  vertex cache (`vcache`) remembers what a display list decoded into (its staged
+  vertices, indices, uniforms and draw commands) under a key of the list's bytes
+  plus the graphics state in force, and plays it back when the same list arrives
+  under the same state instead of decoding it again. Lists it cannot key safely
+  (ones that change graphics state as they decode, ones over 64 KB, indexed lists
+  whose vertex arrays cannot be watched for changes, and several diagnostic
+  modes) are decoded as usual, and with Performance timers on a [vcache] line
+  each window counts the hits, the misses and the rejects.
   Another Performance row is a reserved switch rather than a way to play: AXFX
   Hi reverb native (`axfxnative`) currently does nothing. The game's
   AXFXReverbHiExp reverb callback is reached through a function table, and the
