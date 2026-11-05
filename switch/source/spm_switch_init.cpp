@@ -151,6 +151,12 @@ void spm_pgo_instr_dump_now(void) __attribute__((weak));
 // diag_init started it, so its threads are gone before the socket service closes below.
 // Inert when the server never started.
 void spm_debug_server_stop(void);
+// runtime/src/input_recorder.cpp: finalizes an armed padrec recording. userAppExit is
+// the shutdown an applet close actually runs -- libnx skips std::atexit on that path
+// (the Nov 5 recorder smoke lost a whole recording to exactly that) -- so the flush
+// hangs off this hook, the same one the PGO exit dump below relies on. Inert when no
+// recording is armed.
+void spm_input_flush_at_exit(void);
 
 // The exception handler runs on its own stack: the faulting thread's may be the problem.
 alignas(16) u8 __nx_exception_stack[0x4000];
@@ -210,6 +216,9 @@ void userAppExit(void) {
     // The debug server stops first: its threads touch nothing the release unmaps, but they
     // hold the listening socket the socketExit below is about to close under them.
     spm_debug_server_stop();
+    // An armed input recording finalizes here, while its ring and the SD card are
+    // both still fully alive; it writes only its own file under UserData/Logs.
+    spm_input_flush_at_exit();
     // The PGO capture build's final dump comes before the guest memory release: its counters
     // live in instrumented code and data the release does not touch, but nothing after this
     // point is guaranteed to run.
