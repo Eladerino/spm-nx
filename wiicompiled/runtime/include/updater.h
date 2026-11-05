@@ -6,7 +6,7 @@
 // unpacks it, and hands over to a small script that copies it over the game folder once the game has quit, then
 // starts the game again. Saves, settings, mods and the disc are not in the download, so they are kept.
 namespace Updater {
-enum class State { Off, Checking, UpToDate, Available, Downloading, Failed };
+enum class State { Off, Checking, UpToDate, Available, Downloading, Failed, ReadyToApply };
 void Start();               // the background check, once (does nothing without version.txt or when turned off)
 State GetState();
 std::string Current();      // "v1.0.5", empty for a development build

@@ -4422,7 +4422,8 @@ std::vector<OptRow> OptionsRows(int tab) {
 #endif
             using S = Updater::State;
             const S st = Updater::GetState();
-            const std::string value = st == S::Available ? Updater::Latest() + " - install"
+            const std::string value = st == S::Available ? Updater::Latest() + " - download"
+                                    : st == S::ReadyToApply ? Updater::Latest() + " - restart to apply"
                                     : st == S::Checking ? "Checking..."
                                     : st == S::Downloading ? "Downloading..."
                                     : st == S::UpToDate ? "Up to date (" + Updater::Current() + ")"
@@ -4432,9 +4433,14 @@ std::vector<OptRow> OptionsRows(int tab) {
                 if (d == 0) Updater::Install();
             }, st == S::Available ? "Downloads the new version, then restarts the game into it. Saves and settings are kept."
                                   : "New versions are checked for when the game starts."});
+#if !defined(__SWITCH__)
+            // No "Check for updates" toggle on Switch: it persists an auto-check-at-boot
+            // preference, and updates there are menu-triggered only, so the toggle would
+            // be a lying control (DESIGN.md §6). The backend reports CheckEnabled()=false.
             rows.push_back({"Check for updates", OnOff(Updater::CheckEnabled()), [](int) {
                 Updater::SetCheckEnabled(!Updater::CheckEnabled());
             }, "Look for a new version each time the game starts."});
+#endif
         }
 #if defined(__SWITCH__)
         showSystemHeading();
