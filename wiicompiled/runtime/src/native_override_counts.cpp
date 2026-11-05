@@ -54,6 +54,9 @@ void PrintNativeOverrideCounts(uint64_t firstFrame, uint64_t lastFrame) {
     // The dlprobe's line (dl_probe.h) shares it too; it prints nothing while the probe was off
     // for the whole window.
     DlProbe::PrintWindow(firstFrame, lastFrame);
+    // The vcache experiment's line (Aurora's command_processor.cpp) shares it too; it prints
+    // nothing while the cache was off and idle for the whole window.
+    AuroraVCachePrintWindow(firstFrame, lastFrame);
     // The gxdedup experiment's line (gx_worker.h) shares this hook; it prints nothing
     // while no setter call was counted in the window (the switch was off).
     GxWorker::PrintGxDedupWindow(firstFrame, lastFrame);

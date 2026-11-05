@@ -226,6 +226,12 @@ private:
 };
 } // namespace aurora
 
+namespace aurora::gx {
+// Forward declaration for gfx::pass_draw_command's readback below; the full type is
+// in lib/gx/pipeline.hpp.
+struct DrawData;
+} // namespace aurora::gx
+
 namespace aurora::gfx {
 inline constexpr bool UseTextureBuffer = false;
 inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
@@ -443,6 +449,11 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass, Pipelin
 
 BindGroupRef bind_group_ref(const WGPUBindGroupDescriptor& descriptor);
 wgpu::BindGroup& find_bind_group(BindGroupRef id);
+// find_bind_group without the fatal check, for the vcache replay: a recorded draw's
+// texture bind group may have been swept from the cache since the recording, which is
+// a cache miss, not an error. A hit refreshes the entry's last-used frame, exactly as
+// bind_group_ref does for the draws build_bind_groups resolves.
+wgpu::BindGroup* try_find_bind_group(BindGroupRef id) noexcept;
 
 wgpu::Sampler& sampler_ref(const wgpu::SamplerDescriptor& descriptor);
 
@@ -460,6 +471,21 @@ StagingSizes staging_high_water() noexcept;
 uint64_t staging_split_count() noexcept;
 // Internal integration-test seam: never increases the physical allocation.
 void set_staging_capacity_limits_for_testing(const StagingSizes& limits);
+
+// Raw access to the staging arenas, for the vcache (lib/gx/vcache_core.hpp): recording
+// copies a decoded list's staged bytes out, replay patches a few words of a replayed
+// uniform in place. Arena indices follow StagingSizes order (0 verts, 1 uniforms,
+// 2 indices, 3 storage). The caller owns the bounds: offsets are absolute staging
+// offsets it took from staging_usage() and the ranges it recorded.
+void staging_copy_out(uint32_t arena, uint32_t offset, uint8_t* dst, size_t length) noexcept;
+void staging_copy_in(uint32_t arena, uint32_t offset, const uint8_t* src, size_t length) noexcept;
+
+// Readback of the current render pass's command list, for the vcache recording: which
+// pass is current, how many commands it holds, and the GX draw at an index (false when
+// that command is not a GX draw). The command storage itself stays private to common.cpp.
+uint32_t pass_index() noexcept;
+uint32_t pass_command_count() noexcept;
+bool pass_draw_command(uint32_t index, gx::DrawData& out) noexcept;
 
 
 Vec2<uint32_t> get_render_target_size() noexcept;
