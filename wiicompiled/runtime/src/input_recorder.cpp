@@ -7,6 +7,7 @@
 
 #include "wii_remote_input.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +51,98 @@ std::string HeaderField(const char* text) {
     return out;
 }
 
+struct ParsedStream {
+    int version = 0;
+    std::string versionField, titleField, noteField;
+    std::vector<Record> records;
+};
+
+// Parses one whole stream (a file, or one segment of a recording). False
+// means "refuse whole": bad header, a v1 body with any defect, or a v2
+// body in which not one chunk validates. A v2 body that starts valid and
+// goes bad keeps its good prefix -- that is the tolerance a writer killed
+// mid-flush (guest panic, power loss) relies on.
+bool ParseStream(const uint8_t* data, size_t size, ParsedStream& out) {
+    if (!data) return false;
+    // The header is the first four \n-terminated lines; the body follows
+    // immediately after the fourth newline.
+    size_t pos = 0;
+    std::string lines[4];
+    for (int i = 0; i < 4; ++i) {
+        if (pos >= size) return false;
+        const void* nl = std::memchr(data + pos, '\n', size - pos);
+        if (!nl) return false;
+        const size_t end = size_t(static_cast<const uint8_t*>(nl) - data);
+        lines[i].assign(reinterpret_cast<const char*>(data + pos), end - pos);
+        if (!lines[i].empty() && lines[i].back() == '\r') lines[i].pop_back();
+        pos = end + 1;
+    }
+    if (lines[0] == "SPM-PADREC 1")
+        out.version = 1;
+    else if (lines[0] == "SPM-PADREC 2")
+        out.version = 2;
+    else
+        return false;
+    if (lines[1].rfind("version=", 0) != 0 || lines[2].rfind("title=", 0) != 0 ||
+        lines[3].rfind("note=", 0) != 0)
+        return false;
+    out.versionField = lines[1].substr(8);
+    out.titleField = lines[2].substr(6);
+    out.noteField = lines[3].substr(5);
+    out.records.clear();
+
+    if (out.version == 1) {
+        // Legacy body: unchunked records, validated whole, as v1 was.
+        const size_t recordBytes = size - pos;
+        if (recordBytes % kRecordSize != 0) return false;
+        out.records.reserve(recordBytes / kRecordSize);
+        for (size_t off = pos; off < size; off += kRecordSize) {
+            Record record;
+            DecodeRecord(data + off, record);
+            if (!out.records.empty() && record.readSeq <= out.records.back().readSeq) return false;
+            out.records.push_back(record);
+        }
+        return true;
+    }
+
+    // v2 body: chunks. Each chunk is decoded into a scratch run first and
+    // only committed when its CRC and the read_seq run both hold, so a bad
+    // chunk costs exactly itself (and everything after it, which can no
+    // longer be trusted to line up), never the prefix.
+    if (pos == size) return true;  // header only: a recording stopped before any flush
+    bool anyChunk = false;
+    while (pos < size) {
+        if (size - pos < kChunkHeaderSize) break;  // torn chunk header: tail lost, prefix kept
+        const uint32_t magic = GetU32(data + pos);
+        const uint32_t count = GetU32(data + pos + 4);
+        const uint32_t crc = GetU32(data + pos + 8);
+        if (magic != kChunkMagic || count == 0 || count > kMaxChunkRecords) break;
+        const size_t bodyBytes = size_t(count) * kRecordSize;
+        if (size - pos - kChunkHeaderSize < bodyBytes) break;  // torn chunk body
+        const uint8_t* body = data + pos + kChunkHeaderSize;
+        if (PadrecCrc32(body, bodyBytes) != crc) break;
+        std::vector<Record> chunk;
+        chunk.reserve(count);
+        bool monotone = true;
+        for (uint32_t i = 0; i < count; ++i) {
+            Record record;
+            DecodeRecord(body + size_t(i) * kRecordSize, record);
+            const uint32_t prev = chunk.empty() ? (out.records.empty() ? 0 : out.records.back().readSeq)
+                                                : chunk.back().readSeq;
+            if ((!chunk.empty() || !out.records.empty()) && record.readSeq <= prev) {
+                monotone = false;
+                break;
+            }
+            chunk.push_back(record);
+        }
+        if (!monotone) break;
+        out.records.insert(out.records.end(), chunk.begin(), chunk.end());
+        anyChunk = true;
+        pos += kChunkHeaderSize + bodyBytes;
+    }
+    return anyChunk;
+}
+
 }  // namespace
 
 bool SamplesEqual(const PadSample& a, const PadSample& b) {
@@ -86,16 +179,45 @@ bool DecodeRecord(const uint8_t* in, Record& out) {
     return true;
 }
 
-void Recorder::Start(const char* version, const char* title, const char* note) {
-    header_ = "SPM-PADREC 1\nversion=" + HeaderField(version) + "\ntitle=" + HeaderField(title) +
+uint32_t PadrecCrc32(const uint8_t* data, size_t size) {
+    // IEEE CRC-32 (the zip polynomial), table built on first use.
+    static uint32_t table[256];
+    static bool built = [] {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+            table[i] = c;
+        }
+        return true;
+    }();
+    (void)built;
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < size; ++i) crc = table[(crc ^ data[i]) & 0xFFu] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFFu;
+}
+
+size_t EncodeChunk(const uint8_t* recordBytes, size_t recordCount, uint8_t* out, size_t outCapacity) {
+    if (!recordBytes || !out || recordCount == 0 || recordCount > kMaxChunkRecords) return 0;
+    const size_t total = kChunkHeaderSize + recordCount * kRecordSize;
+    if (outCapacity < total) return 0;
+    PutU32(out + 0, kChunkMagic);
+    PutU32(out + 4, uint32_t(recordCount));
+    PutU32(out + 8, PadrecCrc32(recordBytes, recordCount * kRecordSize));
+    std::memcpy(out + kChunkHeaderSize, recordBytes, recordCount * kRecordSize);
+    return total;
+}
+
+void Recorder::Start(const char* version, const char* title, const char* note, uint32_t readBase) {
+    header_ = "SPM-PADREC 2\nversion=" + HeaderField(version) + "\ntitle=" + HeaderField(title) +
               "\nnote=" + HeaderField(note) + "\n";
     if (ring_.size() != kRingBytes) ring_.assign(kRingBytes, 0);  // the 8 MB preallocation, once
     prev_ = PadSample{};
     recording_ = true;
     havePrev_ = false;
-    reads_ = 0;
+    readBase_ = readBase;
+    reads_ = readBase;
     records_ = 0;
-    lastStoredSeq_ = 0;
+    lastStoredSeq_ = readBase;
     firstRetrace_ = lastRetrace_ = 0;
     firstPresents_ = lastPresents_ = 0;
 }
@@ -103,7 +225,7 @@ void Recorder::Start(const char* version, const char* title, const char* note) {
 int Recorder::Observe(const PadSample& sample, uint32_t retrace, uint32_t presents) {
     if (!recording_) return 0;
     const uint32_t seq = reads_++;
-    if (seq == 0) {
+    if (seq == readBase_) {
         firstRetrace_ = retrace;
         firstPresents_ = presents;
     }
@@ -128,38 +250,31 @@ int Recorder::Observe(const PadSample& sample, uint32_t retrace, uint32_t presen
 
 bool Player::Load(const uint8_t* data, size_t size) {
     Unload();
-    if (!data) return false;
-    // The header is the first four \n-terminated lines; records follow
-    // immediately after the fourth newline.
-    size_t pos = 0;
-    std::string lines[4];
-    for (int i = 0; i < 4; ++i) {
-        const void* nl = std::memchr(data + pos, '\n', size - pos);
-        if (!nl) return false;
-        const size_t end = size_t(static_cast<const uint8_t*>(nl) - data);
-        lines[i].assign(reinterpret_cast<const char*>(data + pos), end - pos);
-        if (!lines[i].empty() && lines[i].back() == '\r') lines[i].pop_back();
-        pos = end + 1;
-    }
-    if (lines[0] != "SPM-PADREC 1") return false;
-    if (lines[1].rfind("version=", 0) != 0 || lines[2].rfind("title=", 0) != 0 ||
-        lines[3].rfind("note=", 0) != 0)
-        return false;
-    const size_t recordBytes = size - pos;
-    if (recordBytes % kRecordSize != 0) return false;
-    std::vector<Record> records;
-    records.reserve(recordBytes / kRecordSize);
-    for (size_t off = pos; off < size; off += kRecordSize) {
-        Record record;
-        DecodeRecord(data + off, record);
-        if (!records.empty() && record.readSeq <= records.back().readSeq) return false;
-        records.push_back(record);
-    }
-    version_ = lines[1].substr(8);
-    title_ = lines[2].substr(6);
-    note_ = lines[3].substr(5);
-    records_ = std::move(records);
+    ParsedStream parsed;
+    if (!ParseStream(data, size, parsed)) return false;
+    version_ = std::move(parsed.versionField);
+    title_ = std::move(parsed.titleField);
+    note_ = std::move(parsed.noteField);
+    records_ = std::move(parsed.records);
     loaded_ = true;
+    return true;
+}
+
+bool Player::Append(const uint8_t* data, size_t size) {
+    if (!loaded_) return Load(data, size);
+    ParsedStream parsed;
+    if (!ParseStream(data, size, parsed)) return false;
+    if (parsed.records.empty()) return true;  // an empty segment joins as nothing
+    if (!records_.empty()) {
+        const uint32_t last = records_.back().readSeq;
+        const uint32_t first = parsed.records.front().readSeq;
+        // The next segment's first read is always stored, and the previous
+        // segment stored a heartbeat within kHeartbeatReads of its end, so
+        // a true continuation lands in (last, last + kHeartbeatReads + 1].
+        // Anything wider is a different recording's segment, not ours.
+        if (first <= last || first - last > kHeartbeatReads + 1) return false;
+    }
+    records_.insert(records_.end(), parsed.records.begin(), parsed.records.end());
     return true;
 }
 
@@ -185,7 +300,8 @@ bool Player::Next(PadSample& out) {
     }
     if (next_ < records_.size()) {
         // Before the first record's read (only possible in a hand-made
-        // stream; Recorder always stores read 0): neutral until it lands.
+        // stream; Recorder always stores read 0 of a segment): neutral
+        // until it lands.
         out = haveCurrent_ ? current_ : PadSample{};
         return true;
     }
@@ -201,12 +317,12 @@ bool Player::Next(PadSample& out) {
 
 // ---- Switch glue ----------------------------------------------------------
 // The diag switches live in switch/deko (dk.h's padrec / padreplay); the
-// state they drive lives here. All file work happens under g_mutex, on the
-// thread that flips the switch, stops the recording or exits the process --
-// never on a read in steady state (RecordSample below only appends to RAM
-// and, on the read that fills the ring, safety-flushes: the one mid-run
-// write the scope allows, on exactly the read that would otherwise lose
-// the run).
+// state they drive lives here. All file work happens under g_mutex: at arm
+// / stop / exit, on ring fill, and at the periodic safety flush -- the
+// last two fire from RecordSample's bookkeeping at a KPAD read boundary,
+// the same place the original design's ring-fill flush already ran, and
+// never from the draw path. RecordSample in steady state only appends to
+// RAM.
 namespace {
 
 Recorder g_recorder;
@@ -216,6 +332,21 @@ std::atomic<bool> g_recordOn{false};
 std::atomic<bool> g_replayOn{false};
 bool g_exitHookRegistered = false;
 uint32_t g_segment = 0;  // 0 = pad-record.bin itself; later segments are ring-fill continuations
+
+// Periodic safety flush: whichever comes first since the last flush, this
+// many KPAD reads (nominally one per guest frame: 1800 reads is ~30 s at
+// 60 fps, ~60 s at 30 fps) with anything pending, or this many pending
+// records. One flush writes at most kMaxChunkRecords-sized chunks of the
+// pending run -- bounded by 2048 pending records (~90 KB) outside the
+// ring-fill path, which can owe the whole ring and writes it in chunks.
+constexpr uint32_t kPeriodicFlushReads = 1800;
+constexpr uint32_t kMaxPendingRecords = 2048;
+
+uint32_t g_readBase = 0;          // read_seq of the current segment's first read
+uint32_t g_flushedRecords = 0;    // current segment's records already on disk
+uint32_t g_lastFlushReads = 0;    // Reads() at the last successful flush
+bool g_segmentOnDisk = false;     // the current segment's file exists with its header
+std::vector<uint8_t> g_chunkScratch;
 
 // CMake passes SPM_BAKED_VERSION as a bare token (SpmSwitch.cmake's single
 // version source, the same one the self-updater glue stringizes).
@@ -242,13 +373,15 @@ std::string SegmentPath() {
     return LogsDir() + "/pad-record.seg" + std::to_string(g_segment) + ".bin";
 }
 
-// Writes the buffered segment. Segment 0 first rotates any previous
-// pad-record.bin to pad-record.prev.bin -- one previous recording kept,
-// the shape stderr.log's handling suggests (spm_switch_init.cpp replaces
-// the old log at startup; a recorder that overwrote the only copy of the
-// last run at flush time would lose it the same way). FAT rename does not
-// replace, so the old .prev is removed first (debug_server.cpp's put).
-bool FlushLocked() {
+// Creates the current segment's file with its header, if that has not
+// happened yet. Segment 0 first rotates any previous pad-record.bin to
+// pad-record.prev.bin -- one previous recording kept, the shape
+// stderr.log's handling suggests (spm_switch_init.cpp replaces the old log
+// at startup; a recorder that overwrote the only copy of the last run at
+// flush time would lose it the same way). FAT rename does not replace, so
+// the old .prev is removed first (debug_server.cpp's put).
+bool EnsureSegmentFileLocked() {
+    if (g_segmentOnDisk) return true;
     const std::string path = SegmentPath();
     if (g_segment == 0) {
         const std::string prev = LogsDir() + "/pad-record.prev.bin";
@@ -261,21 +394,60 @@ bool FlushLocked() {
         return false;
     }
     const std::string& header = g_recorder.Header();
-    std::fwrite(header.data(), 1, header.size(), f);
-    if (g_recorder.RecordBytes() > 0)
-        std::fwrite(g_recorder.RecordData(), 1, g_recorder.RecordBytes(), f);
+    const bool ok = std::fwrite(header.data(), 1, header.size(), f) == header.size();
     std::fclose(f);
+    if (!ok) {
+        std::fprintf(stderr, "[padrec] cannot write %s\n", path.c_str());
+        return false;
+    }
+    g_segmentOnDisk = true;
+    return true;
+}
+
+// Appends every not-yet-saved record of the current segment to its file,
+// in chunks of at most kMaxChunkRecords. This is the one write path: the
+// periodic safety flush, the ring-fill flush and the stop/exit flush all
+// come through here.
+bool FlushPendingLocked() {
+    if (!EnsureSegmentFileLocked()) return false;
+    const uint32_t total = g_recorder.Records();
+    if (g_flushedRecords >= total) return true;
+    FILE* f = std::fopen(SegmentPath().c_str(), "ab");
+    if (!f) {
+        std::fprintf(stderr, "[padrec] cannot write %s\n", SegmentPath().c_str());
+        return false;
+    }
+    if (g_chunkScratch.size() < kChunkHeaderSize + kMaxChunkRecords * kRecordSize)
+        g_chunkScratch.resize(kChunkHeaderSize + kMaxChunkRecords * kRecordSize);
+    bool ok = true;
+    while (ok && g_flushedRecords < total) {
+        const uint32_t count = std::min(uint32_t(kMaxChunkRecords), total - g_flushedRecords);
+        const uint8_t* bytes = g_recorder.RecordData() + size_t(g_flushedRecords) * kRecordSize;
+        const size_t written = EncodeChunk(bytes, count, g_chunkScratch.data(), g_chunkScratch.size());
+        ok = written > 0 && std::fwrite(g_chunkScratch.data(), 1, written, f) == written;
+        if (ok) g_flushedRecords += count;
+    }
+    std::fclose(f);
+    if (!ok) {
+        std::fprintf(stderr, "[padrec] cannot write %s\n", SegmentPath().c_str());
+        return false;
+    }
+    g_lastFlushReads = g_recorder.Reads();
     return true;
 }
 
 void StartSegmentLocked() {
     g_recorder.Start(BakedVersion(), "unknown",
-                     g_segment == 0 ? "" : "continuation: the previous segment's ring filled");
+                     g_segment == 0 ? "" : "continuation: the previous segment's ring filled",
+                     g_readBase);
+    g_flushedRecords = 0;
+    g_segmentOnDisk = false;
+    g_lastFlushReads = g_recorder.Reads();
 }
 
 void StopRecordingLocked() {
     if (!g_recorder.Recording()) return;
-    const bool wrote = FlushLocked();
+    const bool wrote = FlushPendingLocked();
     std::fprintf(stderr, "[padrec] stopped: %u reads, %u records, retraces %u..%u, presents %u..%u%s\n",
                  g_recorder.Reads(), g_recorder.Records(), g_recorder.FirstRetrace(),
                  g_recorder.LastRetrace(), g_recorder.FirstPresents(), g_recorder.LastPresents(),
@@ -326,16 +498,25 @@ void RecordSample(const WiiRemoteInput::KpadSample& sample, uint32_t retrace, ui
     pad.pointerValid = sample.pointerValid;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_recorder.Observe(pad, retrace, presents) == 2) {
-        // The ring filled: safety-flush this segment and keep recording
-        // into the next one (its header note says why it exists).
-        if (FlushLocked()) {
+        // The ring filled: flush this segment out and keep recording into
+        // the next one, its read_seq run continuing where this one's ended
+        // (its header note says why it exists).
+        if (FlushPendingLocked()) {
             std::fprintf(stderr, "[padrec] ring full: flushed %s, continuing in segment %u\n",
                          SegmentPath().c_str(), g_segment + 1);
             std::fflush(stderr);
         }
+        g_readBase = g_recorder.Reads();
         ++g_segment;
         StartSegmentLocked();
+        return;
     }
+    // Periodic safety flush: persist what the ring holds so a hard death
+    // from here loses at most one interval of reads, not the run.
+    const uint32_t pending = g_recorder.Records() - g_flushedRecords;
+    if (pending > 0 && (pending >= kMaxPendingRecords ||
+                        g_recorder.Reads() - g_lastFlushReads >= kPeriodicFlushReads))
+        FlushPendingLocked();
 }
 
 }  // namespace InputRecorder
@@ -347,6 +528,13 @@ extern "C" void spm_input_record_set(bool enabled) {
         if (g_recorder.Recording()) return;
         RegisterExitHookLocked();
         g_segment = 0;
+        g_readBase = 0;
+        // Continuation segments from an earlier, longer recording must not
+        // survive into this one: the replay loader joins pad-record.segN
+        // onto pad-record.bin, and a stale segment would otherwise pass
+        // the join check against a short new recording only by luck.
+        for (uint32_t n = 1; n <= 64; ++n)
+            std::remove((LogsDir() + "/pad-record.seg" + std::to_string(n) + ".bin").c_str());
         StartSegmentLocked();
         g_recordOn.store(true);
         std::fprintf(stderr, "[padrec] recording to %s\n", SegmentPath().c_str());
@@ -354,6 +542,10 @@ extern "C" void spm_input_record_set(bool enabled) {
     } else {
         StopRecordingLocked();
     }
+}
+
+extern "C" void spm_input_flush_at_exit(void) {
+    InputRecorder::FlushAtExit();
 }
 
 extern "C" void spm_input_replay_set(const char* filename) {
@@ -364,26 +556,31 @@ extern "C" void spm_input_replay_set(const char* filename) {
         g_player.Unload();
         return;
     }
+    const bool defaultName = *filename == '\0' || std::strcmp(filename, "pad-record.bin") == 0;
     const std::string path = LogsDir() + "/" + (*filename ? filename : "pad-record.bin");
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) {
+    auto readWholeFile = [](const std::string& p, std::vector<uint8_t>& bytes) {
+        FILE* f = std::fopen(p.c_str(), "rb");
+        if (!f) return false;
+        std::fseek(f, 0, SEEK_END);
+        const long size = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+        bool read = size >= 0;
+        if (read && size > 0) {
+            bytes.resize(size_t(size));
+            read = std::fread(bytes.data(), 1, bytes.size(), f) == bytes.size();
+        }
+        std::fclose(f);
+        return read;
+    };
+    std::vector<uint8_t> bytes;
+    if (!readWholeFile(path, bytes)) {
         std::fprintf(stderr, "[padreplay] cannot open %s; live input for this run\n", path.c_str());
         std::fflush(stderr);
         g_replayOn.store(false);
         g_player.Unload();
         return;
     }
-    std::fseek(f, 0, SEEK_END);
-    const long size = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    std::vector<uint8_t> bytes;
-    bool read = size >= 0;
-    if (read && size > 0) {
-        bytes.resize(size_t(size));
-        read = std::fread(bytes.data(), 1, bytes.size(), f) == bytes.size();
-    }
-    std::fclose(f);
-    if (!read || !g_player.Load(bytes.data(), bytes.size())) {
+    if (!g_player.Load(bytes.data(), bytes.size())) {
         // Exactly one line, live input for the whole run, never a crash.
         std::fprintf(stderr, "[padreplay] %s is not a valid SPM-PADREC stream; live input for this run\n",
                      path.c_str());
@@ -391,6 +588,23 @@ extern "C" void spm_input_replay_set(const char* filename) {
         g_replayOn.store(false);
         g_player.Unload();
         return;
+    }
+    if (defaultName) {
+        // A recording that outgrew the ring lives in continuation
+        // segments; join each that continues the read_seq run, and stop
+        // at the first that is missing or does not join.
+        for (uint32_t n = 1; n <= 64; ++n) {
+            const std::string segPath =
+                LogsDir() + "/pad-record.seg" + std::to_string(n) + ".bin";
+            std::vector<uint8_t> segBytes;
+            if (!readWholeFile(segPath, segBytes)) break;
+            if (!g_player.Append(segBytes.data(), segBytes.size())) {
+                std::fprintf(stderr, "[padreplay] %s does not continue the stream; ignoring it\n",
+                             segPath.c_str());
+                std::fflush(stderr);
+                break;
+            }
+        }
     }
     g_replayOn.store(true);
     std::fprintf(stderr, "[padreplay] replaying %s: %zu records\n", path.c_str(), g_player.RecordCount());

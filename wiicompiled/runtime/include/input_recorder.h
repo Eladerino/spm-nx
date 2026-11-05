@@ -16,21 +16,42 @@
 //     (tests/input_recorder_tests.cpp) exercise the real code;
 //   - the Switch glue at the bottom (the InputRecorder namespace and the
 //     extern "C" diag handshakes) owns the diag switches, the file under
-//     UserData/Logs/ and the stderr lines. It never writes the SD card
-//     mid-run: samples accumulate in a preallocated 8 MB RAM ring and are
-//     flushed once at stop/exit, plus a safety flush if the ring fills.
+//     UserData/Logs/ and the stderr lines. Samples accumulate in a
+//     preallocated 8 MB RAM ring; the glue appends the ring's new records
+//     to the segment file periodically (every 1800 reads or 2048 pending
+//     records, whichever comes first) and once more at stop/exit, so a
+//     process that dies hard -- a guest panic, a HOME close -- loses at
+//     most one flush interval instead of the run. The exit flush hangs off
+//     spm_input_flush_at_exit(), which switch/source/spm_switch_init.cpp
+//     calls from userAppExit(): the shutdown path an applet close actually
+//     runs (the PGO exit dump already relies on it). std::atexit is also
+//     registered, as a backstop for hosts that do run it; on Horizon it
+//     never fires, which the Nov 5 smoke proved the hard way.
 //
-// Stream format (binary, little-endian):
+// Stream format (binary, little-endian), version 2:
 //   header (text block, four \n-terminated lines):
-//     SPM-PADREC 1
+//     SPM-PADREC 2
 //     version=<baked version>
 //     title=<title id>
 //     note=<free text>
-//   record (44 bytes, emitted when the sample differs from the previous
-//   read, plus a heartbeat at least every 60 reads):
-//     u32 read_seq   u32 retrace   u32 presents
-//     u32 hold       u32 cl_hold
-//     f32 acc[3]     f32 pointer[2]   u8 pointer_valid  (+3 pad)
+//   then a sequence of chunks, one per flush:
+//     u32 magic "SPCK"   u32 record_count   u32 crc32 (of the chunk's
+//     record bytes, IEEE CRC-32)
+//     record_count x record (44 bytes, emitted when the sample differs
+//     from the previous read, plus a heartbeat at least every 60 reads):
+//       u32 read_seq   u32 retrace   u32 presents
+//       u32 hold       u32 cl_hold
+//       f32 acc[3]     f32 pointer[2]   u8 pointer_valid  (+3 pad)
+//   A chunk is the integrity unit. The Player validates each chunk's CRC
+//   and the stream's read_seq monotonicity, stops at the first chunk that
+//   fails, and keeps the good prefix: a writer killed mid-flush leaves a
+//   replayable recording missing at most the tail. Version 1 streams
+//   (header "SPM-PADREC 1" + unchunked records) still load, but strictly:
+//   any defect refuses the whole file, as v1 always did.
+//   A recording longer than the ring spans segment files: pad-record.bin,
+//   pad-record.seg1.bin, ... Each segment is a whole stream whose read_seq
+//   values continue the previous segment's (Recorder::Start's readBase),
+//   and the Player joins them with Append().
 // The scope estimates "~36 bytes/record"; its own field list encodes to
 // 44 bytes, which is what kRecordSize says and what the fixtures assert.
 
@@ -75,12 +96,27 @@ constexpr size_t kRingRecords = kRingBytes / kRecordSize;
 void EncodeRecord(const Record& record, uint8_t out[kRecordSize]);
 bool DecodeRecord(const uint8_t* in, Record& out);  // `in` holds kRecordSize bytes
 
+// Chunks (format v2). The glue's writer and the fixtures build chunk bytes
+// through EncodeChunk so the layout has exactly one author.
+constexpr uint32_t kChunkMagic = 0x4B435053;  // "SPCK", stored little-endian
+constexpr size_t kChunkHeaderSize = 12;       // magic, record count, crc32
+constexpr size_t kMaxChunkRecords = 4096;     // sanity bound the loader enforces
+
+uint32_t PadrecCrc32(const uint8_t* data, size_t size);
+// Writes one chunk (header + recordBytes verbatim) into out. recordBytes
+// holds recordCount whole records. Returns the bytes written, or 0 when
+// the count is out of bounds or outCapacity is too small.
+size_t EncodeChunk(const uint8_t* recordBytes, size_t recordCount, uint8_t* out, size_t outCapacity);
+
 // Change-only-plus-heartbeat recorder over the RAM ring. The ring is
 // allocated by Start() and never grows; Observe() does no allocation, no
 // formatting and no I/O in steady state.
 class Recorder {
 public:
-    void Start(const char* version, const char* title, const char* note);
+    // readBase is the read_seq of this segment's first read: 0 for a new
+    // recording, the previous segment's total read count for a ring-fill
+    // continuation, so read_seq is global across a recording's segments.
+    void Start(const char* version, const char* title, const char* note, uint32_t readBase = 0);
     void Stop() { recording_ = false; }
     bool Recording() const { return recording_; }
 
@@ -108,6 +144,7 @@ private:
     PadSample prev_{};
     bool recording_ = false;
     bool havePrev_ = false;
+    uint32_t readBase_ = 0;
     uint32_t reads_ = 0;
     uint32_t records_ = 0;
     uint32_t lastStoredSeq_ = 0;
@@ -116,11 +153,20 @@ private:
 };
 
 // A loaded stream, served one read at a time. Load() validates the header
-// and the record block; anything malformed is refused whole, so a corrupt
-// file can never produce a half-live run.
+// and the record block. A v2 body is read chunk by chunk and stops at the
+// first bad chunk, keeping the good prefix (a non-empty body in which not
+// one chunk validates is still refused whole, so garbage cannot arm a
+// replay); a v1 body is validated whole, as before.
 class Player {
 public:
     bool Load(const uint8_t* data, size_t size);
+    // Joins a continuation segment (see the format note): parses the
+    // stream and appends its records when they continue this stream's
+    // read_seq run -- the next segment's first record lands within one
+    // heartbeat gap of this stream's last, because a segment's first read
+    // is always stored and heartbeats bound the previous segment's tail.
+    // A stream with no records appends as a no-op.
+    bool Append(const uint8_t* data, size_t size);
     void Unload();
     bool Loaded() const { return loaded_; }
 
@@ -164,5 +210,11 @@ void RecordSample(const WiiRemoteInput::KpadSample& sample, uint32_t retrace, ui
 // way as spm_wii_suppress_set / spm_pose_log_set).
 extern "C" void spm_input_record_set(bool enabled);
 // Arms replay from a file under UserData/Logs/ (nullptr disarms; an empty
-// string names the default, pad-record.bin), or disarms with nullptr.
+// string names the default, pad-record.bin), or disarms with nullptr. The
+// default name also picks up its continuation segments (pad-record.segN.bin).
 extern "C" void spm_input_replay_set(const char* filename);
+// Finalizes an armed recording from the port's own exit path:
+// switch/source/spm_switch_init.cpp calls this from userAppExit(), the
+// shutdown an applet close actually runs. Registered with std::atexit too,
+// as a backstop; safe to call more than once and when not recording.
+extern "C" void spm_input_flush_at_exit(void);
