@@ -400,7 +400,16 @@ std::atomic<uint64_t> g_stagePipelineCreates{0};
 uint64_t s_printedPipelineMemoHits = 0;
 uint64_t s_printedPipelineLookups = 0;
 uint64_t s_printedPipelineCreates = 0;
-std::atomic<void (*)(uint64_t, uint64_t)> g_stageWindowHook{nullptr};
+// The window hooks (AuroraSetPerfWindowHook): more than one consumer needs the end of a
+// window — the runtime's per-window lines hang off the first registration
+// (native_override_counts.cpp's dispatcher), and the Switch diag layer's A/B alternator
+// registers a second — so registrations chain: up to kMaxStageWindowHooks distinct
+// functions, called in registration order. Registering the same function twice is a
+// no-op; registering null clears them all (the documented meaning of "Null removes it"
+// in GXAurora.h, from when there was only ever one).
+constexpr size_t kMaxStageWindowHooks = 4;
+std::array<std::atomic<void (*)(uint64_t, uint64_t)>, kMaxStageWindowHooks> g_stageWindowHooks{};
+std::atomic<size_t> g_stageWindowHookCount{0};
 
 // The places the game was in during the current perftimer window, in order (AuroraSetPerfPlace).
 constexpr size_t kMaxStagePlaces = 6;
@@ -500,8 +509,11 @@ void stage_time_print_window(uint64_t frame) {
       g_stagePlaces.push_back(g_stagePlace);  // the next window starts where this one ended
     }
   }
-  if (const auto hook = g_stageWindowHook.load(std::memory_order_acquire)) {
-    hook(s_printedFrame + 1, frame);
+  const size_t windowHookCount = g_stageWindowHookCount.load(std::memory_order_acquire);
+  for (size_t i = 0; i < windowHookCount; ++i) {
+    if (const auto hook = g_stageWindowHooks[i].load(std::memory_order_acquire)) {
+      hook(s_printedFrame + 1, frame);
+    }
   }
   s_printedCpWaitNs = cpWaitNs;
   s_printedCpWaits = cpWaits;
@@ -525,7 +537,20 @@ void stage_time_add_map_wait(std::chrono::nanoseconds duration) noexcept {
 } // namespace
 
 void stage_time_set_window_hook(void (*hook)(uint64_t firstFrame, uint64_t lastFrame)) noexcept {
-  g_stageWindowHook.store(hook, std::memory_order_release);
+  if (hook == nullptr) {
+    g_stageWindowHookCount.store(0, std::memory_order_release);
+    return;
+  }
+  const size_t count = g_stageWindowHookCount.load(std::memory_order_acquire);
+  for (size_t i = 0; i < count; ++i) {
+    if (g_stageWindowHooks[i].load(std::memory_order_relaxed) == hook) {
+      return; // already registered
+    }
+  }
+  if (count < kMaxStageWindowHooks) {
+    g_stageWindowHooks[count].store(hook, std::memory_order_release);
+    g_stageWindowHookCount.store(count + 1, std::memory_order_release);
+  }
 }
 
 void stage_time_add_pipeline_lookup(uint32_t memoHits, bool created) noexcept {
