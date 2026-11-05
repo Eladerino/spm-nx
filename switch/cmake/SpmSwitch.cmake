@@ -456,9 +456,17 @@ function(spm_switch_configure_products)
     # spm_switch_add_audit_target, but mkw_runtime_common got neither, so the core failed
     # with 'minizip/unzip.h' file not found. The toolchain prefix covers the portlibs lib
     # dir at link time (WiiCompiled's curl/minizip/z above); only the include dir was missing.
+    # The portlibs dir goes in as SYSTEM, not beside the source dir: the portlibs ship their
+    # own mbed TLS 2.28 headers, and as a plain include it would sit ahead of the fetched
+    # mbed TLS 3.6.7 (a link-interface include) and shadow it — horizon_mbedtls.c then saw
+    # the 2.28 platform_time.h, which has no mbedtls_ms_time_t, and every other mbedtls/*
+    # header in this target mixed 2.28 with 3.6.7. As a system include it lands after the
+    # fetched headers (the audit target's form, which never broke), so this target keeps
+    # the 3.6.7 headers it links against and portlibs only supplies what nothing else
+    # does (curl, minizip). self_updater.cpp's <mbedtls/sha256.h> is the same story.
     if(TARGET mkw_runtime_common)
-        target_include_directories(mkw_runtime_common PRIVATE
-            "${SPM_SWITCH_DIR}/source" "${SWITCH_PORTLIBS}/include")
+        target_include_directories(mkw_runtime_common PRIVATE "${SPM_SWITCH_DIR}/source")
+        target_include_directories(mkw_runtime_common SYSTEM PRIVATE "${SWITCH_PORTLIBS}/include")
     endif()
     set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME "${SPM_SWITCH_NRO_NAME}" SUFFIX ".elf")
     # The game links the vendored deko3d (through spm_deko) instead of devkitPro's libdeko3d.
