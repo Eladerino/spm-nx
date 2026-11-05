@@ -190,6 +190,27 @@ debugsrv::Reply CmdPlace(const debugsrv::Args&) {
 
 debugsrv::Reply CmdWarp(const debugsrv::Args& a) {
     if (a.empty() || a.size() > 2) return debugsrv::err("usage: warp <map> [door]");
+    // Warp hygiene (Nov 5 npcdrv investigation): he2_03's world_end arrival sets
+    // the player down at the far-end star with story progress untouched, and the
+    // sequence that follows loads gn1_01, whose opening script positions an NPC
+    // ("hiroshi") before he exists and trips the retail npcNameToPtr not-found
+    // assert (npcdrv.c:7055). That arrival ended the Nov 4 PGO training session
+    // and Brandon's Nov 5 recorder run, so this one (map, door) pair is refused
+    // here. The filter lives in the server, not in spm_warp_rooms.inc, because
+    // the rooms table is game data; every other warp behaves exactly as before.
+    // The evt-layer guard (patch-npc-guard.py) covers the same assert reached
+    // by other routes -- this refusal keeps scripted runs from manufacturing
+    // the state in the first place.
+    if (a.size() > 1 && a[0] == "he2_03" && a[1] == "world_end") {
+        std::fprintf(stderr,
+                     "[spmwarp] refused he2_03 world_end: known npcdrv.c:7055 panic "
+                     "arrival (gn1_01 opening script positions \"hiroshi\" before he "
+                     "exists)\n");
+        swdk::diag_flush_all("warp");
+        return debugsrv::err(
+            "warp refused: he2_03 world_end is a known panic arrival "
+            "(npcdrv.c:7055). Warp he2_03 with no door and cross in 3D instead.");
+    }
     SpmMapSweep::RequestWarp(a[0].c_str(), a.size() > 1 ? a[1].c_str() : nullptr, nullptr);
     return debugsrv::ok("warp to " + a[0] + " queued (it runs on the next frame the game is in a map)\n");
 }
