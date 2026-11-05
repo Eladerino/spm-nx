@@ -220,9 +220,10 @@ function(spm_switch_runtime_sources list_var)
     list(REMOVE_ITEM _sources
         "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/guest_flat_memory.cpp"
         "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/guest_flat_memory_macos.cpp"
-        # The built-in updater checks GitHub and hands over to a shell script that
+        # The desktop updater checks GitHub and hands over to a shell script that
         # overwrites the program folder; neither exists on Horizon. updater_horizon.cpp
-        # below stands in with an inert Updater, so the update rows never appear.
+        # below is the Switch backend for the same interface, over the shared
+        # self-updater core (source/self_updater.cpp): menu-triggered only.
         "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/updater.cpp")
     list(APPEND _sources
         "${MKW_RUNTIME_DIR_FOR_SWITCH}/src/platform/android/co_switch.S"
@@ -238,12 +239,20 @@ function(spm_switch_runtime_sources list_var)
         "${SPM_SWITCH_DIR}/runtime/updater_horizon.cpp"
         "${SPM_SWITCH_DIR}/source/spm_switch_init.cpp"
         "${SPM_SWITCH_DIR}/source/debug_server.cpp"
-        "${SPM_SWITCH_DIR}/source/spm_debug_server.cpp")
+        "${SPM_SWITCH_DIR}/source/spm_debug_server.cpp"
+        "${SPM_SWITCH_DIR}/source/self_updater.cpp")
     # The debug server core is one shared file across the ports (SwitchWakerHD's shape: it
     # knows nothing of the game and is copied on, not forked): it stays out of the unity
     # build so the translation unit that ships is the one the host test compiles.
     set_source_files_properties("${SPM_SWITCH_DIR}/source/debug_server.cpp"
         PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+    # The self-updater core is the same kind of shared file (game-agnostic, copied on):
+    # out of the unity build for the same reason, and SELFUPD_TRANSPORT_CURL selects its
+    # libcurl transport (file-scoped: the define is the core's own seam, not a build-wide
+    # flag). Prerequisite: switch-curl in the portlibs (DESIGN.md §3).
+    set_source_files_properties("${SPM_SWITCH_DIR}/source/self_updater.cpp"
+        PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON
+                   COMPILE_DEFINITIONS SELFUPD_TRANSPORT_CURL)
     # The runtime's precompiled header is C++ (mkw_pch.h); these are the only C files in its targets.
     # They also stay out of its unity build: CMake would merge them into a generated unity_*_c.c
     # file that still gets the PCH, whatever these files' own SKIP_PRECOMPILE_HEADERS says.
@@ -287,7 +296,7 @@ function(spm_switch_add_audit_target sources)
     target_include_directories(mkw_switch_audit PRIVATE
         "${MKW_RUNTIME_DIR_FOR_SWITCH}/include" "${MKW_RUNTIME_DIR_FOR_SWITCH}/src"
         "${MKW_RUNTIME_DIR_FOR_SWITCH}/.." "${MKW_RUNTIME_DIR_FOR_SWITCH}/../aurora-main/include"
-        "${SPM_SWITCH_DIR}/include")
+        "${SPM_SWITCH_DIR}/include" "${SPM_SWITCH_DIR}/source")
     # xxHash comes from devkitPro's portlibs here; the full build gets Aurora's pinned copy.
     target_include_directories(mkw_switch_audit SYSTEM PRIVATE
         "${SPM_SWITCH_SDL3_INCLUDE}" "${_imgui}" "${SWITCH_PORTLIBS}/include")
@@ -438,9 +447,14 @@ function(spm_switch_configure_products)
             "${_spm_pgo_commit}, clang ${_spm_pgo_clang_major}, scope ${_spm_pgo_scope}); "
             "build-switch.sh enforces the function-level fit check after the build")
     endif()
+    # The updater glue (a runtime source, compiled into mkw_runtime_common) includes the
+    # shared self-updater core's header from switch/source, beside the debug server core.
+    if(TARGET mkw_runtime_common)
+        target_include_directories(mkw_runtime_common PRIVATE "${SPM_SWITCH_DIR}/source")
+    endif()
     set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME "${SPM_SWITCH_NRO_NAME}" SUFFIX ".elf")
     # The game links the vendored deko3d (through spm_deko) instead of devkitPro's libdeko3d.
-    target_link_libraries(WiiCompiled PRIVATE SDL3::SDL3-static spm_deko deko3d_release nx)
+    target_link_libraries(WiiCompiled PRIVATE SDL3::SDL3-static spm_deko deko3d_release nx curl minizip z)
     # The renderer takes over Aurora's WebGPU calls at link time: every __wrap_wgpu* defined in
     # switch/deko/wgpu_objects.cpp and switch/deko/wgpu_encode.cpp needs its --wrap here, or that
     # call silently goes to Dawn only. This list is generated, not typed:
@@ -524,8 +538,17 @@ function(spm_switch_configure_products)
     # rename() over an existing file, which Horizon refuses and the NAND saves rely on
     # (runtime/horizon_unistd.c).
     target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=rename")
+    # The version's single source: the NACP string (display-only) and the baked version
+    # the self-updater compares against both come from this one variable, so they cannot
+    # drift (DESIGN.md §2). The definition is a bare token; the glue stringizes it.
+    set(SPM_VERSION "0.1.2-beta")
+    target_compile_definitions(WiiCompiled PRIVATE SPM_BAKED_VERSION=${SPM_VERSION})
+    # The runtime sources (updater_horizon.cpp included) compile into mkw_runtime_common,
+    # whose objects WiiCompiled only pulls in -- a definition on WiiCompiled alone would
+    # never reach the glue's translation unit, so the same definition goes there too.
+    target_compile_definitions(mkw_runtime_common PRIVATE SPM_BAKED_VERSION=${SPM_VERSION})
     nx_generate_nacp("${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nacp"
-        NAME "Super Paper Mario NX" AUTHOR "Eladerino + josiahg2502-glitch" VERSION "0.1.2-beta")
+        NAME "Super Paper Mario NX" AUTHOR "Eladerino + josiahg2502-glitch" VERSION "${SPM_VERSION}")
     nx_create_nro(WiiCompiled
         OUTPUT "${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nro"
         NACP "${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nacp")
