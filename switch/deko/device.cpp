@@ -94,7 +94,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},  {"dkserver", &Diag::dkServer},
     {"rttlog", &Diag::rttLog},        {"pmsmemo", &Diag::pmsMemo},      {"gxskip", &Diag::gxSkip},
     {"dlprobe", &Diag::dlProbe},      {"gxdedup", &Diag::gxDedup},      {"axfxnative", &Diag::axfxNative},
-    {"dstep", &Diag::dstep},          {"dflushcoal", &Diag::dflushCoal},
+    {"dstep", &Diag::dstep},          {"dflushcoal", &Diag::dflushCoal}, {"vcache", &Diag::vcache},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -229,6 +229,10 @@ void diag_init() {
     // from the start. The witness it reads is kept from the first frame either way, so
     // this only sets the initial switch state; the menu flips it live.
     if (g_diag.dflushCoal) spm_dflushcoal_set(true);
+    // A vcache=1 in dk_diag.txt arms Aurora's decoded display-list vertex cache from
+    // the start. The cache lives inside Aurora's decode path and reads the switch on
+    // every list, so this only sets the initial state; the menu flips it live.
+    if (g_diag.vcache) aurora::gx::fifo::vcache_set_enabled(true);
 }
 
 // diag_set (dk.h): the runtime path for the same switches. Every switch stores its field, which
@@ -257,6 +261,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
     else if (!std::strcmp(key, "dflushcoal")) spm_dflushcoal_set(on);
     else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
+    else if (!std::strcmp(key, "vcache")) aurora::gx::fifo::vcache_set_enabled(on);
     else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer") || !std::strcmp(key, "gxthread"))
         apply_gx_worker_mode();
     return true;
