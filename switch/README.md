@@ -183,7 +183,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   starts the debug server below (edit the `dkserver` line), and rttlog, which logs
   the state the file select waits on when Return to Title hangs, and the state at
   the moment Return to Title is chosen (edit the `rttlog` line). The file knows
-  thirty-two keys in all. One of the page's rows is a display option rather than a
+  thirty-three keys in all. One of the page's rows is a display option rather than a
   check: 30 fps cap (`fps30`), under Performance, shows gameplay frames one in two
   for a locked 30 fps while the game keeps its own pace; the title screen and the
   Prepare graphics sweep are not capped. Another Performance row is a measurement
@@ -226,6 +226,20 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   a frame in the November 4 lab run), and with Performance timers on the
   `[gxworker]` block counts the drains skipped, so the same scene with the
   switch off and on prices it.
+  One more switch has no row at all, and is a measuring instrument rather than a way
+  to play: automatic A/B (`abtoggle=<switch>` in dk_diag.txt, or
+  `abtoggle=<switch>:<windows>`) flips the named switch on and off by itself at the
+  end of every Performance timers window (every <windows> windows, if a count is
+  given), through the same path a manual flip takes, and closes each window with an
+  `[abtoggle]` log line naming the state that window ran under. A dwell at one spot
+  then measures both states of an experiment interleaved — the same spot, the same
+  minutes — where a manual flip lands mid-window and mixes both states into that
+  window's numbers. It is the one key whose value carries parameters, so it has no
+  Diagnostics row: the page writes its own switches back as bare on/off lines, which
+  would destroy them (the page's writer leaves lines it does not own untouched, so
+  the line itself survives menu flips). Edit the `abtoggle` line in the file
+  instead; it needs Performance timers on, because with no windows closing there is
+  nothing to flip at.
   All of the page's switches start off except the GX decode thread (cpthread, on core 1)
   and the GX worker thread (gxthread), which are on unless turned off there; zcull also
   starts on. One Performance row is an experiment rather than a way to play: the

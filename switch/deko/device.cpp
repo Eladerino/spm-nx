@@ -95,6 +95,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"rttlog", &Diag::rttLog},        {"pmsmemo", &Diag::pmsMemo},      {"gxskip", &Diag::gxSkip},
     {"dlprobe", &Diag::dlProbe},      {"gxdedup", &Diag::gxDedup},      {"axfxnative", &Diag::axfxNative},
     {"dstep", &Diag::dstep},          {"dflushcoal", &Diag::dflushCoal},
+    {"abtoggle", &Diag::abToggle},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -106,6 +107,38 @@ const DiagKey* find_diag_key(const char* name) {
 }
 
 bool is_blank(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+// The A/B alternator's parameters (the "abtoggle" switch, dk.h). The file's switches are
+// booleans — diag_read_file reads every value as on/off — so this one key's value carries
+// more: the name of the switch to alternate and, after a ':', how many perftimer windows
+// each state runs before the flip (no ':' means 1: a flip at every window close).
+// diag_read_file hands the value to ab_parse_params, which copies the parameters into
+// these statics; ab_arm (below, after apply_gx_worker_mode) validates and acts on them.
+// A bare "abtoggle=1" names nothing: the statics stay empty and arming refuses, loudly.
+char g_abTarget[64] = "";
+uint32_t g_abPeriod = 1;
+bool g_abParamsSeen = false;
+
+void ab_parse_params(const char* value) {
+    g_abTarget[0] = '\0';
+    g_abPeriod = 1;
+    g_abParamsSeen = false;
+    if (!value || !std::strcmp(value, "0") || !strcasecmp(value, "off") ||
+        !strcasecmp(value, "false") || !std::strcmp(value, "1"))
+        return; // off, or on with no parameters to carry
+    const char* colon = std::strchr(value, ':');
+    const size_t nameLength = colon ? size_t(colon - value) : std::strlen(value);
+    if (nameLength == 0 || nameLength >= sizeof(g_abTarget)) return;
+    if (colon) {
+        char* end = nullptr;
+        const long period = std::strtol(colon + 1, &end, 10);
+        if (end == colon + 1 || *end != '\0' || period < 1 || period > 100000) return;
+        g_abPeriod = uint32_t(period);
+    }
+    std::memcpy(g_abTarget, value, nameLength);
+    g_abTarget[nameLength] = '\0';
+    g_abParamsSeen = true;
+}
 
 // dk_diag.txt: one switch per line as "key=1" or "key=0". A "#" starts a comment, blank lines and
 // spaces around the "=" are fine, a bare "key" means on, and "0", "off" or "false" mean off. A key
@@ -131,6 +164,9 @@ void diag_read_file(FILE* f) {
         while (keyEnd > key && is_blank(keyEnd[-1])) --keyEnd;
         *keyEnd = '\0';
         const bool off = !std::strcmp(value, "0") || !strcasecmp(value, "off") || !strcasecmp(value, "false");
+        // abtoggle's value carries its parameters (ab_parse_params, above); the generic
+        // on/off store below still applies to its field.
+        if (!std::strcmp(key, "abtoggle")) ab_parse_params(value);
         if (const DiagKey* entry = find_diag_key(key)) {
             g_diag.*(entry->field) = !off;
         } else {
@@ -144,6 +180,74 @@ void diag_read_file(FILE* f) {
 void apply_gx_worker_mode() {
     const uint8_t mode = g_diag.gxThread ? 3 : g_diag.gxDefer ? 2 : (g_diag.gxWorker ? 1 : 0);
     GxWorker::RequestMode(static_cast<GxWorker::Mode>(mode));
+}
+
+// The automatic A/B alternator (the "abtoggle" switch, dk.h): while armed, the perftimer
+// window hook below flips the target switch at window closes, through diag_set — the same
+// path the settings menu, the dk_cmd channel and the debug server flip through, so the
+// experiment sees exactly its normal on/off transitions. The windows are the stage timers'
+// 600-frame windows (aurora-main/lib/gfx/common.cpp): the hook runs at the end of a
+// window's lines, after every line that window produced, so each window runs under exactly
+// one state and the [abtoggle] line that closes it says which. That is the whole point: a
+// manual flip lands mid-window and mixes both states into that window's means (the
+// November 4 lab session's toggle windows are all mixed), while an alternated dwell
+// interleaves clean on/off window pairs over the same spot and the same minutes of play.
+uint64_t g_abWindowsClosed = 0;  // windows closed since arming; the hook is the only writer
+bool g_abState = false;          // the state the target ran under in the window now closing
+bool g_abHookRegistered = false; // the window hook is registered once, at the first arm
+
+void ab_window_hook(uint64_t firstFrame, uint64_t lastFrame) {
+    if (!g_diag.abToggle.load()) return; // disarmed: stay registered, stay silent
+    ++g_abWindowsClosed;
+    const unsigned long long first = (unsigned long long)firstFrame;
+    const unsigned long long last = (unsigned long long)lastFrame;
+    const unsigned long long present = (unsigned long long)R.presents;
+    if (g_abWindowsClosed % g_abPeriod != 0) {
+        std::fprintf(stderr,
+                     "[abtoggle] frames %llu-%llu: %s=%d (no flip: window %llu of %u under this state) at present %llu\n",
+                     first, last, g_abTarget, g_abState ? 1 : 0,
+                     (unsigned long long)(g_abWindowsClosed % g_abPeriod), g_abPeriod, present);
+    } else {
+        const bool next = !g_abState;
+        std::fprintf(stderr, "[abtoggle] frames %llu-%llu: %s=%d, flipping to %d at present %llu\n", first,
+                     last, g_abTarget, g_abState ? 1 : 0, next ? 1 : 0, present);
+        diag_set(g_abTarget, next);
+        g_abState = next;
+    }
+    log_flush();
+}
+
+// Arms the alternator with the parameters ab_parse_params took from dk_diag.txt. Called
+// from diag_init (a file line) and from diag_set (a live flip of the abtoggle switch, which
+// re-arms: the window count restarts and the target's current state is re-read, so the
+// first window after it runs a known state). A refusal logs a line and clears the switch,
+// so nothing ever looks armed that is not.
+bool ab_arm() {
+    if (!g_abParamsSeen) {
+        dklog("diag: abtoggle: dk_diag.txt names no target (want abtoggle=<switch> or "
+              "abtoggle=<switch>:<windows>); not arming");
+        g_diag.abToggle = false;
+        return false;
+    }
+    if (!find_diag_key(g_abTarget) || !std::strcmp(g_abTarget, "abtoggle") ||
+        !std::strcmp(g_abTarget, "perftimer")) {
+        dklog("diag: abtoggle: '%s' cannot be alternated (an unknown switch, abtoggle itself, or "
+              "perftimer, whose windows drive the alternator); not arming",
+              g_abTarget);
+        g_diag.abToggle = false;
+        return false;
+    }
+    g_abState = diag_get(g_abTarget);
+    g_abWindowsClosed = 0;
+    if (!g_abHookRegistered) {
+        AuroraSetPerfWindowHook(&ab_window_hook);
+        g_abHookRegistered = true;
+    }
+    dklog("diag: abtoggle armed: %s flips every %u perftimer window(s); the first window runs %s=%d",
+          g_abTarget, g_abPeriod, g_abTarget, g_abState ? 1 : 0);
+    if (!g_diag.perfTimer.load())
+        dklog("diag: abtoggle: perftimer is off, so no windows close and nothing flips until it is turned on");
+    return true;
 }
 } // namespace
 
@@ -229,6 +333,11 @@ void diag_init() {
     // from the start. The witness it reads is kept from the first frame either way, so
     // this only sets the initial switch state; the menu flips it live.
     if (g_diag.dflushCoal) spm_dflushcoal_set(true);
+    // An abtoggle=<switch>[:<windows>] line arms the automatic A/B alternator (ab_arm,
+    // above): it flips the named switch at perftimer window closes so a dwell measures
+    // both of its states interleaved. The parameters rode the value because the file's
+    // switches are booleans; ab_parse_params has them by now.
+    if (g_diag.abToggle) ab_arm();
 }
 
 // diag_set (dk.h): the runtime path for the same switches. Every switch stores its field, which
@@ -256,6 +365,13 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "gxdedup")) spm_gxdedup_set(on);
     else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
     else if (!std::strcmp(key, "dflushcoal")) spm_dflushcoal_set(on);
+    else if (!std::strcmp(key, "abtoggle")) {
+        // Arming takes the target and period from dk_diag.txt (ab_parse_params), so a live
+        // "set abtoggle 1" re-arms with them. Disarming needs no call: the window hook
+        // checks the switch at every window close and stays silent, and the target keeps
+        // whichever state it was last flipped to (the last [abtoggle] line says which).
+        if (on) ab_arm();
+    }
     else if (!std::strcmp(key, "cpthread")) aurora::gx::fifo::set_decode_thread_requested(on);
     else if (!std::strcmp(key, "gxworker") || !std::strcmp(key, "gxdefer") || !std::strcmp(key, "gxthread"))
         apply_gx_worker_mode();

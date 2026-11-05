@@ -4,6 +4,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +21,12 @@ bool aurora_switch_dk_present(void* texture);
 
 // Waits for the GPU and gives the window back (Aurora's shutdown).
 void aurora_switch_dk_shutdown(void);
+
+// Aurora's perftimer window hook (GXAurora.h): called at the end of each perftimer window's
+// lines with the window's first and last frame. Registrations chain (every distinct function
+// registered is called, in registration order); the diag layer registers its A/B alternator
+// here (device.cpp).
+void AuroraSetPerfWindowHook(void (*hook)(uint64_t firstFrame, uint64_t lastFrame));
 
 #ifdef __cplusplus
 }
