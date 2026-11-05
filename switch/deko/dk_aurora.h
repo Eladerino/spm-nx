@@ -40,6 +40,9 @@ void nsmbw_set_no_merge(int mode);
 void nsmbw_set_array_reupload(bool on);
 // The decode thread (lib/gx/fifo.hpp): the request is applied at the end of the frame.
 void set_decode_thread_requested(bool on) noexcept;
+// The vcache lab switch (lib/gx/fifo.hpp): while on, process_display_list consults
+// the decoded display-list vertex cache instead of always decoding.
+void vcache_set_enabled(bool on) noexcept;
 } // namespace aurora::gx::fifo
 namespace aurora::gfx {
 void stage_timers_set_enabled(bool on) noexcept;
