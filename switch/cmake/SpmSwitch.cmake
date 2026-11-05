@@ -449,8 +449,16 @@ function(spm_switch_configure_products)
     endif()
     # The updater glue (a runtime source, compiled into mkw_runtime_common) includes the
     # shared self-updater core's header from switch/source, beside the debug server core.
+    # The core's own translation unit (also compiled into mkw_runtime_common) includes
+    # <minizip/unzip.h> and, under SELFUPD_TRANSPORT_CURL, <curl/curl.h>: both live in the
+    # Switch portlibs, whose include dir the aurora targets get in
+    # spm_switch_enter_project_scope and the audit target gets in
+    # spm_switch_add_audit_target, but mkw_runtime_common got neither, so the core failed
+    # with 'minizip/unzip.h' file not found. The toolchain prefix covers the portlibs lib
+    # dir at link time (WiiCompiled's curl/minizip/z above); only the include dir was missing.
     if(TARGET mkw_runtime_common)
-        target_include_directories(mkw_runtime_common PRIVATE "${SPM_SWITCH_DIR}/source")
+        target_include_directories(mkw_runtime_common PRIVATE
+            "${SPM_SWITCH_DIR}/source" "${SWITCH_PORTLIBS}/include")
     endif()
     set_target_properties(WiiCompiled PROPERTIES OUTPUT_NAME "${SPM_SWITCH_NRO_NAME}" SUFFIX ".elf")
     # The game links the vendored deko3d (through spm_deko) instead of devkitPro's libdeko3d.
