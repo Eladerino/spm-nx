@@ -230,6 +230,19 @@ int main() {
     CHECK(RoundTrip(c, "warp he1_01", ok, p) && ok && g_warpCalled && g_warpMap == "he1_01" &&
           g_warpDoor.empty());
     CHECK(RoundTrip(c, "warp", ok, p) && !ok);
+
+    // warp hygiene: he2_03 + world_end is refused before RequestWarp is called
+    // (the npcdrv.c:7055 panic arrival); the same room with no door and the
+    // same door in another room still warp.
+    g_warpCalled = false;
+    CHECK(RoundTrip(c, "warp he2_03 world_end", ok, p) && !ok && !g_warpCalled &&
+          p.find("npcdrv.c:7055") != std::string::npos);
+    g_warpCalled = false;
+    CHECK(RoundTrip(c, "warp he2_03", ok, p) && ok && g_warpCalled && g_warpMap == "he2_03" &&
+          g_warpDoor.empty());
+    g_warpCalled = false;
+    CHECK(RoundTrip(c, "warp he2_02 world_end", ok, p) && ok && g_warpCalled &&
+          g_warpMap == "he2_02" && g_warpDoor == "world_end");
     CHECK(RoundTrip(c, "place", ok, p) && ok && p == "he1_01 2D\n");
 
     // the core's file commands, rooted at the fake SD root
