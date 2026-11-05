@@ -127,6 +127,9 @@ void AuroraSetWidePerspectiveAspect(float aspect);
 void AuroraSetTexturePatches(bool enabled);
 // NSMBW: GX decoding time, renderer-lock wait and draw count since the last call (profiling).
 void AuroraTakeGxStats(uint64_t* processNanos, uint64_t* lockNanos, uint64_t* draws);
+// SPM lab (vcache): prints the decoded display-list vertex cache's counters for the
+// window between the two frame counters, and resets them (see native_override_counts.cpp).
+void AuroraVCachePrintWindow(uint64_t firstFrame, uint64_t lastFrame);
 // Time spent processing GX commands since start (NSMBW_LOG_FPS only; else 0).
 uint64_t AuroraGxProcessNanosTotal(void);
 // NSMBW: GXCopyTex calls and the new GPU textures they needed, since the last call (profiling).

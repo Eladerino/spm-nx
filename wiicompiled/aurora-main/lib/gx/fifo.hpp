@@ -29,6 +29,13 @@ void init();
 void set_sink(bool on) noexcept;
 bool sink_on() noexcept;
 
+// The vcache lab switch (a Switch Diagnostics key): while on, process_display_list
+// consults the decoded display-list vertex cache (vcache_core.hpp, implemented in
+// command_processor.cpp) around its decode loop. Default off; while off,
+// process_display_list pays one atomic load and runs the loop it always ran.
+void vcache_set_enabled(bool on) noexcept;
+bool vcache_enabled() noexcept;
+
 // Out-of-line slow path: grows internal buffer then appends data
 void write_data_grow(const void* data, uint32_t length);
 

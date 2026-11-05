@@ -190,6 +190,17 @@ void process_display_list(const uint8_t* data, uint32_t nbytes, bool bigEndian) 
       if (on) gfx::stage_time_add_dlprocess(std::chrono::steady_clock::now() - start);
     }
   } timeScope;
+  // The vcache lab piece: while its switch is on, a list whose recorded decode still
+  // matches replays instead of decoding, and any other list is recorded as it decodes
+  // below. While off, the whole hook is the one atomic load in vcache_enabled() and
+  // the loop runs exactly as it did. (A replay's cost lands in the dlprocess timer
+  // above like a decode's: that column is the A/B the [vcache] line is read against.)
+  const bool vc = vcache_enabled();
+  VCacheRecording vcRec;
+  if (vc) {
+    if (vcache_try_replay(data, nbytes, bigEndian)) return;
+    vcRec = vcache_begin(data, nbytes, bigEndian);
+  }
   uint32_t consumed = 0;
   bool retried = false;
   while (consumed < nbytes) {
@@ -201,6 +212,7 @@ void process_display_list(const uint8_t* data, uint32_t nbytes, bool bigEndian) 
     gfx::split_staging_batch();
     retried = true;
   }
+  if (vc) vcache_end(vcRec, retried);
 }
 
 // --- The decode thread -------------------------------------------------------------------------
@@ -255,6 +267,9 @@ std::atomic<bool> g_stopping{false};
 // The gxskip spike's sink (fifo.hpp): written by the game thread at a frame boundary, read
 // by every FIFO write and by the decode thread's display-list path.
 std::atomic<bool> g_sink{false};
+// The vcache lab switch (fifo.hpp), next to the sink: written by diag_set on the game
+// thread, read by process_display_list on whichever thread decodes.
+std::atomic<bool> g_vcache{false};
 // What the game thread's waits on the decode thread count under (AuroraGxBeginWaitSite).
 AuroraGxWaitSite sWaitSite = AURORA_GX_WAIT_OTHER;
 // The decode thread's kernel handle while it runs (Switch), for the guest profiler's sampler.
@@ -527,6 +542,10 @@ void hand_off_if_full() {
 void set_sink(bool on) noexcept { g_sink.store(on, std::memory_order_relaxed); }
 
 bool sink_on() noexcept { return g_sink.load(std::memory_order_relaxed); }
+
+void vcache_set_enabled(bool on) noexcept { g_vcache.store(on, std::memory_order_relaxed); }
+
+bool vcache_enabled() noexcept { return g_vcache.load(std::memory_order_relaxed); }
 
 void set_decode_thread_requested(bool on) noexcept { g_requested.store(on, std::memory_order_relaxed); }
 
