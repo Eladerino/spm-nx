@@ -31,6 +31,10 @@ void SetSwitchProfileEnabled(bool enabled);
 // diag_init and diag_set forward the "poselog" switch to it.
 extern "C" void spm_pose_log_set(bool enabled);
 
+// The runtime's Wii Remote teaching-pose suppression (spm_map_sweep.cpp), declared here
+// the same way: diag_init and diag_set forward the "wiisuppress" switch to it.
+extern "C" void spm_wii_suppress_set(bool enabled);
+
 // The runtime's Return to Title hang log (spm_map_sweep.cpp), declared here the same way:
 // diag_init and diag_set forward the "rttlog" switch to it.
 extern "C" void spm_rtt_log_set(bool enabled);
@@ -95,7 +99,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"rttlog", &Diag::rttLog},        {"pmsmemo", &Diag::pmsMemo},      {"gxskip", &Diag::gxSkip},
     {"dlprobe", &Diag::dlProbe},      {"gxdedup", &Diag::gxDedup},      {"axfxnative", &Diag::axfxNative},
     {"dstep", &Diag::dstep},          {"dflushcoal", &Diag::dflushCoal}, {"vcache", &Diag::vcache},
-    {"abtoggle", &Diag::abToggle},
+    {"abtoggle", &Diag::abToggle},    {"wiisuppress", &Diag::wiiSuppress},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -301,6 +305,10 @@ void diag_init() {
     // A poselog=1 in dk_diag.txt arms the runtime's anim pose log from the start, so the
     // session covers the poses drawn during boot and the title as well.
     if (g_diag.poseLog) spm_pose_log_set(true);
+    // A wiisuppress=1 in dk_diag.txt arms the runtime's teaching-pose suppression from
+    // the start. It only skips the one measured tutorial tuple, so boot and the title
+    // are untouched either way.
+    if (g_diag.wiiSuppress) spm_wii_suppress_set(true);
     // A pmsmemo=1 in dk_diag.txt arms the runtime's message-string patch memo from the
     // start, so the session's first area changes already run memoised passes.
     if (g_diag.pmsMemo) spm_pmsmemo_set(true);
@@ -361,6 +369,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "arrayup")) aurora::gx::fifo::nsmbw_set_array_reupload(on);
     else if (!std::strcmp(key, "profile")) GuestProfiler::SetSwitchProfileEnabled(on);
     else if (!std::strcmp(key, "poselog")) spm_pose_log_set(on);
+    else if (!std::strcmp(key, "wiisuppress")) spm_wii_suppress_set(on);
     else if (!std::strcmp(key, "pmsmemo")) spm_pmsmemo_set(on);
     else if (!std::strcmp(key, "rttlog")) spm_rtt_log_set(on);
     else if (!std::strcmp(key, "gxskip")) spm_gxskip_set(on);

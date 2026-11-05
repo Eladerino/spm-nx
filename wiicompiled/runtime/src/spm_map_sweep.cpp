@@ -1308,8 +1308,10 @@ bool FlagValue(int flag) {
 
 // Anim pose log hook, called from the generated animPoseDrawMtx (func_800496B0) via
 // switch/scripts/patch-anim-draw.py, which inserts the consult before the function's
-// first block. LOG ONLY in this form: the hook always returns false, so no draw is ever
-// skipped. Its job is evidence. The first attempt at this hook (911c18a) suppressed by
+// first block. Log-only in its original form: the hook returned false for every draw,
+// so no draw was ever skipped; its job was evidence. (The tuple-keyed suppression
+// that evidence bought lives further down, behind the wiisuppress switch.) The
+// first attempt at this hook (911c18a) suppressed by
 // archive name alone and was reverted (d383d9c) because that also took out the Controls
 // screen's remote (whose draws fire the marker the replacement panel opens from) and
 // the shake action commands' remote. A suppression that comes back has to key on the
@@ -1353,13 +1355,30 @@ bool FlagValue(int flag) {
 // touch guide work, so a guide=1 row is a teaching draw by construction and a
 // guide=0 row in a protected context is the control sample.
 //
+// The suppression (stderr56 verdict, Nov 5): on hardware the guide predicate
+// FAILED as specified -- the Tippi Tattle tutorial's draws read guide 0, and
+// ganim read "S_2" in the teaching and protected contexts alike, so the
+// 0x804CD3A0/+12 derivation is itself suspect and no enriched field separates
+// the contexts. What does, across every capture ever taken, is the (group,
+// pose) tuple of the draw itself: teaching (Tippi tutorial) is group 20 pose
+// 32 in he1_01, the protected help window is group 8 pose 9 in mac_08, the
+// Shooting Star action command is group 19 pose 31, and ordinary gameplay
+// draws nothing. Behind the "wiisuppress" dk_diag key (default off), the hook
+// therefore skips exactly the (20, 32) n_controler draw and returns true for
+// it; each skip is counted and logged (first fire and every 60th), so a
+// hardware run proves what was suppressed. No other tuple is suppressed, and
+// no enriched field takes part in the predicate. device.cpp forwards the
+// switch through spm_wii_suppress_set, the same handshake as poselog.
+//
 // The switch is the "poselog" dk_diag key: device.cpp forwards it here through
 // spm_pose_log_set, from diag_init at boot and from the Diagnostics page at runtime.
 namespace {
 std::atomic<bool> g_poseLog{false};
+std::atomic<bool> g_wiiSuppress{false};
 }  // namespace
 
 extern "C" void spm_pose_log_set(bool enabled) { g_poseLog = enabled; }
+extern "C" void spm_wii_suppress_set(bool enabled) { g_wiiSuppress = enabled; }
 
 // The "rttlog" dk_diag key's other end: device.cpp forwards it here, from diag_init at
 // boot and from diag_set at runtime, the same handshake as spm_pose_log_set above. The
@@ -1368,7 +1387,8 @@ extern "C" void spm_pose_log_set(bool enabled) { g_poseLog = enabled; }
 extern "C" void spm_rtt_log_set(bool enabled) { SpmMapSweep::g_rttLog.store(enabled); }
 
 extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
-    if (!g_poseLog.load() || ctx == nullptr) return false;
+    if (ctx == nullptr) return false;
+    if (!g_poseLog.load() && !g_wiiSuppress.load()) return false;
     const uint32_t id = ctx->gpr[3];
     uint32_t wp = 0;
     if (!Memory::TryRead32(ctx->gpr[13] - 32680u, wp) || wp == 0) return false;
@@ -1397,6 +1417,22 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
     char place[48] = {};
     SpmMapSweep::CurrentPlace(place, sizeof place);
     const int seq = SpmMapSweep::Seq();
+    // The suppression itself (see the header comment): with wiisuppress on, the one
+    // measured teaching tuple is skipped -- the generated draw function returns at
+    // once on a true from here. This sits ahead of the dedup table below on purpose:
+    // a repeat draw of an already-logged combination must still be skipped, and the
+    // table's early return would let it through. The fire line carries the running
+    // count, rate-limited to the first fire and every 60th, so a run's log shows
+    // exactly where suppression fired and how often without flooding at draw rate.
+    if (g_wiiSuppress.load() && groupId == 20 && id == 32) {
+        static std::atomic<uint32_t> fired{0};
+        const uint32_t n = fired.fetch_add(1) + 1;
+        if (n == 1 || n % 60 == 0)
+            RT_LOGF(RT_TAG_RUNTIME, "[wiisuppress] suppressed group %u pose %u at %s (count %u)\n", groupId, id,
+                    place, n);
+        return true;
+    }
+    if (!g_poseLog.load()) return false;
     // Enrichment reads, all TryRead32 like everything else here. Presence flags are
     // 1 = pointer non-null, 0 = null, -1 = unreadable; nextseq is -1 when unreadable
     // (the Seq() convention). anim / link are the raw AnimPose words as signed
