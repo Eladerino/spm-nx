@@ -72,6 +72,11 @@ if [[ $audit == 0 ]]; then
     # spm_map_sweep.cpp). Log-only in this form: with poselog=1 in dk_diag.txt the hook
     # names the poses drawn from the n_controler archives; it never skips a draw.
     python3 "$root/switch/scripts/patch-anim-draw.py" "$work/wiicompiled/generated"
+    # Give the copied evt NPC handlers their missing-NPC guard (spm_npc_guard_miss
+    # in spm_map_sweep.cpp): a script that positions an NPC before he exists
+    # otherwise trips the retail npcNameToPtr assert (npcdrv.c:7055) and kills
+    # the session. See patch-npc-guard.py for the mechanism and handler list.
+    python3 "$root/switch/scripts/patch-npc-guard.py" "$work/wiicompiled/generated"
 fi
 
 # Separate build folders: CMake caches SPM_SWITCH_AUDIT, so a full build in the audit's folder would
