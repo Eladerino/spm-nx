@@ -68,6 +68,16 @@ extern "C" void spm_debug_server_boot(bool enabled);
 // way: diag_init and diag_set forward the "pmsmemo" switch to it.
 extern "C" void spm_pmsmemo_set(bool enabled);
 
+// The runtime's Grade 1 KPAD input recorder (input_recorder.cpp), declared here the same
+// way: diag_init and diag_set forward the "padrec" switch to it.
+extern "C" void spm_input_record_set(bool enabled);
+// The recorder's replay half, declared here the same way: diag_init and diag_set forward
+// the "padreplay" switch to it. Unlike the bool handshakes above it carries the file to
+// replay (the parameters padreplay_parse_params took from this key's dk_diag.txt value,
+// resolved under UserData/Logs/ by the runtime; "" means the default pad-record.bin),
+// and a live flip off passes nullptr to disarm.
+extern "C" void spm_input_replay_set(const char* filename);
+
 // The runtime's GX record ring (gx_worker.h), declared here the same way: the gxworker, gxdefer and gxthread
 // switches pick its mode, which it applies at the next frame boundary.
 namespace GxWorker {
@@ -100,6 +110,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"dlprobe", &Diag::dlProbe},      {"gxdedup", &Diag::gxDedup},      {"axfxnative", &Diag::axfxNative},
     {"dstep", &Diag::dstep},          {"dflushcoal", &Diag::dflushCoal}, {"vcache", &Diag::vcache},
     {"abtoggle", &Diag::abToggle},    {"wiisuppress", &Diag::wiiSuppress},
+    {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -144,6 +155,24 @@ void ab_parse_params(const char* value) {
     g_abParamsSeen = true;
 }
 
+// The input replay's parameter (the "padreplay" switch, dk.h): like abtoggle, this one
+// key's value carries more than on/off -- the name of the file under UserData/Logs/ to
+// replay. diag_read_file hands the value to padreplay_parse_params, which copies it into
+// this static; diag_init and diag_set pass it on to spm_input_replay_set. A bare
+// "padreplay=1" (or an off value) names nothing: the static stays empty and the runtime
+// resolves that to the default pad-record.bin.
+char g_padReplayFile[128] = "";
+
+void padreplay_parse_params(const char* value) {
+    g_padReplayFile[0] = '\0';
+    if (!value || !std::strcmp(value, "0") || !strcasecmp(value, "off") ||
+        !strcasecmp(value, "false") || !std::strcmp(value, "1"))
+        return; // off, or on with no file named: the default applies
+    const size_t length = std::strlen(value);
+    if (length >= sizeof(g_padReplayFile)) return; // unnameable: the default applies
+    std::memcpy(g_padReplayFile, value, length + 1);
+}
+
 // dk_diag.txt: one switch per line as "key=1" or "key=0". A "#" starts a comment, blank lines and
 // spaces around the "=" are fine, a bare "key" means on, and "0", "off" or "false" mean off. A key
 // the file does not name keeps its default (dk.h); an unknown one is logged and skipped.
@@ -171,6 +200,8 @@ void diag_read_file(FILE* f) {
         // abtoggle's value carries its parameters (ab_parse_params, above); the generic
         // on/off store below still applies to its field.
         if (!std::strcmp(key, "abtoggle")) ab_parse_params(value);
+        // padreplay's value carries its file the same way (padreplay_parse_params, above).
+        if (!std::strcmp(key, "padreplay")) padreplay_parse_params(value);
         if (const DiagKey* entry = find_diag_key(key)) {
             g_diag.*(entry->field) = !off;
         } else {
@@ -350,6 +381,12 @@ void diag_init() {
     // both of its states interleaved. The parameters rode the value because the file's
     // switches are booleans; ab_parse_params has them by now.
     if (g_diag.abToggle) ab_arm();
+    // A padrec=1 in dk_diag.txt starts the input recorder from boot, so the recording
+    // covers the boot and title reads the replay will also consume; a
+    // padreplay=<file> line arms replay from the file padreplay_parse_params took
+    // from the value ("" is the default pad-record.bin, resolved by the runtime).
+    if (g_diag.padRecord) spm_input_record_set(true);
+    if (g_diag.padReplay) spm_input_replay_set(g_padReplayFile);
 }
 
 // diag_set (dk.h): the runtime path for the same switches. Every switch stores its field, which
@@ -378,6 +415,14 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "gxdedup")) spm_gxdedup_set(on);
     else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
     else if (!std::strcmp(key, "dflushcoal")) spm_dflushcoal_set(on);
+    else if (!std::strcmp(key, "padrec")) spm_input_record_set(on);
+    else if (!std::strcmp(key, "padreplay")) {
+        // Arming passes the file padreplay_parse_params took from dk_diag.txt (a live
+        // "set padreplay 1" through dk_cmd or the debug server carries no file of its
+        // own, so it re-arms with that one, or the default when the file named none);
+        // disarming passes nullptr.
+        spm_input_replay_set(on ? g_padReplayFile : nullptr);
+    }
     else if (!std::strcmp(key, "abtoggle")) {
         // Arming takes the target and period from dk_diag.txt (ab_parse_params), so a live
         // "set abtoggle 1" re-arms with them. Disarming needs no call: the window hook

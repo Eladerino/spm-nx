@@ -1,4 +1,5 @@
 #include "settings_overlay.h"
+#include "input_recorder.h"
 #include "spm_prepare_graphics.h"
 #include "save_state.h"
 #include "netplay_ui.h"
@@ -15,6 +16,18 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+
+// The input recorder's witness stamps (input_recorder.h): the guest retrace
+// count (hle/vi.cpp's accessor) and, on Switch, the deko present count --
+// declared here rather than included, the same way settings_overlay.cpp
+// declares the swdk surface (dk.h pulls in deko3d, which this target does
+// not build against). Presents are a witness only; off Switch they read 0.
+extern "C" uint32_t spm_vi_retrace_count();
+#if defined(__SWITCH__)
+namespace swdk {
+uint64_t diag_present_count();
+}  // namespace swdk
+#endif
 
 // KPAD HLE fed by a real Bluetooth Wii Remote. The game calls KPADRead once per
 // frame with room for 16 KPADStatus entries and only looks at entry 0; with a
@@ -290,6 +303,14 @@ bool ReadSample(uint32_t chan, WiiRemoteInput::KpadSample& sample) {
         sample = remote.sample;
         return true;
     }
+    // Input replay (the "padreplay" diag switch, input_recorder.h): while
+    // armed, chan 0's sample comes from the recorded stream and live
+    // sampling is skipped entirely -- the substitute still passes through
+    // WriteStatus in KPAD__Read_HLE, which derives trig/release from the
+    // substituted stream exactly as it does from a live one.
+    if (chan == 0 && InputRecorder::ReplayActive()) {
+        return InputRecorder::ReplayNext(sample);
+    }
     if (!WiiRemoteInput::ReadKpadSample(chan, sample)) {
         return false;
     }
@@ -332,6 +353,18 @@ extern "C" int32_t KPAD__Read_HLE(uint32_t chan, uint32_t statusPtr, uint32_t co
     }
     WiiRemoteInput::KpadSample sample;
     const bool have = ReadSample(chan, sample);
+    // Input recording (the "padrec" diag switch, input_recorder.h): the
+    // chan-0 sample exactly as ReadSample decided it -- post-injection,
+    // post-layout, post-filters -- with the retrace and present witnesses.
+    // One atomic load while the switch is off.
+    if (chan == 0 && have && InputRecorder::RecordActive()) {
+#if defined(__SWITCH__)
+        const uint32_t presents = static_cast<uint32_t>(swdk::diag_present_count());
+#else
+        const uint32_t presents = 0;
+#endif
+        InputRecorder::RecordSample(sample, spm_vi_retrace_count(), presents);
+    }
     try {
         return WriteStatus(chan, statusPtr, have ? &sample : nullptr);
     } catch (const Memory::AccessViolation&) {
