@@ -1386,6 +1386,44 @@ extern "C" void spm_wii_suppress_set(bool enabled) { g_wiiSuppress = enabled; }
 // of this same file).
 extern "C" void spm_rtt_log_set(bool enabled) { SpmMapSweep::g_rttLog.store(enabled); }
 
+// The evt NPC guard's log end (Nov 5 npcdrv investigation). patch-npc-guard.py
+// rewrites a fixed set of generated evt NPC command handlers in the build copy
+// so a name that resolves to no active NPC takes the game's own NoAssert
+// lookup and skips the command instead of tripping npcNameToPtr's not-found
+// assert (npcdrv.c:7055 -- the panic that ended the Nov 4 PGO training session
+// and Brandon's Nov 5 recorder run, both in gn1_01's opening script positioning
+// "hiroshi" before he exists). The generated side calls this on the skip so the
+// class stays visible in the log. nameAddr is the guest address of the script's
+// name string, or 0 when the handler could not preserve it across the call.
+// Rate-limited like the wiisuppress fire line above: first miss and every 60th,
+// with the running count in the line.
+extern "C" void spm_npc_guard_miss(uint32_t nameAddr, const char* site) {
+    static std::atomic<uint32_t> misses{0};
+    const uint32_t n = misses.fetch_add(1) + 1;
+    if (n != 1 && n % 60 != 0) return;
+    char place[48] = {};
+    SpmMapSweep::CurrentPlace(place, sizeof place);
+    char name[33] = {};
+    bool named = false;
+    if (nameAddr != 0 && Memory::Contains(nameAddr, 32)) {
+        named = true;
+        for (int i = 0; i < 32; ++i) {
+            const uint8_t b = Memory::Read8(nameAddr + uint32_t(i));
+            if (b == 0) break;
+            if (b < 0x20 || b > 0x7E) { named = false; break; }
+            name[i] = static_cast<char>(b);
+        }
+        if (name[0] == 0) named = false;
+    }
+    if (named)
+        RT_LOGF(RT_TAG_RUNTIME, "[npcdrv] %s: no NPC named \"%s\" -- command skipped (miss %u) at %s\n",
+                site, name, n, place);
+    else
+        RT_LOGF(RT_TAG_RUNTIME,
+                "[npcdrv] %s: NPC lookup missed (name @0x%08X unreadable) -- command skipped (miss %u) at %s\n",
+                site, nameAddr, n, place);
+}
+
 extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
     if (ctx == nullptr) return false;
     if (!g_poseLog.load() && !g_wiiSuppress.load()) return false;
