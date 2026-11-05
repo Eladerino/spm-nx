@@ -525,7 +525,7 @@ function(spm_switch_configure_products)
     # (runtime/horizon_unistd.c).
     target_link_options(WiiCompiled PRIVATE "LINKER:--wrap=rename")
     nx_generate_nacp("${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nacp"
-        NAME "Super Paper Mario NX" AUTHOR "NewSuperPaperBros + spm-nx" VERSION "0.0.1")
+        NAME "Super Paper Mario NX" AUTHOR "Eladerino + josiahg2502-glitch" VERSION "0.1.2-beta")
     nx_create_nro(WiiCompiled
         OUTPUT "${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nro"
         NACP "${CMAKE_BINARY_DIR}/${SPM_SWITCH_NRO_NAME}.nacp")
