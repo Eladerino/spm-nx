@@ -185,6 +185,12 @@ constexpr uint32_t kNowSeq = 0x8056D0D8, kNextSeq = 0x8056D0DC, kGp = 0x8056D198
 constexpr uint32_t kSeqWorkStage = 0x804CF364, kSeqLoadSubWp = 0x8056D0F0, kMsgDrvMsgW = 0x8056CF38,
                    kPauseWinWp = 0x8056D950;
 
+// The guide subsystem's work struct (guest 0x804CD398, guide.c): +8 holds the
+// guide pose's AnimPose slot and +12 the current animation's name pointer. Every
+// message/event teaching demo draws through that one pose, so the pose log reads
+// both (wiimote-logic-trace-2026-11-04.md).
+constexpr uint32_t kGuidePoseSlot = 0x804CD3A0, kGuideAnimName = 0x804CD3A4;
+
 // Debug menu warps (settings_overlay.cpp): the request is stored by the UI and served here, on the game's own frame.
 std::mutex g_warpMutex;
 bool g_warpPending = false, g_warpHasDoor = false;
@@ -1336,6 +1342,17 @@ bool FlagValue(int flag) {
 // these are table/slot indices, never addresses, so they are stable across boots
 // in a way the (group, pose) slot pair alone was never proven to be.
 //
+// The guide fields come from the Nov 4 logic trace: every message/event
+// teaching demo draws through ONE AnimPose owned by guide.c, whose work struct
+// (guest 0x804CD398) holds that pose's slot at +8 and the current animation's
+// name pointer at +12. guide is 1 when the slot being drawn equals the live
+// slot word (gvalid is 0, and guide forced to 0, when that word cannot be
+// read), and ganim is the name the guide last set -- the archive's clip name
+// (A_1, C_1, ...), so a teaching draw identifies itself by clip. The shake
+// command and the Controls window pose the model on separate paths that never
+// touch guide work, so a guide=1 row is a teaching draw by construction and a
+// guide=0 row in a protected context is the control sample.
+//
 // The switch is the "poselog" dk_diag key: device.cpp forwards it here through
 // spm_pose_log_set, from diag_init at boot and from the Diagnostics page at runtime.
 namespace {
@@ -1398,6 +1415,35 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
         if (Memory::TryRead32(poses + uint32_t(link) * 392 + 16, lgRaw)) lgroup = int(lgRaw);
         if (Memory::TryRead32(poses + uint32_t(link) * 392 + 20, laRaw)) lanim = int(static_cast<int32_t>(laRaw));
     }
+    // The guide match: guide=1 when the slot being drawn is the guide pose's
+    // live slot (guide work +8). On any doubt the match is 0 and gvalid is 0,
+    // so a bad read can never masquerade as a guide draw. ganim is the guide's
+    // current animation name (guide work +12): the archive clip name the
+    // guide subsystem last set (A_1, C_1, ...), copied with the same
+    // Contains-then-bytes pattern as the file path above, bounded at 24
+    // printable-ASCII bytes; when the pointer or the bytes fail those checks
+    // it falls back to the pointer's hex form.
+    uint32_t guideSlotRaw = 0;
+    const int gvalid = Memory::TryRead32(SpmMapSweep::kGuidePoseSlot, guideSlotRaw) ? 1 : 0;
+    const int guide = (gvalid && guideSlotRaw == id) ? 1 : 0;
+    char ganim[25] = {};
+    uint32_t namePtr = 0;
+    bool nameOk = Memory::TryRead32(SpmMapSweep::kGuideAnimName, namePtr) && namePtr != 0 &&
+                  Memory::Contains(namePtr, 24);
+    if (nameOk) {
+        int n = 0;
+        for (int i = 0; i < 24; ++i) {
+            const uint8_t b = Memory::Read8(namePtr + uint32_t(i));
+            if (b == 0) break;
+            if (b < 0x20 || b > 0x7E) {
+                nameOk = false;
+                break;
+            }
+            ganim[n++] = static_cast<char>(b);
+        }
+        if (n == 0) nameOk = false;
+    }
+    if (!nameOk) std::snprintf(ganim, sizeof ganim, "0x%08X", namePtr);
     // One log line per distinct combination of every logged field, so a test run
     // names every pose the demo remote is drawn in -- and the same pose seen under
     // a message window and again without one logs twice, which is the point --
@@ -1413,11 +1459,15 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
     static int seenLink[128] = {};
     static int seenLgroup[128] = {};
     static int seenLanim[128] = {};
+    static int seenGuide[128] = {};
+    static int seenGvalid[128] = {};
+    static char seenGanim[128][25] = {};
     static int seenCount = 0;
     for (int i = 0; i < seenCount; ++i)
         if (seenGroup[i] == groupId && seenPose[i] == id && p == seenPath[i] && std::strcmp(place, seenPlace[i]) == 0 &&
             seenMsgwin[i] == msgwin && seenPausewin[i] == pausewin && seenNextseq[i] == nextseq &&
-            seenAnim[i] == anim && seenLink[i] == link && seenLgroup[i] == lgroup && seenLanim[i] == lanim)
+            seenAnim[i] == anim && seenLink[i] == link && seenLgroup[i] == lgroup && seenLanim[i] == lanim &&
+            seenGuide[i] == guide && seenGvalid[i] == gvalid && std::strcmp(ganim, seenGanim[i]) == 0)
             return false;
     if (seenCount < 128) {
         std::snprintf(seenPath[seenCount], 64, "%s", p.c_str());
@@ -1431,11 +1481,15 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
         seenLink[seenCount] = link;
         seenLgroup[seenCount] = lgroup;
         seenLanim[seenCount] = lanim;
+        seenGuide[seenCount] = guide;
+        seenGvalid[seenCount] = gvalid;
+        std::snprintf(seenGanim[seenCount], 25, "%s", ganim);
         ++seenCount;
         RT_LOGF(RT_TAG_RUNTIME,
                 "[poselog] file '%s' group %u pose %u at %s (seq %d) msgwin %d pausewin %d nextseq %d anim %d "
-                "link %d lgroup %d lanim %d\n",
-                p.c_str(), groupId, id, place, seq, msgwin, pausewin, nextseq, anim, link, lgroup, lanim);
+                "link %d lgroup %d lanim %d guide %d gvalid %d ganim %s\n",
+                p.c_str(), groupId, id, place, seq, msgwin, pausewin, nextseq, anim, link, lgroup, lanim, guide,
+                gvalid, ganim);
     }
     return false;
 }
