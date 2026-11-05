@@ -42,6 +42,14 @@ Config g_cfg;
 std::atomic<bool> g_running{false};
 std::atomic<bool> g_keep{false};  // keep_log: the log's text is kept before start
 int g_listen = -1;
+// Socket-service ownership. This vendored copy deliberately diverges from
+// upstream SwitchWakerHD here: upstream assumes the core is the socket
+// service's sole owner, but spm-nx's scaffold pre-initialises sockets in
+// userAppInit (spm_switch_init.cpp), so start() may find the service already
+// up and only borrow it. g_ownsSockets is true only when this core's own
+// socketInitializeDefault() call succeeded; only then may it socketExit().
+// Do not drop this on an upstream re-sync.
+bool g_ownsSockets = false;
 
 struct Command {
     std::string usage;
@@ -597,16 +605,23 @@ bool start(const Config& config) {
     g_cfg = config;
 #ifdef __SWITCH__
     const Result rc = socketInitializeDefault();
-    if (R_FAILED(rc)) {
+    if (R_SUCCEEDED(rc)) {
+        g_ownsSockets = true;
+    } else if (rc != MAKERESULT(Module_Libnx, LibnxError_AlreadyInitialized)) {
         say("[debug] server off: socket service unavailable (rc 0x%x)", rc);
         return false;
     }
+    // AlreadyInitialized: the platform owns the socket service (see
+    // g_ownsSockets above); borrow it and continue to listen as normal.
 #endif
     g_listen = open_listen(config.port);
     if (g_listen < 0) {
         say("[debug] server off: cannot listen on port %d", config.port);
 #ifdef __SWITCH__
-        socketExit();
+        if (g_ownsSockets) {
+            socketExit();
+            g_ownsSockets = false;
+        }
 #endif
         return false;
     }
@@ -666,7 +681,10 @@ void stop() {
         g_listen = -1;
     }
 #ifdef __SWITCH__
-    socketExit();
+    if (g_ownsSockets) {
+        socketExit();
+        g_ownsSockets = false;
+    }
 #endif
 }
 
