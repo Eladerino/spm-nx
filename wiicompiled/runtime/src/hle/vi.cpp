@@ -1488,6 +1488,17 @@ extern "C" void VISetBlack_HLE_801bab2c(CpuContext* ctx)
 }
 PPC_NATIVE_OVERRIDE_VOID(80281F10, VISetBlack_HLE_801bab2c, (CpuContext* ctx), (ctx));
 
+// The guest retrace count as a plain read, for the input recorder's witness
+// stamp (input_recorder.h): g_vi lives in this file's anonymous namespace and
+// is only ever read inside this file, so the recorder gets this accessor
+// instead of reaching into VI state. No EnsureInitializedLocked: before VI
+// init the count is 0, which is the truthful witness for those reads.
+extern "C" uint32_t spm_vi_retrace_count()
+{
+    std::lock_guard<std::mutex> lock(g_viMutex);
+    return g_vi.retraceCount;
+}
+
 extern "C" void VIGetRetraceCount_HLE_801baba4(CpuContext* ctx)
 {
     uint32_t count = 0;
