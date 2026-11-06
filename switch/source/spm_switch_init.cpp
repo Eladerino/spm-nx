@@ -153,21 +153,22 @@ void spm_pgo_instr_dump_now(void) __attribute__((weak));
 // Inert when the server never started.
 void spm_debug_server_stop(void);
 // runtime/src/input_recorder.cpp: finalizes an armed padrec recording, or (the
-// pending variant) appends its unsaved records without stopping it. userAppExit
-// below is only one of the triggers, and not the one a HOME-menu close reaches:
-// the Nov 5 re-smoke proved a HOME -> X -> Close runs NO shutdown in this
-// process at all (no "[padrec] stopped" line; the stream ended at the last
-// periodic flush, ~20 s of reads early). The frame loop pumps applet messages
-// only while frames advance, frames stop when the HOME menu takes the surface,
-// and the queued exit request is never consumed before the system ends the
-// process -- the same reason std::atexit never ran on the first smoke. The
-// triggers that fire while the process is provably alive are the applet ones
-// (the status hook and the message watcher, below); userAppExit and the
+// pending variant) appends its unsaved records without stopping it. The Nov 5
+// re-smoke showed a HOME -> X -> Close running NO shutdown in this process (no
+// "[padrec] stopped" line; the stream ended at the last periodic flush, ~20 s
+// of reads early). The likely cause (from libnx, see the status hook below)
+// is that exit was never locked: the system then ends the process outright,
+// already suspended at HOME, and sends no exit request at all. userAppInit
+// now locks exit, so the close arrives as an ExitRequest; the status hook
+// below finalizes on it, and userAppExit and the
 // recorder's own std::atexit registration stay as backstops for the exits that
-// do unwind (an in-game quit reaches userAppExit through libnx's _exit
-// wiring). Every entry point is idempotent and inert when not recording.
+// unwind (an in-game quit reaches userAppExit through libnx's _exit wiring).
+// Every entry point is idempotent and inert when not recording.
 void spm_input_flush_at_exit(void);
 void spm_input_flush_pending(void);
+// switch/sdl3_shim/sdl3_shim_events.c: queues the SDL quit the frame loop turns into the
+// normal shutdown (ExitForAuroraWindowClose -> userAppExit). Safe from any thread, once.
+void sdl3_shim_request_quit(void);
 
 // The exception handler runs on its own stack: the faulting thread's may be the problem.
 alignas(16) u8 __nx_exception_stack[0x4000];
@@ -175,13 +176,28 @@ u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
 
 // Applet status changes, delivered by libnx's message processing
 // (appletProcessMessage, reached from the frame loop's pump or the watcher
-// thread below): the exit request finalizes an armed recording, and losing
-// the screen flushes what the run has produced so far. If play resumes the
-// recording simply continues; if the close follows, nothing is left in RAM
-// for the system's kill to take.
+// thread below): the exit request finalizes an armed recording and asks the
+// frame loop to quit, and losing the screen flushes what the run has produced
+// so far. If play resumes the recording simply continues.
+//
+// The exit request only exists because userAppInit locks exit
+// (appletLockExit). Without the lock, a HOME > Close never sends one: the
+// system ends the process outright, and with the default focus mode
+// (SuspendHomeSleep) the process is already suspended at HOME, so no thread
+// of ours runs in between. Read from libnx (applet.h on the focus modes and
+// appletLockExit), this rather than a wedged frame pump best explains the Nov
+// 5 re-smoke losing its last ~20 s; the hardware re-smoke is the proof. With
+// the lock, Close resumes the process with ExitRequest and gives it 15 s to
+// exit before a forced kill.
+//
+// The quit request matters when the watcher is the thread that received the
+// message: the frame loop's appletMainLoop then never sees it, so without
+// this the game would keep running into the 15 s kill instead of shutting
+// down through userAppExit (PGO dump, guest memory release, unlock).
 void spm_switch_applet_status_hook(AppletHookType type, void* /*param*/) {
     if (type == AppletHookType_OnExitRequest) {
         spm_input_flush_at_exit();
+        sdl3_shim_request_quit();
     } else if (type == AppletHookType_OnFocusState &&
                appletGetFocusState() != AppletFocusState_InFocus) {
         spm_input_flush_pending();
@@ -189,14 +205,15 @@ void spm_switch_applet_status_hook(AppletHookType type, void* /*param*/) {
 }
 
 // The second applet-message consumer. The frame loop's pump (through the SDL
-// shim) runs only while frames advance, and frames stop when the HOME menu
-// takes the surface -- exactly when the messages that matter arrive. libnx
-// tolerates two consumers: whichever thread receives a message runs it
+// shim) runs only while frames advance, and after a close the process is
+// resumed out of focus, where nothing guarantees the frame loop keeps
+// presenting. The watcher makes sure the ExitRequest is acted on either way.
+// libnx tolerates two consumers: whichever thread receives a message runs it
 // through the one processing routine, so the status bookkeeping and the hook
-// above stay coherent no matter who wins the receive, and the recorder
-// flushes behind the hook are mutex-guarded and idempotent. The receive is
-// non-blocking; the thread sleeps between empty polls and wakes only for
-// applet business.
+// above stay coherent no matter who wins the receive (the loser's receive
+// returns "no message", which appletGetMessage passes back without aborting),
+// and the recorder flushes behind the hook are mutex-guarded and idempotent.
+// The receive is non-blocking; the thread sleeps between empty polls.
 void spm_switch_applet_watcher(void) {
     for (;;) {
         u32 msg = 0;
@@ -229,6 +246,14 @@ void userAppInit(void) {
     svcGetThreadId(&g_mainThreadId, CUR_THREAD_HANDLE);
     ImageBase();
 
+    // Lock exit, so a close from the HOME menu arrives as an ExitRequest (with
+    // 15 s to act on it) instead of the system ending the process with nothing
+    // of ours run: the hook below finalizes the input recording and the frame
+    // loop shuts down through userAppExit, which unlocks again at its end.
+    // libnx itself never locks. A game that is hung when the player closes it
+    // now takes up to those 15 s to be killed.
+    const Result lockRc = appletLockExit();
+
     // The recorder's applet triggers (above): registered before main() so no
     // status change of the run can precede them.
     appletHook(&g_appletHookCookie, spm_switch_applet_status_hook, nullptr);
@@ -241,6 +266,8 @@ void userAppInit(void) {
                      : "applet mode (little memory: launch through a game instead)",
                  appletGetOperationMode() == AppletOperationMode_Console ? "docked" : "handheld",
                  g_sockets ? "up" : "off");
+    if (R_FAILED(lockRc))
+        std::fprintf(stderr, "[switch] appletLockExit failed (rc 0x%x): a HOME close will skip shutdown\n", lockRc);
 }
 
 // Prepare graphics (runtime/src/spm_prepare_graphics.cpp): the console stays awake through a
@@ -284,6 +311,9 @@ void userAppExit(void) {
     if (g_sockets) {
         socketExit();
     }
+    // Last: libnx requires the exit lock (userAppInit) to be released before
+    // the process ends, and appletExit runs right after this function returns.
+    appletUnlockExit();
 }
 
 void __libnx_exception_handler(ThreadExceptionDump* ctx) {
