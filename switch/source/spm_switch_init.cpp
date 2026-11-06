@@ -196,6 +196,9 @@ u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
 // down through userAppExit (PGO dump, guest memory release, unlock).
 void spm_switch_applet_status_hook(AppletHookType type, void* /*param*/) {
     if (type == AppletHookType_OnExitRequest) {
+        // One line per exit so a log shows the applet close went through the
+        // lock instead of a forced kill (a kill leaves no line at all).
+        std::fprintf(stderr, "[switch] exit request received (HOME close)\n");
         spm_input_flush_at_exit();
         sdl3_shim_request_quit();
     } else if (type == AppletHookType_OnFocusState &&
@@ -293,6 +296,7 @@ void userAppExit(void) {
     u64 self = 0;
     svcGetThreadId(&self, CUR_THREAD_HANDLE);
     g_exitingThread = self;
+    std::fprintf(stderr, "[switch] userAppExit: shutting down\n");
     // An armed input recording finalizes first: it writes only its own file
     // under UserData/Logs under its own mutex, and nothing below may starve
     // it (the debug server's stop joins its pump thread). On exits that were
@@ -307,6 +311,7 @@ void userAppExit(void) {
     // point is guaranteed to run.
     if (spm_pgo_instr_dump_now) spm_pgo_instr_dump_now();
     spm_switch_guest_memory_release();
+    std::fprintf(stderr, "[switch] userAppExit: clean shutdown done\n");
     std::fflush(stderr);
     if (g_sockets) {
         socketExit();
