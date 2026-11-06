@@ -3257,7 +3257,10 @@ void DrawControlsPanel() {
     static bool seen[8] = {};  // actions shown since the screen opened (bubbles slide in one after another)
     // The screen is up while the remote's body (marker 1) and its Move bubble (marker 2, on every version of it) are
     // drawn: either alone also appears elsewhere, and a panel opened there could not be closed (issue #7).
-    const bool screenUp = aurora_button_icon_marker(1) && (seen[2] || aurora_button_icon_marker(2));
+    // With wiisuppress on, the remote's draws are skipped (spm_map_sweep.cpp) and marker 1
+    // never reports, so the hook's own timestamp of those skipped draws stands in for it.
+    const bool remoteUp = aurora_button_icon_marker(1) || SpmMapSweep::RemoteDrawnRecently();
+    const bool screenUp = remoteUp && (seen[2] || aurora_button_icon_marker(2));
     // A new press of - or 1 hides the panel until the screen goes: both close the game's screen, and if the panel
     // ever opens over something else (issue #7, a Switch Pro report) the player can still get rid of it.
     static bool dismissed = false;
