@@ -1363,11 +1363,10 @@ bool FlagValue(int flag) {
 // pose) tuple of the draw itself: teaching (Tippi tutorial) is group 20 pose
 // 32 in he1_01, the protected help window is group 8 pose 9 in mac_08, the
 // Shooting Star action command is group 19 pose 31, and ordinary gameplay
-// draws nothing. Behind the "wiisuppress" dk_diag key (default off), the hook
-// therefore skips exactly the (20, 32) n_controler draw and returns true for
-// it; each skip is counted and logged (first fire and every 60th), so a
-// hardware run proves what was suppressed. No other tuple is suppressed, and
-// no enriched field takes part in the predicate. device.cpp forwards the
+// draws nothing. The first wiisuppress skipped only (20, 32); since Nov 6 it
+// skips every n_controler draw (see the comment at the skip for why), and the
+// Controls panel opens from the hook's timestamp instead of marker1. Skips are
+// counted and logged (first fire and every 600th). device.cpp forwards the
 // switch through spm_wii_suppress_set, the same handshake as poselog.
 //
 // The switch is the "poselog" dk_diag key: device.cpp forwards it here through
@@ -1375,7 +1374,20 @@ bool FlagValue(int flag) {
 namespace {
 std::atomic<bool> g_poseLog{false};
 std::atomic<bool> g_wiiSuppress{false};
+// When the hook last skipped a remote draw (steady-clock ms; 0 = never). The Controls panel
+// reads it through SpmMapSweep::RemoteDrawnRecently in place of marker1.
+std::atomic<uint64_t> g_remoteDrawMs{0};
+uint64_t SteadyMs() {
+    return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count());
+}
 }  // namespace
+
+bool SpmMapSweep::RemoteDrawnRecently() {
+    const uint64_t at = g_remoteDrawMs.load(std::memory_order_relaxed);
+    return at != 0 && SteadyMs() - at < 150;
+}
 
 extern "C" void spm_pose_log_set(bool enabled) { g_poseLog = enabled; }
 extern "C" void spm_wii_suppress_set(bool enabled) { g_wiiSuppress = enabled; }
@@ -1460,29 +1472,26 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
     char place[48] = {};
     SpmMapSweep::CurrentPlace(place, sizeof place);
     const int seq = SpmMapSweep::Seq();
-    // The suppression itself (see the header comment): with wiisuppress on, the one
-    // measured teaching tuple is skipped -- the generated draw function returns at
-    // once on a true from here. This sits ahead of the dedup table below on purpose:
-    // a repeat draw of an already-logged combination must still be skipped, and the
-    // table's early return would let it through. The fire line carries the running
-    // count, rate-limited to the first fire and every 60th, so a run's log shows
-    // exactly where suppression fired and how often without flooding at draw rate.
-    // (group, pose) are slot numbers the game hands out as models load, not fixed IDs, so
-    // the tuple is only known to mean the Tippi tutorial in the map it was measured in.
-    // Elsewhere, or in he1_01 once the tutorial's pose is freed and the slot is reused, the
-    // same numbers could land on the Controls screen's remote, and hiding that one stops
-    // the replacement Controls panel from opening (its marker fires from that remote's
-    // draws). Gating on he1_01 keeps the skip to the map the evidence covers; extending
-    // it to another tutorial means a poselog capture of that map first.
-    if (g_wiiSuppress.load() && groupId == 20 && id == 32 && std::strncmp(place, "he1_01 ", 7) == 0) {
+    // The suppression itself. Every n_controler draw is skipped while wiisuppress is on:
+    // the remote's body textures already ship transparent (marker1), so wherever the game
+    // poses the model (the Tippi tutorial, the Shooting Star and shake action commands,
+    // the Controls screen) all that was left on screen was its button faces floating in
+    // the air (Brandon, Nov 6). Keying on the (group, pose) tuple could never cover that:
+    // those are slot numbers handed out as models load, not fixed IDs. The game's own
+    // lines say which button to press in each of those places, and the Controls screen
+    // has the replacement panel, which used to open from marker1 (fired by this model's
+    // draws) and now opens from the timestamp below instead. With poselog also on, the
+    // draw is still logged below before it is skipped.
+    const bool hide = g_wiiSuppress.load();
+    if (hide) {
+        g_remoteDrawMs.store(SteadyMs(), std::memory_order_relaxed);
         static std::atomic<uint32_t> fired{0};
         const uint32_t n = fired.fetch_add(1) + 1;
-        if (n == 1 || n % 60 == 0)
+        if (n == 1 || n % 600 == 0)
             RT_LOGF(RT_TAG_RUNTIME, "[wiisuppress] suppressed group %u pose %u at %s (count %u)\n", groupId, id,
                     place, n);
-        return true;
     }
-    if (!g_poseLog.load()) return false;
+    if (!g_poseLog.load()) return hide;
     // Enrichment reads, all TryRead32 like everything else here. Presence flags are
     // 1 = pointer non-null, 0 = null, -1 = unreadable; nextseq is -1 when unreadable
     // (the Seq() convention). anim / link are the raw AnimPose words as signed
@@ -1554,7 +1563,7 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
             seenMsgwin[i] == msgwin && seenPausewin[i] == pausewin && seenNextseq[i] == nextseq &&
             seenAnim[i] == anim && seenLink[i] == link && seenLgroup[i] == lgroup && seenLanim[i] == lanim &&
             seenGuide[i] == guide && seenGvalid[i] == gvalid && std::strcmp(ganim, seenGanim[i]) == 0)
-            return false;
+            return hide;
     if (seenCount < 128) {
         std::snprintf(seenPath[seenCount], 64, "%s", p.c_str());
         seenGroup[seenCount] = groupId;
@@ -1577,5 +1586,5 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
                 p.c_str(), groupId, id, place, seq, msgwin, pausewin, nextseq, anim, link, lgroup, lanim, guide,
                 gvalid, ganim);
     }
-    return false;
+    return hide;
 }
