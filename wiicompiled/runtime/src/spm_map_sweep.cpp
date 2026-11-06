@@ -1447,11 +1447,16 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
         path[i] = static_cast<char>(b);
     }
     if (path[0] == 0) return false;
+    // Every anim pose draw in the game comes through here while wiisuppress is on (the
+    // default), so the archive test runs on the copied bytes with no allocation; only an
+    // n_controler draw goes on to the string, the place lookup and the logging below.
+    const size_t len = std::strlen(path);
+    const auto isArchive = [&](const char* name) {
+        const size_t n = std::strlen(name);
+        return len >= n && std::memcmp(path + len - n, name, n) == 0 && (len == n || path[len - n - 1] == '/');
+    };
+    if (!isArchive("n_controler") && !isArchive("n_controler-")) return false;
     const std::string p(path);
-    const bool match = p == "n_controler" || p == "n_controler-" ||
-        (p.size() > 12 && p.compare(p.size() - 12, 12, "/n_controler") == 0) ||
-        (p.size() > 13 && p.compare(p.size() - 13, 13, "/n_controler-") == 0);
-    if (!match) return false;
     char place[48] = {};
     SpmMapSweep::CurrentPlace(place, sizeof place);
     const int seq = SpmMapSweep::Seq();
@@ -1462,7 +1467,14 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
     // table's early return would let it through. The fire line carries the running
     // count, rate-limited to the first fire and every 60th, so a run's log shows
     // exactly where suppression fired and how often without flooding at draw rate.
-    if (g_wiiSuppress.load() && groupId == 20 && id == 32) {
+    // (group, pose) are slot numbers the game hands out as models load, not fixed IDs, so
+    // the tuple is only known to mean the Tippi tutorial in the map it was measured in.
+    // Elsewhere, or in he1_01 once the tutorial's pose is freed and the slot is reused, the
+    // same numbers could land on the Controls screen's remote, and hiding that one stops
+    // the replacement Controls panel from opening (its marker fires from that remote's
+    // draws). Gating on he1_01 keeps the skip to the map the evidence covers; extending
+    // it to another tutorial means a poselog capture of that map first.
+    if (g_wiiSuppress.load() && groupId == 20 && id == 32 && std::strncmp(place, "he1_01 ", 7) == 0) {
         static std::atomic<uint32_t> fired{0};
         const uint32_t n = fired.fetch_add(1) + 1;
         if (n == 1 || n % 60 == 0)
