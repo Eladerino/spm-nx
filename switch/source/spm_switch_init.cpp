@@ -18,6 +18,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -151,16 +152,63 @@ void spm_pgo_instr_dump_now(void) __attribute__((weak));
 // diag_init started it, so its threads are gone before the socket service closes below.
 // Inert when the server never started.
 void spm_debug_server_stop(void);
-// runtime/src/input_recorder.cpp: finalizes an armed padrec recording. userAppExit is
-// the shutdown an applet close actually runs -- libnx skips std::atexit on that path
-// (the Nov 5 recorder smoke lost a whole recording to exactly that) -- so the flush
-// hangs off this hook, the same one the PGO exit dump below relies on. Inert when no
-// recording is armed.
+// runtime/src/input_recorder.cpp: finalizes an armed padrec recording, or (the
+// pending variant) appends its unsaved records without stopping it. userAppExit
+// below is only one of the triggers, and not the one a HOME-menu close reaches:
+// the Nov 5 re-smoke proved a HOME -> X -> Close runs NO shutdown in this
+// process at all (no "[padrec] stopped" line; the stream ended at the last
+// periodic flush, ~20 s of reads early). The frame loop pumps applet messages
+// only while frames advance, frames stop when the HOME menu takes the surface,
+// and the queued exit request is never consumed before the system ends the
+// process -- the same reason std::atexit never ran on the first smoke. The
+// triggers that fire while the process is provably alive are the applet ones
+// (the status hook and the message watcher, below); userAppExit and the
+// recorder's own std::atexit registration stay as backstops for the exits that
+// do unwind (an in-game quit reaches userAppExit through libnx's _exit
+// wiring). Every entry point is idempotent and inert when not recording.
 void spm_input_flush_at_exit(void);
+void spm_input_flush_pending(void);
 
 // The exception handler runs on its own stack: the faulting thread's may be the problem.
 alignas(16) u8 __nx_exception_stack[0x4000];
 u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
+
+// Applet status changes, delivered by libnx's message processing
+// (appletProcessMessage, reached from the frame loop's pump or the watcher
+// thread below): the exit request finalizes an armed recording, and losing
+// the screen flushes what the run has produced so far. If play resumes the
+// recording simply continues; if the close follows, nothing is left in RAM
+// for the system's kill to take.
+void spm_switch_applet_status_hook(AppletHookType type, void* /*param*/) {
+    if (type == AppletHookType_OnExitRequest) {
+        spm_input_flush_at_exit();
+    } else if (type == AppletHookType_OnFocusState &&
+               appletGetFocusState() != AppletFocusState_InFocus) {
+        spm_input_flush_pending();
+    }
+}
+
+// The second applet-message consumer. The frame loop's pump (through the SDL
+// shim) runs only while frames advance, and frames stop when the HOME menu
+// takes the surface -- exactly when the messages that matter arrive. libnx
+// tolerates two consumers: whichever thread receives a message runs it
+// through the one processing routine, so the status bookkeeping and the hook
+// above stay coherent no matter who wins the receive, and the recorder
+// flushes behind the hook are mutex-guarded and idempotent. The receive is
+// non-blocking; the thread sleeps between empty polls and wakes only for
+// applet business.
+void spm_switch_applet_watcher(void) {
+    for (;;) {
+        u32 msg = 0;
+        if (R_SUCCEEDED(appletGetMessage(&msg))) {
+            appletProcessMessage(msg);
+        } else {
+            svcSleepThread(100000000ULL);  // 100 ms
+        }
+    }
+}
+
+AppletHookCookie g_appletHookCookie;
 
 void userAppInit(void) {
     // Before anything that could touch a thread_local: libnx runs the static constructors after this.
@@ -180,6 +228,11 @@ void userAppInit(void) {
     g_sockets = R_SUCCEEDED(socketInitializeDefault());
     svcGetThreadId(&g_mainThreadId, CUR_THREAD_HANDLE);
     ImageBase();
+
+    // The recorder's applet triggers (above): registered before main() so no
+    // status change of the run can precede them.
+    appletHook(&g_appletHookCookie, spm_switch_applet_status_hook, nullptr);
+    std::thread(spm_switch_applet_watcher).detach();
 
     AppletType type = appletGetAppletType();
     std::fprintf(stderr, "[switch] spm-nx starting: %s, %s mode, sockets %s\n",
@@ -213,12 +266,15 @@ void userAppExit(void) {
     u64 self = 0;
     svcGetThreadId(&self, CUR_THREAD_HANDLE);
     g_exitingThread = self;
-    // The debug server stops first: its threads touch nothing the release unmaps, but they
+    // An armed input recording finalizes first: it writes only its own file
+    // under UserData/Logs under its own mutex, and nothing below may starve
+    // it (the debug server's stop joins its pump thread). On exits that were
+    // requested through the applet this is normally a no-op -- the status
+    // hook already finalized the recording when the request arrived.
+    spm_input_flush_at_exit();
+    // The debug server stops next: its threads touch nothing the release unmaps, but they
     // hold the listening socket the socketExit below is about to close under them.
     spm_debug_server_stop();
-    // An armed input recording finalizes here, while its ring and the SD card are
-    // both still fully alive; it writes only its own file under UserData/Logs.
-    spm_input_flush_at_exit();
     // The PGO capture build's final dump comes before the guest memory release: its counters
     // live in instrumented code and data the release does not touch, but nothing after this
     // point is guaranteed to run.
