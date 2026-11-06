@@ -18,3 +18,5 @@ SDL_Gamepad* sdl3_shim_gamepad_if_open(void);
 
 // Queues an event for SDL_PollEvent after running the event watches.
 void sdl3_shim_queue_event(const SDL_Event* event);
+// Queues SDL_EVENT_QUIT once, from any thread (the applet exit request).
+void sdl3_shim_request_quit(void);

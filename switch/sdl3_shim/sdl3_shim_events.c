@@ -19,7 +19,7 @@ static struct {
     void* userdata;
 } g_watches[MAX_WATCHES];
 static Uint32 g_next_user_event = SDL_EVENT_USER;
-static bool g_quit_sent;
+static bool g_quit_sent;  // read and set with __atomic builtins: the applet watcher thread can request the quit too
 
 void sdl3_shim_queue_event(const SDL_Event* event) {
     for (int i = 0; i < MAX_WATCHES; ++i) {
@@ -34,17 +34,26 @@ void sdl3_shim_queue_event(const SDL_Event* event) {
     mutexUnlock(&g_lock);
 }
 
+// Queues SDL_EVENT_QUIT once, from any thread. The frame loop's pump below is
+// one caller; the other is the scaffold's applet exit hook
+// (switch/source/spm_switch_init.cpp), because the scaffold's applet watcher
+// thread also receives applet messages, and when it is the one that receives
+// the exit request, appletMainLoop here never returns false for it.
+void sdl3_shim_request_quit(void) {
+    if (__atomic_exchange_n(&g_quit_sent, true, __ATOMIC_ACQ_REL))
+        return;
+    SDL_Event quit;
+    memset(&quit, 0, sizeof quit);
+    quit.type = SDL_EVENT_QUIT;
+    quit.common.timestamp = SDL_GetTicks() * 1000000ULL;
+    sdl3_shim_queue_event(&quit);
+}
+
 static void pump(void) {
     // appletMainLoop services HOME/sleep and returns false once the system
     // asks the application to exit.
-    if (!g_quit_sent && !appletMainLoop()) {
-        SDL_Event quit;
-        memset(&quit, 0, sizeof quit);
-        quit.type = SDL_EVENT_QUIT;
-        quit.common.timestamp = SDL_GetTicks() * 1000000ULL;
-        g_quit_sent = true;
-        sdl3_shim_queue_event(&quit);
-    }
+    if (!__atomic_load_n(&g_quit_sent, __ATOMIC_ACQUIRE) && !appletMainLoop())
+        sdl3_shim_request_quit();
     sdl3_shim_gamepad_pump();
 }
 
