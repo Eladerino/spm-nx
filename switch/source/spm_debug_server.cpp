@@ -47,6 +47,9 @@
 #ifdef __SWITCH__
 #include <switch.h>
 #endif
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 // The diag switches (switch/deko/device.cpp) and the map sweep (the runtime), declared
 // here rather than included: dk.h pulls in deko3d, and device.cpp declares its runtime
@@ -168,6 +171,147 @@ debugsrv::Reply CmdMark(const debugsrv::Args& a) {
     swdk::diag_flush_all("mark");
     return debugsrv::ok();
 }
+
+// ---- fcvtcheck: is a bare fcvt the guest's single rounding? ------------------------------
+//
+// The runtime's PpcForceSingleValueInline (runtime/include/isa/ppc_isa_float.h) rounds a
+// double to single for every frsp and single-precision op, and on AArch64 it masks values
+// below 2^-126 to a signed zero when FPSCR[NI] is on (g_mkwNiFlushThreshold), because NI
+// flushes before rounding. The host already runs with FPCR.FZ exactly while NI is on
+// (MkwApplyHostNiMode), and the Arm ARM's FPRoundBase flushes on the unrounded exponent,
+// which is the same pre-round rule. If that holds on this CPU, the mask is redundant and a
+// bare fcvt gives the same bits. This command checks that on the console itself, since
+// the claim is about the hardware: for both FZ states it rounds edge cases around 2^-126,
+// 2^-149, FLT_MAX, infinities, NaNs, zeros and double subnormals, plus random doubles
+// (whole 64-bit patterns and ones near the single range), through the masked form and
+// through a bare cast, and counts the bit differences. It runs on the server's own thread
+// and puts that thread's FPCR back afterwards; the game's threads are untouched.
+// Usage: fcvtcheck [millions of random values per FZ state, default 4, at most 64].
+namespace {
+
+#if defined(__aarch64__)
+uint64_t ReadFpcr() {
+    uint64_t v = 0;
+    __asm__ __volatile__("mrs %0, fpcr" : "=r"(v));
+    return v;
+}
+void WriteFpcr(uint64_t v) { __asm__ __volatile__("msr fpcr, %0" ::"r"(v) : "memory"); }
+
+constexpr uint64_t kFpcrFz = uint64_t{1} << 24;
+
+// The runtime's AArch64 masked form, restated with the threshold as a parameter.
+__attribute__((noinline)) float FcvtMasked(double value, double threshold) {
+    const float64x1_t v = vdup_n_f64(value);
+    const uint64x1_t signMask = vdup_n_u64(0x8000000000000000ULL);
+    const float64x1_t magnitude = vreinterpret_f64_u64(vbic_u64(vreinterpret_u64_f64(v), signMask));
+    const uint64x1_t flush = vclt_f64(magnitude, vdup_n_f64(threshold));
+    const uint64x1_t signOnly = vand_u64(vreinterpret_u64_f64(v), signMask);
+    const uint64x1_t kept = vbsl_u64(flush, signOnly, vreinterpret_u64_f64(v));
+    return static_cast<float>(vget_lane_f64(vreinterpret_f64_u64(kept), 0));
+}
+__attribute__((noinline)) float FcvtBare(double value) { return static_cast<float>(value); }
+
+struct FcvtTally {
+    uint64_t checked = 0;
+    uint64_t differ = 0;
+    std::string firsts;  // the first few differences, as bits
+};
+
+__attribute__((noinline)) void FcvtCompare(uint64_t bits, double threshold, FcvtTally& t) {
+    double d;
+    std::memcpy(&d, &bits, sizeof d);
+    const float a = FcvtMasked(d, threshold);
+    const float b = FcvtBare(d);
+    uint32_t ab, bb;
+    std::memcpy(&ab, &a, 4);
+    std::memcpy(&bb, &b, 4);
+    ++t.checked;
+    if (ab != bb) {
+        if (t.differ < 4) {
+            char line[96];
+            std::snprintf(line, sizeof line, " %016llx->%08x/%08x", (unsigned long long)bits, ab, bb);
+            t.firsts += line;
+        }
+        ++t.differ;
+    }
+}
+
+__attribute__((noinline)) void FcvtSweep(bool fz, uint64_t randomCount, FcvtTally& t) {
+    const double threshold = fz ? 0x1p-126 : 0.0;  // g_mkwNiFlushThreshold's two values
+    auto bitsOf = [](double d) {
+        uint64_t b;
+        std::memcpy(&b, &d, sizeof b);
+        return b;
+    };
+    // Edge cases: a window of double ulps and of single-ulp-sized steps around each.
+    const double centres[] = {0x1p-126, 0x1p-127, 0x1p-149, 0x1p-150, 0x1.fffffcp-127, 0x1.fffffep-127,
+                              0x1.fffffep+127, 0x1p+128, 1.0, 0.0, 0x1p-1022, 0x1p-1074};
+    for (double c : centres) {
+        for (int sign = 0; sign < 2; ++sign) {
+            const uint64_t base = bitsOf(sign ? -c : c);
+            for (int64_t k = -4096; k <= 4096; ++k) FcvtCompare(base + uint64_t(k), threshold, t);
+            for (int64_t k = -4096; k <= 4096; ++k) FcvtCompare(base + uint64_t(k) * (uint64_t{1} << 28), threshold, t);
+            for (int64_t k = -4096; k <= 4096; ++k) FcvtCompare(base + uint64_t(k) * (uint64_t{1} << 27), threshold, t);
+        }
+    }
+    const uint64_t specials[] = {0x7FF0000000000000ULL, 0xFFF0000000000000ULL, 0x7FF8000000000000ULL,
+                                 0x7FF0000000000001ULL, 0xFFF4000000000000ULL, 0x0000000000000001ULL,
+                                 0x000FFFFFFFFFFFFFULL, 0x8000000000000000ULL};
+    for (uint64_t b : specials) FcvtCompare(b, threshold, t);
+    // Random doubles: half whole 64-bit patterns, half with exponents in and around the
+    // single range (2^-170 to 2^+130), where every rounding and flush decision lives.
+    uint64_t x = 0x9E3779B97F4A7C15ULL ^ (fz ? 0x5555ULL : 0);
+    for (uint64_t i = 0; i < randomCount; ++i) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        uint64_t b = x;
+        if (i & 1) {
+            const uint64_t exp = 1023 - 170 + (x >> 52) % 301;
+            b = (x & 0x800FFFFFFFFFFFFFULL) | (exp << 52);
+        }
+        FcvtCompare(b, threshold, t);
+    }
+}
+#endif
+
+debugsrv::Reply CmdFcvtCheck(const debugsrv::Args& a) {
+#if defined(__aarch64__)
+    uint64_t millions = 4;
+    if (!a.empty()) millions = std::strtoull(a[0].c_str(), nullptr, 10);
+    if (millions == 0 || millions > 64) return debugsrv::err("usage: fcvtcheck [millions per FZ state, 1-64]");
+    const uint64_t saved = ReadFpcr();
+    std::string out;
+    bool allSame = true;
+    for (int fz = 0; fz < 2; ++fz) {
+        WriteFpcr(fz ? (saved | kFpcrFz) : (saved & ~kFpcrFz));
+        // Proof the mode took: under FZ a single-subnormal result flushes, without it it does not.
+        const float probe = FcvtBare(0x1p-140);
+        const bool fzActive = probe == 0.0f;
+        FcvtTally t;
+        const auto start = std::chrono::steady_clock::now();
+        FcvtSweep(fz != 0, millions * 1000000ULL, t);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        char line[192];
+        std::snprintf(line, sizeof line, "fz=%d (probe says %s): %llu checked, %llu differ, %.0f ms%s\n", fz,
+                      fzActive ? "on" : "off", (unsigned long long)t.checked, (unsigned long long)t.differ, ms,
+                      t.differ ? "; first:" : "");
+        out += line;
+        if (t.differ) out += t.firsts + "\n";
+        if (t.differ || fzActive != (fz != 0)) allSame = false;
+    }
+    WriteFpcr(saved);
+    out += allSame ? "verdict: bare fcvt matches the masked form bit for bit\n"
+                   : "verdict: DIFFERENT, keep the masked form\n";
+    std::fprintf(stderr, "[fcvtcheck] %s", out.c_str());
+    return debugsrv::ok(out);
+#else
+    (void)a;
+    return debugsrv::err("fcvtcheck: AArch64 only");
+#endif
+}
+
+}  // namespace
 
 // ---- where the game is, and moving it ---------------------------------------------------
 
@@ -315,6 +459,7 @@ extern "C" void spm_debug_server_boot(bool enabled) {
     debugsrv::add_command("mark", "mark <text>            a [diag] mark line in the log, then a flush", &CmdMark);
     debugsrv::add_command("warp", "warp <map> [door]      warp on the next frame in a map (the Debug warp list)", &CmdWarp);
     debugsrv::add_command("place", "place                  where the game is (map and 2D/3D, or the sequence)", &CmdPlace);
+    debugsrv::add_command("fcvtcheck", "fcvtcheck [millions]   does a bare fcvt round like the NI mask? (both FZ states)", &CmdFcvtCheck);
     debugsrv::add_command("shot", "shot                   not in this build (no frame capture yet)", &CmdShot);
     debugsrv::add_command("peek", "peek <addr> [bytes]    not in this build", &CmdPeek);
     debugsrv::add_command("poke", "poke <addr> <word>     not in this build", &CmdPoke);

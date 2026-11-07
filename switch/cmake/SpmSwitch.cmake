@@ -158,6 +158,15 @@ if(SPM_SWITCH_CHECKED_GUEST_MEMORY)
     add_compile_definitions(SPM_SWITCH_CHECKED_GUEST_MEMORY=1)
 endif()
 
+# Single-precision rounding as a bare fcvt (runtime/include/isa/ppc_isa_float.h,
+# PpcForceSingleValueInline): drops the NI threshold mask, relying on FPCR.FZ's pre-round
+# flush instead. Off until the console's fcvtcheck (the debug server) has shown the two
+# forms agree bit for bit; the pgo-use-fcvt variant of build-switch.sh turns it on.
+option(SPM_FCVT_FZ "Switch: single rounding as a bare fcvt, NI carried by FPCR.FZ alone" OFF)
+if(SPM_FCVT_FZ)
+    add_compile_definitions(MKW_SINGLE_ROUND_HOST_FZ=1)
+endif()
+
 # The Dawn backend toggles the runtime's aurora block reads: only the Null device exists here.
 macro(spm_switch_dawn_backends)
     set(DAWN_ENABLE_D3D12 OFF CACHE BOOL "" FORCE)
