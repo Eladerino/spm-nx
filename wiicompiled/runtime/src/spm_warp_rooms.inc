@@ -26,7 +26,7 @@
     {"he1_06", "ie_doa", "1-1 Lineland Road", "he1_06"},
     {"he2_01", "A2D_dokan_01", "1-2 Mount Lineland", "he2_01"},
     {"he2_02", "doa1_l", "1-2 Mount Lineland", "he2_02"},
-    {"he2_03", "world_end", "1-2 Mount Lineland", "he2_03"},
+    {"he2_03", nullptr, "1-2 Mount Lineland", "he2_03"},  // not world_end: that door is a cutscene arrival (npcdrv.c:7055 panic)
     {"he2_04", "ok", "1-2 Mount Lineland", "he2_04"},
     {"he2_05", "ok", "1-2 Mount Lineland", "he2_05"},
     {"he2_06", "dokan_1", "1-2 Mount Lineland", "he2_06"},
@@ -219,7 +219,7 @@
     {"gn4_16", "doa1_l", "5-4 Floro Caverns (2)", "gn4_16"},
     {"gn4_17", "mini_dokan", "5-4 Floro Caverns (2)", "gn4_17"},
     {"wa1_01", "doa5_l", "6-1 Sammer's Kingdom", "wa1_01"},
-    {"wa1_02", "world_restart", "6-1 Sammer's Kingdom", "wa1_02"},
+    {"wa1_02", nullptr, "6-1 Sammer's Kingdom", "wa1_02"},  // not world_restart: a cutscene arrival, same scene family
     {"wa1_03", "doa1_l", "6-1 Sammer's Kingdom", "wa1_03"},
     {"wa1_04", "doa1_l", "6-1 Sammer's Kingdom", "wa1_04"},
     {"wa1_05", "doa1_l", "6-1 Sammer's Kingdom", "wa1_05"},
