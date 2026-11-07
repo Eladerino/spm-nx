@@ -1364,9 +1364,10 @@ bool FlagValue(int flag) {
 // 32 in he1_01, the protected help window is group 8 pose 9 in mac_08, the
 // Shooting Star action command is group 19 pose 31, and ordinary gameplay
 // draws nothing. The first wiisuppress skipped only (20, 32); since Nov 6 it
-// skips every n_controler draw (see the comment at the skip for why), and the
-// Controls panel opens from the hook's timestamp instead of marker1. Skips are
-// counted and logged (first fire and every 600th). device.cpp forwards the
+// skips every n_controler draw except the Controls screen's (8, 9) (see the
+// comment at the skip for why), so the Controls panel still opens from
+// marker1. Skips are counted and logged (first fire and every 600th). device.cpp
+// forwards the
 // switch through spm_wii_suppress_set, the same handshake as poselog.
 //
 // The switch is the "poselog" dk_diag key: device.cpp forwards it here through
@@ -1374,20 +1375,7 @@ bool FlagValue(int flag) {
 namespace {
 std::atomic<bool> g_poseLog{false};
 std::atomic<bool> g_wiiSuppress{false};
-// When the hook last skipped a remote draw (steady-clock ms; 0 = never). The Controls panel
-// reads it through SpmMapSweep::RemoteDrawnRecently in place of marker1.
-std::atomic<uint64_t> g_remoteDrawMs{0};
-uint64_t SteadyMs() {
-    return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch())
-                        .count());
-}
 }  // namespace
-
-bool SpmMapSweep::RemoteDrawnRecently() {
-    const uint64_t at = g_remoteDrawMs.load(std::memory_order_relaxed);
-    return at != 0 && SteadyMs() - at < 150;
-}
 
 extern "C" void spm_pose_log_set(bool enabled) { g_poseLog = enabled; }
 extern "C" void spm_wii_suppress_set(bool enabled) { g_wiiSuppress = enabled; }
@@ -1472,22 +1460,22 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
     char place[48] = {};
     SpmMapSweep::CurrentPlace(place, sizeof place);
     const int seq = SpmMapSweep::Seq();
-    // The suppression itself. Every n_controler draw is skipped while wiisuppress is on:
+    // The suppression itself. Every n_controler draw but the Controls screen's is
+    // skipped while wiisuppress is on:
     // the remote's body textures already ship transparent (marker1), so wherever the game
     // poses the model (the Tippi tutorial, the Shooting Star and shake action commands,
     // the Controls screen) all that was left on screen was its button faces floating in
     // the air (Brandon, Nov 6). Keying on the (group, pose) tuple could never cover that:
     // those are slot numbers handed out as models load, not fixed IDs. The game's own
     // lines say which button to press in each of those places, and the Controls screen
-    // has the replacement panel, which used to open from marker1 (fired by this model's
-    // draws) and now opens from the timestamp below instead. With poselog also on, the
-    // draw is still logged below before it is skipped.
+    // has the replacement panel, which opens from marker1 (fired by this model's
+    // draws; the (8, 9) draw is kept below for exactly that). With poselog also on,
+    // the draw is still logged below before it is skipped.
     // (8, 9) is the game's Controls screen: the replacement panel detects that
     // screen through this very draw (its marker 1), so the draw must keep
     // happening there; the panel is what covers the model on that screen.
     const bool hide = g_wiiSuppress.load() && !(groupId == 8 && id == 9);
     if (hide) {
-        g_remoteDrawMs.store(SteadyMs(), std::memory_order_relaxed);
         static std::atomic<uint32_t> fired{0};
         const uint32_t n = fired.fetch_add(1) + 1;
         if (n == 1 || n % 600 == 0)

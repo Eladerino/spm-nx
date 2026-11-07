@@ -19,9 +19,6 @@ void ReturnToTitle();                 // back to the title screen (from a map on
 void SetGamePaused(bool paused);
 // The game's sequence: 0 logo, 1 title, 2 in a map, 3 map change, 4 game over, 5 file load; -1 before boot.
 int Seq();
-// The game posed its 3D Wii Remote (n_controler) within the last 150 ms. While wiisuppress is on
-// that draw is skipped, so its textures (marker1) never report; the Controls panel uses this.
-bool RemoteDrawnRecently();
 // Where the game is, for logs: "he3_08 2D", "he3_08 3D", or the sequence ("title", "mapchange"...).
 void CurrentPlace(char* out, size_t size);
 // Game-thread state the Prepare sweep's flip phases poll (each calls the game's own function on
