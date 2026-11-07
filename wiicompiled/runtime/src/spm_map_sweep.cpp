@@ -1482,7 +1482,10 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
     // has the replacement panel, which used to open from marker1 (fired by this model's
     // draws) and now opens from the timestamp below instead. With poselog also on, the
     // draw is still logged below before it is skipped.
-    const bool hide = g_wiiSuppress.load();
+    // (8, 9) is the game's Controls screen: the replacement panel detects that
+    // screen through this very draw (its marker 1), so the draw must keep
+    // happening there; the panel is what covers the model on that screen.
+    const bool hide = g_wiiSuppress.load() && !(groupId == 8 && id == 9);
     if (hide) {
         g_remoteDrawMs.store(SteadyMs(), std::memory_order_relaxed);
         static std::atomic<uint32_t> fired{0};
