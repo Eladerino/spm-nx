@@ -206,6 +206,12 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   whose vertex arrays cannot be watched for changes, and several diagnostic
   modes) are decoded as usual, and with Performance timers on a [vcache] line
   each window counts the hits, the misses and the rejects.
+  Reverb off (`reverboff`, default off) is a measurement: the game's Hi reverb
+  callback (about 10% of the game thread at stock) renders nothing while it is
+  on, so sound is drier. It reaches the callback through the runtime's
+  indirect-call override (`REGISTER_INDIRECT_CALL_OVERRIDE`, abi_bridge.h),
+  which routes function-pointer calls to a wrapper without registering a
+  native, so no fresh translation is needed.
   Another Performance row is a reserved switch rather than a way to play: AXFX
   Hi reverb native (`axfxnative`) currently does nothing. The game's
   AXFXReverbHiExp reverb callback is reached through a function table, and the

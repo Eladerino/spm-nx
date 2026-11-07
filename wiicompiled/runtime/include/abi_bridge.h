@@ -422,12 +422,16 @@ private:
         if (record == nullptr) {
             record = FindRawByAddressPtrSlow(address);
         }
+        record = ApplyIndirectCallOverride(address, record);
         cached = {true, address, record};
         return record;
     }
 
     static const TranslatedFunctionInfo* FindByAddressPtrSlow(uint32_t address);
     static const RawDispatchRecord* FindRawByAddressPtrSlow(uint32_t address);
+    // The indirect-call overrides (RegisterIndirectCallOverride below): the record a bctrl to
+    // `address` runs instead of `record`, or `record` itself. Memo misses only, never the hot path.
+    static const RawDispatchRecord* ApplyIndirectCallOverride(uint32_t address, const RawDispatchRecord* record);
 
     // Finalize publishes immutable registry, generated-table, and dynamic raw
     // dispatch storage. Header-inlined cache hits are enabled only after that
@@ -909,6 +913,26 @@ struct CountedAbiRawCpuThunk {
         AbiRawCpuThunk<Target>::InvokeNoSync(cpu);
     }
 };
+
+// Indirect-call overrides: a runtime wrapper that indirect calls (bctrl through a function pointer)
+// to a translated function reach instead of its body, without registering a native at that
+// address. Registering a native would need a fresh translation, because the generated indirect
+// dispatch table must name the translated body as the winner (ValidateGeneratedIndirectDispatchLocked).
+// Here the table and the registry stay as generated: Finalize copies the target's generated
+// record with only its entry replaced, and the indirect lookup hands out that copy. Direct calls
+// still reach the translated body. The wrapper owns the decision to serve natively and calls the
+// translated body (still linked, as func_XXXXXXXX) otherwise. The translator does not scan for
+// this macro.
+void RegisterIndirectCallOverride(uint32_t address, void (*entry)(CpuContext*), const char* name);
+
+struct IndirectCallOverrideRegistrar {
+    IndirectCallOverrideRegistrar(uint32_t address, void (*entry)(CpuContext*), const char* name) {
+        RegisterIndirectCallOverride(address, entry, name);
+    }
+};
+
+#define REGISTER_INDIRECT_CALL_OVERRIDE(address, fn) \
+    static IndirectCallOverrideRegistrar MKW_DETAIL_MAKE_UNIQUE(_indirect_call_override_, __COUNTER__)(address, &fn, #fn)
 
 #define REGISTER_NATIVE_FUNCTION(address, fn) \
     static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke)

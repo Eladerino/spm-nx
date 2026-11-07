@@ -458,8 +458,33 @@ extern "C" void spm_axfx_native_set(bool enabled) {
     g_axfxNativeEnabled.store(enabled, std::memory_order_relaxed);
 }
 
+// "reverboff" (dk_diag / Diagnostics, default off): a measurement, not a fix. While on, the Hi
+// reverb callback renders nothing: its three aux buffers are cleared and the translated body is
+// skipped, so the aux return is silent and the mix sounds dry. The callback is about 10% of the
+// game thread at stock, so this prices it on hardware. Forwarded by device.cpp like the others.
+namespace {
+std::atomic<bool> g_reverbOff{false};
+}
+
+extern "C" void spm_reverboff_set(bool enabled) {
+    g_reverbOff.store(enabled, std::memory_order_relaxed);
+}
+
 extern "C" void AXFXReverbHiExpCallback_802881c0(CpuContext* ctx) {
     if (!ctx) {
+        return;
+    }
+    if (g_reverbOff.load(std::memory_order_relaxed)) {
+        const uint32_t buffersAddr = ctx->gpr[3];
+        try {
+            for (uint32_t channel = 0; buffersAddr != 0 && channel < ReverbHiExp::kChannels; ++channel) {
+                const uint32_t addr = Memory::Read32(buffersAddr + channel * 4);
+                for (uint32_t i = 0; addr != 0 && i < ReverbHiExp::kSamplesPerFrame; ++i) {
+                    Memory::Write32(addr + i * 4, 0);
+                }
+            }
+        } catch (const Memory::AccessViolation&) {
+        }
         return;
     }
     if (!g_axfxNativeEnabled.load(std::memory_order_relaxed)) {
@@ -488,7 +513,14 @@ extern "C" void AXFXReverbHiExpCallback_802881c0(CpuContext* ctx) {
     func_802881C0(ctx);
 }
 
-// NOT REGISTERED, deliberately (lab combine fix, Nov 4, 2026): 0x802881C0 is an
+// Reached through the indirect-call override (abi_bridge.h REGISTER_INDIRECT_CALL_OVERRIDE,
+// Nov 7): the game calls this callback only through the AX aux function pointer, so the
+// override routes those calls here while the generated table and registry stay as generated,
+// and no fresh translation is needed. Off (both switches), this is one extra call in front of
+// the translated body.
+REGISTER_INDIRECT_CALL_OVERRIDE(0x802881C0u, AXFXReverbHiExpCallback_802881c0);
+
+// History: NOT REGISTERED as a native, deliberately (lab combine fix, Nov 4, 2026): 0x802881C0 is an
 // indirect-dispatch target — the game reaches this callback through the AXFX
 // function table, so the generated indirect dispatch table carries an entry
 // for it, and abi_bridge's ValidateGeneratedIndirectDispatchLocked requires
