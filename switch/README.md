@@ -235,6 +235,14 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   a frame in the November 4 lab run), and with Performance timers on the
   `[gxworker]` block counts the drains skipped, so the same scene with the
   switch off and on prices it.
+  A second experiment on the same wait, DCFlush without waiting (`dcnosync`),
+  goes further: a data-cache op whose range is not a screen copy marks the
+  texture, TLUT and display-list caches over it dirty right away on the game
+  thread and does not drain at all. Only a range over a remembered `GXCopyTex`
+  destination (doors, the 3D flip, character switches) still drains, because
+  that path calls into Aurora, which the worker owns while records are pending.
+  Default off; with Performance timers on the `[gxworker]` block counts the ops
+  that skipped the wait and the ones over screen copies that still drained.
   One more switch has no row at all, and is a measuring instrument rather than a way
   to play: automatic A/B (`abtoggle=<switch>` in dk_diag.txt, or
   `abtoggle=<switch>:<windows>`) flips the named switch on and off by itself at the

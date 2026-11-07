@@ -118,6 +118,11 @@ SpanMicros g_dstepSpan;
 // state down with the ring's other totals (NoteDcFlushDrained / DcFlushRedundant there).
 std::atomic<bool> g_dflushCoalRequested{false};
 
+// ---- the dcnosync experiment (gx_worker.h) -----------------------------------------------------
+// The switch arrives through spm_dcnosync_set, the same hook pattern; os_cache.cpp's DcRangeOp
+// reads it once per data-cache op and reports what it did through NoteDcNoSync.
+std::atomic<bool> g_dcNoSyncRequested{false};
+
 namespace {
 
 constexpr size_t kRingBytes = size_t{2} << 20;  // 2 MiB: a heavy frame's worth is about 1 MiB
@@ -188,6 +193,8 @@ uint64_t g_dflushDrainFrame = 0;     // the interval of the last completed DCFlu
 bool g_dflushDrainSeen = false;      // ... if one has completed at all
 uint64_t g_dflushRecordsAtDrain = 0; // the g_records total at that completion
 Stat g_dflushCoalesced;              // DCFlushRange drains skipped while the switch was on
+Stat g_dcNoSyncFree;                 // dcnosync: data-cache ops that returned without waiting
+Stat g_dcNoSyncCopyDrains;           // dcnosync: ops over a screen copy, which still drained
 
 // Records that a DCFlushRange drain has completed in the current production interval:
 // the worker has consumed everything submitted so far, and the record total says what
@@ -298,6 +305,16 @@ bool CanRecord() noexcept {
 }
 
 bool Pending() noexcept { return t_owner && g_write != 0; }
+
+bool DcNoSyncRequested() noexcept { return g_dcNoSyncRequested.load(std::memory_order_relaxed); }
+
+void NoteDcNoSync(bool drained) noexcept {
+    if (drained) {
+        g_dcNoSyncCopyDrains.Add();
+    } else {
+        g_dcNoSyncFree.Add();
+    }
+}
 
 namespace {
 
@@ -718,6 +735,8 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t waitMicros = g_waitMs.TakeDelta();
     const uint64_t unsafeDrains = g_unsafeDrains.TakeDelta();
     const uint64_t coalesced = g_dflushCoalesced.TakeDelta();
+    const uint64_t dcFree = g_dcNoSyncFree.TakeDelta();
+    const uint64_t dcCopyDrains = g_dcNoSyncCopyDrains.TakeDelta();
     const Mode mode = CurrentMode();
     if (mode == Mode::Off && records == 0) {
         return;
@@ -746,6 +765,17 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                      "[gxworker] frames %llu-%llu: dflushcoal skipped %llu DCFlushRange drains (%.1f a frame)\n",
                      static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
                      static_cast<unsigned long long>(coalesced), static_cast<double>(coalesced) / frames);
+    }
+    if (dcFree != 0 || dcCopyDrains != 0) {
+        // dcnosync's scoreboard (gx_worker.h): data-cache ops that marked their range dirty
+        // without waiting for the worker, and the ones over a screen copy that still waited
+        // (those also appear in the drain and wait-by-cause figures, as before).
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: dcnosync ran %llu data-cache ops without waiting (%.1f a frame), "
+                     "%llu over screen copies waited as before\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<unsigned long long>(dcFree), static_cast<double>(dcFree) / frames,
+                     static_cast<unsigned long long>(dcCopyDrains));
     }
 
     // What made pending records run, busiest first, as drains a frame. Immediate mode's per-record
@@ -857,4 +887,11 @@ extern "C" void spm_dstep_set(bool enabled) {
 // next DCFlushRange.
 extern "C" void spm_dflushcoal_set(bool enabled) {
     GxWorker::g_dflushCoalRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The dcnosync experiment's hook from the deko diag layer, declared and forwarded exactly
+// like the others: diag_init hands it the dk_diag.txt value once, diag_set forwards every
+// flip. DcRangeOp reads it on each data-cache op, so a flip lands on the next one.
+extern "C" void spm_dcnosync_set(bool enabled) {
+    GxWorker::g_dcNoSyncRequested.store(enabled, std::memory_order_relaxed);
 }

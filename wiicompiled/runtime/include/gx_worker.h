@@ -195,6 +195,26 @@ void PrintDstepWindow(uint64_t firstFrame, uint64_t lastFrame);
 // count, so a hardware A/B reads the DCFlushRange wait with the switch off against
 // the same wait plus the skip count with it on.
 
+// ---- the dcnosync experiment (Switch Diagnostics "dcnosync"; state in gx_worker.cpp) ---------
+//
+// The data-cache ops (DCInvalidateRange, DCFlushRange, DCStoreRange, DCFlushRangeNoSync) are
+// NoSync in gx_call_kinds.inc, and their shared body (os_cache.cpp DcRangeOp) decides about the
+// drain itself. With the switch off it drains first, exactly as the dispatch layer did when they
+// were Inline, so nothing changes. With it on, an op drains only when its range overlaps a
+// remembered GXCopyTex destination: those are the only ranges whose body calls into Aurora
+// (downloading a pending screen copy for the CPU to read, or retiring one whose memory was
+// reused), and Aurora belongs to the worker while records are pending. Every other op only marks
+// game-side caches dirty (texture objects, TLUTs: game-thread state under their own mutexes, read
+// by the next GXLoadTexObj / GXLoadTlut on the game thread) and bumps the guest-write generations
+// (atomic, fenced: gx_guest_write.h), so it runs without waiting. Records pending at the op lose
+// nothing: the guest wrote the bytes before flushing them, so those records replayed during the
+// old drain already saw the new bytes, and see the same bytes replayed later.
+bool DcNoSyncRequested() noexcept;
+
+// Counts one data-cache op made under the switch for the perftimer's [gxworker] block: `drained`
+// when its range overlapped a screen copy and it waited as before, otherwise it did not wait.
+void NoteDcNoSync(bool drained) noexcept;
+
 template <auto Fn, typename Tuple>
 void ReplayTuple(void* payload) {
     Tuple* args = static_cast<Tuple*>(payload);
