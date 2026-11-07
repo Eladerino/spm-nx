@@ -123,4 +123,12 @@ GX_WORKER_KIND(0x8028EE14u, SelfDefer);  // GXLoadTexObjPreLoaded (runs the Load
 // hardware and the decode thread already does.
 GX_WORKER_KIND(0x80291458u, Queue);      // GXCallDisplayList
 
+// Data-cache ops (os_cache.cpp). NoSync so the dispatch layer leaves the drain to their body,
+// DcRangeOp, which drains first exactly as an Inline call would, unless the dcnosync experiment
+// is on: then only an op over a screen copy drains (gx_worker.h has the reasoning).
+GX_WORKER_KIND(0x8026D7D4u, NoSync);     // DCInvalidateRange
+GX_WORKER_KIND(0x8026D800u, NoSync);     // DCFlushRange
+GX_WORKER_KIND(0x8026D830u, NoSync);     // DCStoreRange
+GX_WORKER_KIND(0x8026D860u, NoSync);     // DCFlushRangeNoSync
+
 #undef GX_WORKER_KIND

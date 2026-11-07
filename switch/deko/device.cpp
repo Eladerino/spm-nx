@@ -60,6 +60,10 @@ extern "C" void spm_dstep_set(bool enabled);
 // here the same way: diag_init and diag_set forward the "dflushcoal" switch to it.
 extern "C" void spm_dflushcoal_set(bool enabled);
 
+// The runtime's DCFlushRange no-wait experiment (gx_worker.cpp), declared here the same
+// way: diag_init and diag_set forward the "dcnosync" switch to it.
+extern "C" void spm_dcnosync_set(bool enabled);
+
 // The debug server (source/spm_debug_server.cpp), declared here the same way: diag_init
 // hands it the dkserver switch once the file has been read.
 extern "C" void spm_debug_server_boot(bool enabled);
@@ -109,7 +113,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"rttlog", &Diag::rttLog},        {"pmsmemo", &Diag::pmsMemo},      {"gxskip", &Diag::gxSkip},
     {"dlprobe", &Diag::dlProbe},      {"gxdedup", &Diag::gxDedup},      {"axfxnative", &Diag::axfxNative},
     {"dstep", &Diag::dstep},          {"dflushcoal", &Diag::dflushCoal}, {"vcache", &Diag::vcache},
-    {"abtoggle", &Diag::abToggle},    {"wiisuppress", &Diag::wiiSuppress},
+    {"abtoggle", &Diag::abToggle},    {"wiisuppress", &Diag::wiiSuppress}, {"dcnosync", &Diag::dcNoSync},
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
 };
 
@@ -372,6 +376,10 @@ void diag_init() {
     // from the start. The witness it reads is kept from the first frame either way, so
     // this only sets the initial switch state; the menu flips it live.
     if (g_diag.dflushCoal) spm_dflushcoal_set(true);
+    // A dcnosync=1 in dk_diag.txt arms the runtime's DCFlushRange no-wait experiment from
+    // the start. DcRangeOp reads the switch on every data-cache op, so this only sets the
+    // initial state; the menu and the command channel flip it live.
+    if (g_diag.dcNoSync) spm_dcnosync_set(true);
     // A vcache=1 in dk_diag.txt arms Aurora's decoded display-list vertex cache from
     // the start. The cache lives inside Aurora's decode path and reads the switch on
     // every list, so this only sets the initial state; the menu flips it live.
@@ -415,6 +423,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "gxdedup")) spm_gxdedup_set(on);
     else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
     else if (!std::strcmp(key, "dflushcoal")) spm_dflushcoal_set(on);
+    else if (!std::strcmp(key, "dcnosync")) spm_dcnosync_set(on);
     else if (!std::strcmp(key, "padrec")) spm_input_record_set(on);
     else if (!std::strcmp(key, "padreplay")) {
         // Arming passes the file padreplay_parse_params took from dk_diag.txt (a live

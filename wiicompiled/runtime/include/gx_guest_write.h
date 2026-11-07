@@ -51,9 +51,15 @@ inline constexpr size_t kGranuleCount = static_cast<size_t>(kTrackedSpan >> kGra
 inline constexpr uint64_t kUntracked = ~0ull;
 
 // Shared (not thread_local) because notifications come from the OS HLE and from
-// aurora's readback callbacks while the caches themselves are per guest thread;
-// relaxed ordering is enough, every access is a plain load or a lock-xadd on
-// x86 and a missed-by-a-hair ordering only delays a re-digest by one call.
+// aurora's readback callbacks while the caches themselves are per guest thread.
+// The counters themselves are relaxed, but NotifyWrite opens with a release fence
+// and GenerationForRange closes with an acquire fence: a consumer on another thread
+// (the GX worker replaying a texture or display list) that reads a bumped
+// generation then also sees the bytes the guest wrote before the notify. On x86
+// both fences are free; on the Switch's ARM cores the bytes could otherwise be read
+// stale under a fresh generation and cached that way. That matters once a
+// DCFlushRange notifies without waiting for the worker first (the dcnosync switch,
+// os_cache.cpp), and for DVD reads that notify from their own thread.
 inline std::array<std::atomic<uint32_t>, kGranuleCount> g_generations{};
 
 // Monotone fold of every granule counter covering [addr, addr + nbytes).
@@ -74,6 +80,9 @@ inline uint64_t GenerationForRange(uint32_t addr, uint32_t nbytes) noexcept {
     for (size_t granule = firstGranule; granule <= lastGranule; ++granule) {
         folded += g_generations[granule].load(std::memory_order_relaxed);
     }
+    // Pairs with NotifyWrite's release fence: bytes read after this see at least
+    // the writes that preceded every notification counted in `folded`.
+    std::atomic_thread_fence(std::memory_order_acquire);
     // Never collide with the "untracked" sentinel.
     return folded == kUntracked ? folded - 1u : folded;
 }
@@ -93,6 +102,8 @@ inline void NotifyWrite(uint32_t addr, uint32_t size) noexcept {
     const uint64_t clampedEnd = end < kTrackedSpan ? end : kTrackedSpan;
     const size_t firstGranule = static_cast<size_t>(start >> kGranuleShift);
     const size_t lastGranule = static_cast<size_t>((clampedEnd - 1) >> kGranuleShift);
+    // Publishes the guest's writes to these bytes before the bump (see g_generations).
+    std::atomic_thread_fence(std::memory_order_release);
     for (size_t granule = firstGranule; granule <= lastGranule; ++granule) {
         g_generations[granule].fetch_add(1u, std::memory_order_relaxed);
     }
