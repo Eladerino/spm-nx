@@ -430,8 +430,18 @@ function(spm_switch_configure_products)
         # Same COMPILE_LANGUAGE gating as the capture side: this block applies to the same
         # targets, so ungated -mllvm options would fail the pgo-use build on the same GCC
         # assembler sources.
+        # A retrained profile lands at the same path, so the flags above would not change and
+        # ninja would relink old objects built from the previous profile (round 11 on Nov 7:
+        # an 8-step "pgo-use" build that was mostly the old profile, while the fit check
+        # still passed). The profile is a configure dependency, and its hash rides on every
+        # PGO compile line as a define, so new profile contents recompile everything it
+        # covers and the same contents recompile nothing.
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SPM_PGO_PROFILE}")
+        file(SHA256 "${SPM_PGO_PROFILE}" _spm_pgo_profile_sha)
+        string(SUBSTRING "${_spm_pgo_profile_sha}" 0 16 _spm_pgo_profile_sha)
         set(_spm_pgo_use_flags
             "$<$<COMPILE_LANGUAGE:C,CXX>:-fprofile-instr-use=${SPM_PGO_PROFILE}>"
+            "$<$<COMPILE_LANGUAGE:C,CXX>:-DSPM_PGO_PROFILE_SHA=0x${_spm_pgo_profile_sha}ull>"
             "$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-mllvm -disable-vp=true>"
             "$<$<COMPILE_LANGUAGE:C,CXX>:SHELL:-mllvm -static-func-full-module-prefix=false>")
         foreach(_spm_pgo_target IN ITEMS
@@ -443,7 +453,7 @@ function(spm_switch_configure_products)
             endif()
         endforeach()
         message(STATUS
-            "spm-nx: PGO USE build: profile ${SPM_PGO_PROFILE} (trained on tree "
+            "spm-nx: PGO USE build: profile ${SPM_PGO_PROFILE} sha ${_spm_pgo_profile_sha} (trained on tree "
             "${_spm_pgo_commit}, clang ${_spm_pgo_clang_major}, scope ${_spm_pgo_scope}); "
             "build-switch.sh enforces the function-level fit check after the build")
     endif()
