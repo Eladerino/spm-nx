@@ -4180,7 +4180,7 @@ constexpr DiagRow kDiagRows[] = {
     {"perftimer", "Performance timers (perftimer)", "Performance",
      "Every 600 frames, prints producer, map-wait, encode, and total frame times to the log, plus the decode thread's time and what the game waited on it for. Use it to measure where frame time goes."},
     {"profile", "Guest profiler (profile)", nullptr,
-     "Samples the game thread, and the GX decode thread while it runs, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them)."},
+     "Samples the game thread, and the GX decode thread and GX worker while they run, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them)."},
     {"pmsmemo", "Message-string memo (pmsmemo)", nullptr,
      "An experiment: the game's instruction lines are rewritten for the controller by searching all of MEM1 for each line on every area change. While this is on, the patcher instead remembers where each line was patched and checks the bytes at that address first, only searching again for a line whose check fails. The wording patched is identical either way; with Performance timers or any trace on, a [pmsmemo] line in the log counts the checks, the fallbacks and the searches still run. For measuring the saving on routes with many area changes; leave off for normal play. Takes effect at once."},
     {"fps30", "30 fps cap (fps30)", nullptr,
