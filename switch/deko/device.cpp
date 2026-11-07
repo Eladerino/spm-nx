@@ -72,6 +72,7 @@ extern "C" void spm_invtexq_set(bool enabled);
 // diag_init and diag_set forward the "kpadnosync" switch to it.
 extern "C" void spm_kpadnosync_set(bool enabled);
 // The natnosync experiment's hook (gx_worker.cpp), forwarded the same way.
+extern "C" void spm_sqrtverify_set(bool enabled);  // hle/msl_math.cpp
 extern "C" void spm_natnosync_set(bool enabled);
 
 // The GX worker's poll-before-sleep (gx_worker.cpp), declared here the same way: diag_init
@@ -129,7 +130,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"dstep", &Diag::dstep},          {"dflushcoal", &Diag::dflushCoal}, {"vcache", &Diag::vcache},
     {"abtoggle", &Diag::abToggle},    {"wiisuppress", &Diag::wiiSuppress}, {"dcnosync", &Diag::dcNoSync},
     {"invtexq", &Diag::invTexQ},       {"kpadnosync", &Diag::kpadNoSync},
-    {"natnosync", &Diag::natNoSync},
+    {"natnosync", &Diag::natNoSync},    {"sqrtverify", &Diag::sqrtVerify},
     {"gxspin", &Diag::gxSpin},
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
 };
@@ -405,6 +406,7 @@ void diag_init() {
     if (g_diag.kpadNoSync) spm_kpadnosync_set(true);
     // A natnosync=1 arms the general no-wait experiment from the start, the same way.
     if (g_diag.natNoSync) spm_natnosync_set(true);
+    if (g_diag.sqrtVerify) spm_sqrtverify_set(true);
     // gxspin is on unless dk_diag.txt says gxspin=0 (the Diag default), so its state is
     // forwarded either way; the worker reads it each time it catches up.
     spm_gxspin_set(g_diag.gxSpin);
@@ -455,6 +457,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "invtexq")) spm_invtexq_set(on);
     else if (!std::strcmp(key, "kpadnosync")) spm_kpadnosync_set(on);
     else if (!std::strcmp(key, "natnosync")) spm_natnosync_set(on);
+    else if (!std::strcmp(key, "sqrtverify")) spm_sqrtverify_set(on);
     else if (!std::strcmp(key, "gxspin")) spm_gxspin_set(on);
     else if (!std::strcmp(key, "padrec")) spm_input_record_set(on);
     else if (!std::strcmp(key, "padreplay")) {
