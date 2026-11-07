@@ -116,3 +116,5 @@ NativeOverrideCounter::NativeOverrideCounter(uint32_t guestAddress) noexcept : a
     next = g_nativeOverrideCounterHead;
     g_nativeOverrideCounterHead = this;
 }
+
+extern "C" void spm_callcounts_set(bool enabled) { g_countNativeCalls.store(enabled, std::memory_order_relaxed); }
