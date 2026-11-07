@@ -106,15 +106,24 @@ OPERATORS = ["operator<<=", "operator>>=", "operator<<", "operator>>", "operator
              "operator>=", "operator->*", "operator->", "operator<", "operator>"]
 
 
+# --keep-templates: names matching this pattern keep their template arguments, so per-instantiation
+# costs (InvokeDirectCpu<target>, CountedAbiRawCpuThunk<address, fn>) stay apart.
+KEEP_TEMPLATES = None
+
+
 def short_name(name):
     """A demangled name without template arguments and its parameter list, for grouping and reading."""
     if not name or name == "??":
         return "??"
     name = name.replace("(anonymous namespace)", "{anon}")
+    keep = KEEP_TEMPLATES is not None and KEEP_TEMPLATES.search(name) is not None
     for i, op in enumerate(OPERATORS):
         name = name.replace(op, f"\x01{i}\x02")
     out, depth = [], 0
     for ch in name:
+        if keep:
+            out.append(ch)
+            continue
         if ch == "<":
             if depth == 0:
                 out.append("<>")
@@ -139,7 +148,8 @@ def short_name(name):
                         name = name[:i]
                     break
     name = re.sub("\x01(\\d+)\x02", lambda m: OPERATORS[int(m.group(1))], name)
-    return name if len(name) <= 140 else name[:137] + "..."
+    limit = 400 if keep else 140
+    return name if len(name) <= limit else name[: limit - 3] + "..."
 
 
 def short_line(location):
@@ -215,7 +225,12 @@ def main():
                                                         os.path.expanduser("~/spm-switch/build/spm-nx.elf")))
     parser.add_argument("--addr2line", help="a local aarch64 addr2line instead of the build container's")
     parser.add_argument("--top", type=int, default=50, help="lines per section (default 50)")
+    parser.add_argument("--keep-templates", metavar="REGEX",
+                        help="keep template arguments on names matching REGEX (e.g. 'InvokeDirectCpu|CountedAbiRawCpuThunk')")
     args = parser.parse_args()
+    if args.keep_templates:
+        global KEEP_TEMPLATES
+        KEEP_TEMPLATES = re.compile(args.keep_templates)
     if not os.path.isfile(args.log):
         sys.exit(f"no such log: {args.log}")
     if not os.path.isfile(args.elf):
