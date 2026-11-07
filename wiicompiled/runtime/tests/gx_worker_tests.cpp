@@ -25,6 +25,7 @@ template <> struct GxWorker::KindOf<0x80000020u> { static constexpr Kind kKind =
 template <> struct GxWorker::KindOf<0x80000030u> { static constexpr Kind kKind = Kind::QueueIfAsked; };
 template <> struct GxWorker::KindOf<0x80000040u> { static constexpr Kind kKind = Kind::NoSyncIfAsked; };
 extern "C" void spm_kpadnosync_set(bool enabled);
+extern "C" void spm_natnosync_set(bool enabled);
 
 extern "C" void spm_invtexq_set(bool enabled);
 
@@ -295,6 +296,43 @@ void TestNoSyncIfAsked() {
     spm_kpadnosync_set(false);
 }
 
+// The file classification natnosync relies on (gx_worker.h IsGxLayerFile), on the spellings a
+// build tree can give __FILE__.
+static_assert(GxWorker::IsGxLayerFile("/home/u/spm-nx/wiicompiled/runtime/src/hle/gx/gx_tev.cpp"));
+static_assert(GxWorker::IsGxLayerFile("src/hle/vi.cpp"));
+static_assert(GxWorker::IsGxLayerFile("C:\\dev\\spm-nx\\wiicompiled\\runtime\\src\\hle\\os\\os_cache.cpp"));
+static_assert(GxWorker::IsGxLayerFile("../src/hle/storage/dvd.cpp"));
+static_assert(!GxWorker::IsGxLayerFile("/home/u/spm-nx/wiicompiled/runtime/src/hle/input/kpad.cpp"));
+static_assert(!GxWorker::IsGxLayerFile("src/hle/os/os_interrupt.cpp"));
+static_assert(!GxWorker::IsGxLayerFile("src/hle/gxx.cpp"));
+static_assert(GxWorker::IsGxLayerAddress(0x8028CD50u));   // GXDrawDone
+static_assert(GxWorker::IsGxLayerAddress(0x80280E0Cu));   // VIWaitForRetrace
+static_assert(!GxWorker::IsGxLayerAddress(0x802DE7B4u));  // KPADRead
+static_assert(!GxWorker::IsGxLayerAddress(0x802716B8u));  // OSDisableInterrupts
+
+void TestNatNoSync() {
+    SetMode(GxWorker::Mode::Deferred);
+    g_log.clear();
+    spm_natnosync_set(false);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(10u), "natnosync off: the setter defers itself");
+    GxWorker::NativeSyncPoint<0x802DE7B4u, false>();
+    Check(!GxWorker::Pending(), "natnosync off: a non-GX native drains");
+    g_log.clear();
+    spm_natnosync_set(true);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(11u), "natnosync on: the setter defers itself");
+    GxWorker::NativeSyncPoint<0x802DE7B4u, false>();
+    Check(GxWorker::Pending(), "natnosync on: a non-GX native leaves the record pending");
+    GxWorker::NativeSyncPoint<0x801C7160u, true>();
+    Check(!GxWorker::Pending(), "natnosync on: a native from a GX-layer file still drains");
+    Check(Same({"value 11"}), "natnosync on: the record replayed at the GX-layer native");
+    g_log.clear();
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(12u), "natnosync on: the setter defers itself again");
+    GxWorker::NativeSyncPoint<0x8028CD50u, false>();
+    Check(!GxWorker::Pending(), "natnosync on: an address in the GX library drains whatever its file");
+    Check(Same({"value 12"}), "natnosync on: replayed in order");
+    spm_natnosync_set(false);
+}
+
 const char* TestName(uint32_t address) { return address == 0x80001234u ? "GXGetTest" : nullptr; }
 
 void TestDrainCausesPrint() {
@@ -502,6 +540,7 @@ int main() {
     TestNoSyncAndDeferCall();
     TestQueueIfAsked();
     TestNoSyncIfAsked();
+    TestNatNoSync();
     TestThreadedOrder();
     TestThreadedContainsThrowAndNestedDrain();
     TestThreadedRingFull();

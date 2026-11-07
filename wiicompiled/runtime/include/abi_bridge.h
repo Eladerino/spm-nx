@@ -840,11 +840,11 @@ public:
 // The registry path into a native override with GX records on (gx_worker.h): true when the call was
 // recorded or ran through its self-deferring body, false when the caller runs it now (after the
 // pending records, for an Inline one).
-template <uint32_t Address, auto Target>
+template <uint32_t Address, auto Target, bool GxLayer>
 inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
     constexpr GxWorker::Kind kind = GxWorker::KindOf<Address>::kKind;
     if constexpr (kind == GxWorker::Kind::Inline) {
-        GxWorker::Drain(Address);
+        GxWorker::NativeSyncPoint<Address, GxLayer>();
         return false;
     } else if constexpr (kind == GxWorker::Kind::NoSync) {
         return false;
@@ -885,12 +885,13 @@ inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
 }
 
 // The raw invoker of a plain registered native: as AbiRawCpuThunk, with its guest address for the
-// GX worker's drain counts.
-template <uint32_t Address, auto Target>
+// GX worker's drain counts. GxLayer: the registering file touches GX state (GxWorker::IsGxLayerFile),
+// which keeps the drain under the natnosync experiment.
+template <uint32_t Address, auto Target, bool GxLayer>
 struct NativeRawCpuThunk {
     static void Invoke(CpuContext* cpu) {
         if (GxWorker::Engaged()) {
-            GxWorker::Drain(Address);
+            GxWorker::NativeSyncPoint<Address, GxLayer>();
         }
         AbiRawCpuThunk<Target>::InvokeNoSync(cpu);
     }
@@ -898,11 +899,11 @@ struct NativeRawCpuThunk {
 
 // The raw invoker of a counted native override: counts the call, then runs the plain thunk (or
 // records it, with GX records on).
-template <uint32_t Address, auto Target>
+template <uint32_t Address, auto Target, bool GxLayer>
 struct CountedAbiRawCpuThunk {
     static void Invoke(CpuContext* cpu) {
         NativeOverrideCalls<Address>.Hit();
-        if (GxWorker::Engaged() && GxWorkerDispatchCpu<Address, Target>(cpu)) {
+        if (GxWorker::Engaged() && GxWorkerDispatchCpu<Address, Target, GxLayer>(cpu)) {
             return;
         }
         AbiRawCpuThunk<Target>::InvokeNoSync(cpu);
@@ -910,11 +911,11 @@ struct CountedAbiRawCpuThunk {
 };
 
 #define REGISTER_NATIVE_FUNCTION(address, fn) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn>::Invoke)
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke)
 
 #define REGISTER_NATIVE_FUNCTION_AS(address, fn, pretty_name) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_named_, __COUNTER__)(address, pretty_name, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn>::Invoke)
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_named_, __COUNTER__)(address, pretty_name, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke)
 
 // REGISTER_NATIVE_FUNCTION for PPC_NATIVE_OVERRIDE: the same entry, with a raw invoker that counts.
 #define REGISTER_COUNTED_NATIVE_FUNCTION(address, fn) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &CountedAbiRawCpuThunk<address, &fn>::Invoke)
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &CountedAbiRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke)

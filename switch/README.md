@@ -257,9 +257,17 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   others are on, run without waiting for the worker; the wait moves to the
   next real sync point. It covers the per-frame WPAD/WUD status reads too,
   since with `KPADRead` alone the wait moved to `WPADIsDpdEnabled`.
+  Since the wait only moved each time, a fifth, non-graphics calls without
+  waiting (`natnosync`, default off), relaxes the whole class: every native
+  outside the GX layer (judged by the file that registers it and by its
+  address being outside the SDK's GX and VI libraries) runs without waiting,
+  so the wait lands on the next GX sync point. With Performance timers on,
+  the `[gxworker]` block counts the natives that skipped a wait.
   The GX worker short poll (`gxspin`, on by default) has the caught-up worker
-  poll for about 250 us, yielding, before it sleeps, so the publishes that
-  arrive while the game draws are not each a kernel wake.
+  poll for about 1 ms, yielding, before it sleeps, so the publishes that
+  arrive while the game draws are not each a kernel wake. The game thread
+  wakes a sleeping worker without taking the mutex; the worker's sleep is a
+  1 ms bounded wait, so a wake that slips past costs at most that.
   One more switch has no row at all, and is a measuring instrument rather than a way
   to play: automatic A/B (`abtoggle=<switch>` in dk_diag.txt, or
   `abtoggle=<switch>:<windows>`) flips the named switch on and off by itself at the

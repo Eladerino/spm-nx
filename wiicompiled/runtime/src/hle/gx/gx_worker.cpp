@@ -131,6 +131,12 @@ std::atomic<bool> g_queueIfAskedRequested{false};
 // ---- the kpadnosync experiment (gx_worker.h, Kind::NoSyncIfAsked) -----------------------------
 std::atomic<bool> g_noSyncIfAskedRequested{false};
 
+// ---- the natnosync experiment (gx_worker.h, NativeSyncPoint) ----------------------------------
+std::atomic<bool> g_natNoSyncRequested{false};
+// This file's own __FILE__ must classify as GX layer, or the classification the registration
+// macros rely on is broken in this build tree and the switch must stay inert.
+constexpr bool kNatNoSyncClassifies = IsGxLayerFile(__FILE__);
+
 // gxspin (on by default; dk_diag gxspin=0 turns it off): the caught-up worker polls briefly
 // before sleeping (WorkerMain). Forwarded through spm_gxspin_set.
 std::atomic<bool> g_gxSpinRequested{true};
@@ -230,6 +236,7 @@ bool g_dflushDrainSeen = false;      // ... if one has completed at all
 uint64_t g_dflushRecordsAtDrain = 0; // the g_records total at that completion
 Stat g_dflushCoalesced;              // DCFlushRange drains skipped while the switch was on
 Stat g_dcNoSyncFree;                 // dcnosync: data-cache ops that returned without waiting
+Stat g_natNoSyncSkips;              // natnosync: non-GX natives that skipped a drain with records pending
 Stat g_dcNoSyncCopyDrains;           // dcnosync: ops over a screen copy, which still drained
 
 // Records that a DCFlushRange drain has completed in the current production interval:
@@ -347,6 +354,12 @@ bool DcNoSyncRequested() noexcept { return g_dcNoSyncRequested.load(std::memory_
 bool QueueIfAskedRequested() noexcept { return g_queueIfAskedRequested.load(std::memory_order_relaxed); }
 
 bool NoSyncIfAskedRequested() noexcept { return g_noSyncIfAskedRequested.load(std::memory_order_relaxed); }
+
+bool NatNoSyncRequested() noexcept {
+    return kNatNoSyncClassifies && g_natNoSyncRequested.load(std::memory_order_relaxed);
+}
+
+void NoteNatNoSync() noexcept { g_natNoSyncSkips.Add(); }
 
 void NoteDcNoSync(bool drained) noexcept {
     if (drained) {
@@ -842,6 +855,7 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t coalesced = g_dflushCoalesced.TakeDelta();
     const uint64_t dcFree = g_dcNoSyncFree.TakeDelta();
     const uint64_t dcCopyDrains = g_dcNoSyncCopyDrains.TakeDelta();
+    const uint64_t natSkips = g_natNoSyncSkips.TakeDelta();
     const Mode mode = CurrentMode();
     if (mode == Mode::Off && records == 0) {
         return;
@@ -868,6 +882,14 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                      "[gxworker] frames %llu-%llu: worker replayed records %.2f ms a frame, %.1f yields a frame\n",
                      static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
                      static_cast<double>(workerBusyMicros) / 1000.0 / frames, static_cast<double>(workerYields) / frames);
+    }
+    if (natSkips != 0) {
+        // natnosync's scoreboard: non-GX natives reached with records pending that ran without
+        // draining. The wait-by-cause lines below say where the wait landed instead.
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: natnosync ran %.1f non-GX natives a frame without waiting\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(natSkips) / frames);
     }
     if (coalesced != 0) {
         // dflushcoal's scoreboard (gx_worker.h): flushes that returned without draining
@@ -1017,6 +1039,15 @@ extern "C" void spm_gxspin_set(bool enabled) {
 // The kpadnosync experiment's hook, the same pattern: NoSyncIfAsked calls read it at dispatch.
 extern "C" void spm_kpadnosync_set(bool enabled) {
     GxWorker::g_noSyncIfAskedRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The natnosync experiment's hook, the same pattern: NativeSyncPoint reads it at every non-GX
+// native. Logs once if this build tree's file classification fails, since then it stays inert.
+extern "C" void spm_natnosync_set(bool enabled) {
+    GxWorker::g_natNoSyncRequested.store(enabled, std::memory_order_relaxed);
+    if (enabled && !GxWorker::kNatNoSyncClassifies) {
+        std::fprintf(stderr, "[gxworker] natnosync stays off: this build's file paths do not classify (%s)\n", __FILE__);
+    }
 }
 
 // The guest profiler (guest_profiler.cpp) samples the GX worker on the same ticks as the game
