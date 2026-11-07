@@ -223,6 +223,73 @@ bool DcNoSyncRequested() noexcept;
 // when its range overlapped a screen copy and it waited as before, otherwise it did not wait.
 void NoteDcNoSync(bool drained) noexcept;
 
+// ---- natnosync (Switch Diagnostics "natnosync", default off; state in gx_worker.cpp) ----------
+//
+// Every native outside the GX layer is a sync point today (Inline by default), although almost
+// none of them touches anything a record changes. At stock the frame's one long wait (8-9 ms)
+// sits at whichever such native the game reaches first after drawing, and relaxing them one at a
+// time only moved it (KPADRead, then WPADIsDpdEnabled, then OSDisableInterrupts: round 5). This
+// switch relaxes the whole class at once: an unlisted native runs without draining when it is
+// outside the GX layer, so the wait lands on the next real sync point (a GX getter or wait,
+// GXDrawDone, GXCopyDisp, or the frame boundary).
+//
+// "Outside the GX layer" is two independent checks, both required:
+//   - the file that registered it is not one that touches GX or Aurora state (IsGxLayerFile:
+//     src/hle/gx/, hle/vi.cpp, os/os_cache.cpp, storage/dvd.cpp), which covers the game-specific
+//     GX helpers registered at addresses far from the SDK's GX library; and
+//   - its address is outside the SDK's GX and VI libraries (IsGxLayerAddress), so a GX override
+//     still drains even if a build tree's __FILE__ spelling defeats the first check.
+// What the rest touch (OS interrupts, threads, alarms, messages, time, heaps, input, audio, NAND,
+// stdio) is the same set the ~290 unsynchronised drains a frame already run alongside the worker
+// from inside a drain's wait service, so concurrency with the replay is not new.
+constexpr bool PathHas(const char* path, const char* needle) {
+    for (; *path != '\0'; ++path) {
+        const char* a = path;
+        const char* b = needle;
+        while (*b != '\0' && (*a == *b || (*b == '/' && *a == '\\'))) {
+            ++a;
+            ++b;
+        }
+        if (*b == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
+constexpr bool IsGxLayerFile(const char* path) {
+    return PathHas(path, "hle/gx/") || PathHas(path, "hle/vi.cpp") || PathHas(path, "os/os_cache.cpp") ||
+           PathHas(path, "storage/dvd.cpp");
+}
+
+// US Rev 0 library bounds (us0_names.tsv): __VIRetraceHandler .. DEMOPadInit, and
+// __GXDefaultTexRegionCallback .. FindContainHeap_ (the MEM heap library starts there).
+constexpr bool IsGxLayerAddress(uint32_t address) {
+    return (address >= 0x8027FD14u && address < 0x802845E4u) || (address >= 0x80289900u && address < 0x80292424u);
+}
+
+// True while the switch is on and this process's own file classification works (checked once,
+// at the first query: gx_worker.cpp must classify as GX layer, or the switch stays inert and says
+// so in the log).
+bool NatNoSyncRequested() noexcept;
+
+// Counts one drain skipped under the switch, with records pending, for the [gxworker] block.
+void NoteNatNoSync() noexcept;
+
+// The Inline sync point of a native registered at `Address` from a file classified `GxLayer`.
+template <uint32_t Address, bool GxLayer>
+inline void NativeSyncPoint() {
+    if constexpr (!GxLayer && !IsGxLayerAddress(Address)) {
+        if (NatNoSyncRequested()) {
+            if (Pending()) {
+                NoteNatNoSync();
+            }
+            return;
+        }
+    }
+    Drain(Address);
+}
+
 template <auto Fn, typename Tuple>
 void ReplayTuple(void* payload) {
     Tuple* args = static_cast<Tuple*>(payload);
