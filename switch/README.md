@@ -273,13 +273,6 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   arrive while the game draws are not each a kernel wake. The game thread
   wakes a sleeping worker without taking the mutex; the worker's sleep is a
   1 ms bounded wait, so a wake that slips past costs at most that.
-  The game's square root (`__ieee754_sqrt`, an fdlibm bit-by-bit loop, about
-  4% of the game thread at stock) is a native (`hle/msl_math.cpp`): the
-  host's sqrt instruction for positive normal inputs, which is the same
-  correctly rounded answer, and a line-for-line port of the loop for
-  everything else. `sqrtverify` (default off) runs both on every call and
-  logs the first mismatch. Adding it needs a fresh translation (Stage 1),
-  since the translator skips functions a native overrides.
   One more switch has no row at all, and is a measuring instrument rather than a way
   to play: automatic A/B (`abtoggle=<switch>` in dk_diag.txt, or
   `abtoggle=<switch>:<windows>`) flips the named switch on and off by itself at the
