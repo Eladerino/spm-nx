@@ -509,6 +509,24 @@ uint32_t ExtractTvFormat(uint32_t tvMode) {
     return (tvMode >> 2) & 0x7;
 }
 
+// Retrace pacing counters for the perftimer window (gx_worker.cpp's PrintPerfWindow prints
+// them per game frame): retraces raised, and retraces that found a thread asleep on the
+// retrace queue (VIWaitForRetrace). Two sleeper wakes a frame means the game itself waits
+// two retraces per frame (a 30 Hz pace it chose); one a frame with spare time means the
+// frame is only late. Reads only, nothing the guest sees changes.
+static std::atomic<uint64_t> s_viRetraces{0};
+static std::atomic<uint64_t> s_viSleeperWakes{0};
+extern "C" void spm_vi_retrace_stats(uint64_t* retraces, uint64_t* sleeperWakes, uint64_t* idleNanos) {
+    *retraces = s_viRetraces.exchange(0, std::memory_order_relaxed);
+    *sleeperWakes = s_viSleeperWakes.exchange(0, std::memory_order_relaxed);
+    // Guest idle over the window (the scheduler had no guest thread to run): with frame time
+    // quantised to retraces, idle per frame is what shows a game-thread saving below one retrace.
+    static uint64_t s_lastIdle = 0;
+    const uint64_t idle = OS_HLE_IdleNanosTotal();
+    *idleNanos = idle - s_lastIdle;
+    s_lastIdle = idle;
+}
+
 // Re-entry guard to prevent AdvanceRetrace calling itself via OSWakeupThread -> SelectThread
 static std::atomic<bool> s_inAdvanceRetrace{false};
 
@@ -707,9 +725,9 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         static int s_wakeLogs = 0;
         const bool logWake = s_wakeLogs < 6;
         uint32_t queueHead = 0;
-        if (logWake) {
-            Memory::TryRead32(kViRetraceQueueAddr, queueHead);
-        }
+        Memory::TryRead32(kViRetraceQueueAddr, queueHead);
+        s_viRetraces.fetch_add(1, std::memory_order_relaxed);
+        if (queueHead != 0) s_viSleeperWakes.fetch_add(1, std::memory_order_relaxed);
         ctx->gpr[3] = kViRetraceQueueAddr;
         OSWakeupThread_HLE_801aaaa4(ctx);
         if (logWake) {

@@ -19,9 +19,15 @@
 #include <thread>
 #include <vector>
 
-// Two test addresses with kinds of their own, as gx_call_kinds.inc gives the real ones.
+// Test addresses with kinds of their own, as gx_call_kinds.inc gives the real ones.
 template <> struct GxWorker::KindOf<0x80000010u> { static constexpr Kind kKind = Kind::NoSync; };
 template <> struct GxWorker::KindOf<0x80000020u> { static constexpr Kind kKind = Kind::SelfDefer; };
+template <> struct GxWorker::KindOf<0x80000030u> { static constexpr Kind kKind = Kind::QueueIfAsked; };
+template <> struct GxWorker::KindOf<0x80000040u> { static constexpr Kind kKind = Kind::NoSyncIfAsked; };
+extern "C" void spm_kpadnosync_set(bool enabled);
+extern "C" void spm_natnosync_set(bool enabled);
+
+extern "C" void spm_invtexq_set(bool enabled);
 
 namespace {
 
@@ -247,6 +253,91 @@ void TestNoSyncAndDeferCall() {
     Check(Same({"get 7", "value 7"}), "nosync: the getter saw the game-side value before the replay");
 }
 
+void Invalidate() { g_log.push_back("invalidate"); }
+
+void TestQueueIfAsked() {
+    SetMode(GxWorker::Mode::Deferred);
+    g_log.clear();
+    // Off: Inline. The pending setter replays first, then the caller runs the call itself.
+    spm_invtexq_set(false);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(3u), "invtexq off: the setter defers itself");
+    Check(!GxWorker::DispatchCall<0x80000030u, &Invalidate>(), "invtexq off: the caller runs it");
+    Check(!GxWorker::Pending(), "invtexq off: the call drained what was pending");
+    Invalidate();
+    Check(Same({"value 3", "invalidate"}), "invtexq off: inline, after the pending record");
+    // On: Queue. Recorded behind the pending setter, nothing runs until the drain.
+    g_log.clear();
+    spm_invtexq_set(true);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(4u), "invtexq on: the setter defers itself");
+    Check(GxWorker::DispatchCall<0x80000030u, &Invalidate>(), "invtexq on: recorded");
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(5u), "invtexq on: a later setter defers itself");
+    Check(g_log.empty(), "invtexq on: nothing ran at the calls");
+    GxWorker::Drain();
+    Check(Same({"value 4", "invalidate", "value 5"}), "invtexq on: replayed in call order");
+    spm_invtexq_set(false);
+}
+
+void ReadPad() { g_log.push_back("pad"); }
+
+void TestNoSyncIfAsked() {
+    SetMode(GxWorker::Mode::Deferred);
+    g_log.clear();
+    spm_kpadnosync_set(false);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(8u), "kpadnosync off: the setter defers itself");
+    Check(!GxWorker::DispatchCall<0x80000040u, &ReadPad>(), "kpadnosync off: the caller runs it");
+    Check(!GxWorker::Pending(), "kpadnosync off: the call drained what was pending");
+    g_log.clear();
+    spm_kpadnosync_set(true);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(9u), "kpadnosync on: the setter defers itself");
+    Check(!GxWorker::DispatchCall<0x80000040u, &ReadPad>(), "kpadnosync on: the caller runs it");
+    Check(GxWorker::Pending(), "kpadnosync on: the record stays pending");
+    GxWorker::Drain();
+    Check(Same({"value 9"}), "kpadnosync on: the record replays at the next drain");
+    spm_kpadnosync_set(false);
+}
+
+// The file classification natnosync relies on (gx_worker.h IsGxLayerFile), on the spellings a
+// build tree can give __FILE__.
+static_assert(GxWorker::IsGxLayerFile("/home/u/spm-nx/wiicompiled/runtime/src/hle/gx/gx_tev.cpp"));
+static_assert(GxWorker::IsGxLayerFile("src/hle/vi.cpp"));
+static_assert(GxWorker::IsGxLayerFile("C:\\dev\\spm-nx\\wiicompiled\\runtime\\src\\hle\\os\\os_cache.cpp"));
+static_assert(GxWorker::IsGxLayerFile("../src/hle/storage/dvd.cpp"));
+static_assert(!GxWorker::IsGxLayerFile("/home/u/spm-nx/wiicompiled/runtime/src/hle/input/kpad.cpp"));
+static_assert(!GxWorker::IsGxLayerFile("src/hle/os/os_interrupt.cpp"));
+static_assert(!GxWorker::IsGxLayerFile("src/hle/gxx.cpp"));
+static_assert(GxWorker::IsGxLayerAddress(0x8028CD50u));   // GXDrawDone
+static_assert(GxWorker::IsGxLayerAddress(0x80280E0Cu));   // VIWaitForRetrace
+static_assert(!GxWorker::IsGxLayerAddress(0x802DE7B4u));  // KPADRead
+static_assert(!GxWorker::IsGxLayerAddress(0x802716B8u));  // OSDisableInterrupts
+
+void TestNatNoSync() {
+    SetMode(GxWorker::Mode::Deferred);
+    g_log.clear();
+    spm_natnosync_set(false);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(10u), "natnosync off: the setter defers itself");
+    GxWorker::NativeSyncPoint<0x802DE7B4u, false>();
+    Check(!GxWorker::Pending(), "natnosync off: a non-GX native drains");
+    g_log.clear();
+    spm_natnosync_set(true);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(11u), "natnosync on: the setter defers itself");
+    GxWorker::NativeSyncPoint<0x802DE7B4u, false>();
+    Check(GxWorker::Pending(), "natnosync on: a non-GX native leaves the record pending");
+    GxWorker::NativeSyncPoint<0x801C7160u, true>();
+    Check(!GxWorker::Pending(), "natnosync on: a native from a GX-layer file still drains");
+    Check(Same({"value 11"}), "natnosync on: the record replayed at the GX-layer native");
+    g_log.clear();
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(12u), "natnosync on: the setter defers itself again");
+    GxWorker::NativeSyncPoint<0x8028CD50u, false>();
+    Check(!GxWorker::Pending(), "natnosync on: an address in the GX library drains whatever its file");
+    Check(Same({"value 12"}), "natnosync on: replayed in order");
+    g_log.clear();
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(13u), "natnosync on: a setter before the pad read");
+    Check(!GxWorker::DispatchCall<0x80000040u, &ReadPad>(), "natnosync on: the pad read runs at the call");
+    Check(GxWorker::Pending(), "natnosync on: the pad read (kpadnosync off) leaves the record pending");
+    GxWorker::Drain();
+    spm_natnosync_set(false);
+}
+
 const char* TestName(uint32_t address) { return address == 0x80001234u ? "GXGetTest" : nullptr; }
 
 void TestDrainCausesPrint() {
@@ -452,6 +543,9 @@ int main() {
     TestFrameBoundaryDrains();
     TestDrainCausesPrint();
     TestNoSyncAndDeferCall();
+    TestQueueIfAsked();
+    TestNoSyncIfAsked();
+    TestNatNoSync();
     TestThreadedOrder();
     TestThreadedContainsThrowAndNestedDrain();
     TestThreadedRingFull();

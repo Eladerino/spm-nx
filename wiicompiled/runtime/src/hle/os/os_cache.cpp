@@ -10,6 +10,7 @@
 #include "ppc_runtime.h"
 #include "runtime_log.h"
 #include "hle/gx/gx_internal.h"
+#include "gx_worker.h"
 
 // ============================================================================
 // Data cache maintenance (DCInvalidate/Flush/Store)
@@ -57,11 +58,34 @@ bool ValidateCacheRange(const char* label, const CacheRange& range)
     return true;
 }
 
-void DcRangeOp(const char* label, uint32_t addr, uint32_t length)
+// `cause` is the op's guest address: the drain cause the [gxworker] lines name it by, and the
+// key the dflushcoal witness recognises DCFlushRange by. These ops are NoSync in
+// gx_call_kinds.inc, so the drain they used to get from the dispatch layer (as Inline calls)
+// happens here instead, at the same point (before anything else runs) unless the dcnosync
+// experiment is on (gx_worker.h).
+void DcRangeOp(uint32_t cause, const char* label, uint32_t addr, uint32_t length)
 {
+    const bool engaged = GxWorker::Engaged();
+    const bool noSync = engaged && GxWorker::DcNoSyncRequested();
+    if (engaged && !noSync) {
+        GxWorker::Drain(cause);
+    }
+
     CacheRange range{};
     if (!NormalizeCacheRange(addr, length, range) || !ValidateCacheRange(label, range)) {
         return;
+    }
+
+    if (noSync) {
+        // Only a range over a screen copy reaches Aurora below (a pending copy downloaded for the
+        // CPU to read, or a reused one retired); Aurora is the worker's while records are pending,
+        // so that range still waits for it. Anything else only marks game-side caches dirty and
+        // bumps the write generations, which is safe alongside the worker.
+        const bool overCopy = EfbCopyDestinationOverlaps(range.start, range.size);
+        if (overCopy) {
+            GxWorker::Drain(cause);
+        }
+        GxWorker::NoteDcNoSync(overCopy);
     }
 
     DownloadEfbCopiesForRange(range.start, range.size);
@@ -71,27 +95,27 @@ void DcRangeOp(const char* label, uint32_t addr, uint32_t length)
 
 extern "C" void DCInvalidateRange_801a1600(uint32_t addr, uint32_t length)
 {
-    DcRangeOp("DCInvalidateRange_801a1600", addr, length);
+    DcRangeOp(0x8026D7D4u, "DCInvalidateRange_801a1600", addr, length);
 }
 
 extern "C" void DCFlushRange_801a162c(uint32_t addr, uint32_t length)
 {
-    DcRangeOp("DCFlushRange_801a162c", addr, length);
+    DcRangeOp(0x8026D800u, "DCFlushRange_801a162c", addr, length);
 }
 
 extern "C" void DCStoreRange_801a165c(uint32_t addr, uint32_t length)
 {
-    DcRangeOp("DCStoreRange_801a165c", addr, length);
+    DcRangeOp(0x8026D830u, "DCStoreRange_801a165c", addr, length);
 }
 
 extern "C" void DCFlushRangeNoSync_801a168c(uint32_t addr, uint32_t length)
 {
-    DcRangeOp("DCFlushRangeNoSync_801a168c", addr, length);
+    DcRangeOp(0x8026D860u, "DCFlushRangeNoSync_801a168c", addr, length);
 }
 
 extern "C" void DCStoreRangeNoSync_801a16b8(uint32_t addr, uint32_t length)
 {
-    DcRangeOp("DCStoreRangeNoSync_801a16b8", addr, length);
+    DcRangeOp(GxWorker::DrainCause::kUnnamedNative, "DCStoreRangeNoSync_801a16b8", addr, length);
 }
 
 PPC_NATIVE_OVERRIDE_VOID(8026D7D4, DCInvalidateRange_801a1600, (uint32_t addr, uint32_t length), (addr, length));

@@ -32,6 +32,7 @@
 // libnx's svc wrappers (switch/kernel/svc.h), declared here so this file need not include <switch.h>
 // (its global Thread and Mutex types collide with the runtime's in a unity build).
 extern "C" uint32_t svcSetThreadCoreMask(uint32_t handle, int32_t coreId, uint32_t affinityMask);
+extern "C" uint32_t threadGetCurHandle(void);  // libnx (switch.h is not included here)
 extern "C" void svcSleepThread(int64_t nanoseconds);
 #endif
 
@@ -118,6 +119,28 @@ SpanMicros g_dstepSpan;
 // state down with the ring's other totals (NoteDcFlushDrained / DcFlushRedundant there).
 std::atomic<bool> g_dflushCoalRequested{false};
 
+// ---- the dcnosync experiment (gx_worker.h) -----------------------------------------------------
+// The switch arrives through spm_dcnosync_set, the same hook pattern; os_cache.cpp's DcRangeOp
+// reads it once per data-cache op and reports what it did through NoteDcNoSync.
+std::atomic<bool> g_dcNoSyncRequested{false};
+
+// ---- the invtexq experiment (gx_worker.h, Kind::QueueIfAsked) ----------------------------------
+// The switch arrives through spm_invtexq_set; the dispatch layer reads it on every such call.
+std::atomic<bool> g_queueIfAskedRequested{false};
+
+// ---- the kpadnosync experiment (gx_worker.h, Kind::NoSyncIfAsked) -----------------------------
+std::atomic<bool> g_noSyncIfAskedRequested{false};
+
+// ---- the natnosync experiment (gx_worker.h, NativeSyncPoint) ----------------------------------
+std::atomic<bool> g_natNoSyncRequested{false};  // Switch: on by default through diag_init
+// This file's own __FILE__ must classify as GX layer, or the classification the registration
+// macros rely on is broken in this build tree and the switch must stay inert.
+constexpr bool kNatNoSyncClassifies = IsGxLayerFile(__FILE__);
+
+// gxspin (on by default; dk_diag gxspin=0 turns it off): the caught-up worker polls briefly
+// before sleeping (WorkerMain). Forwarded through spm_gxspin_set.
+std::atomic<bool> g_gxSpinRequested{true};
+
 namespace {
 
 constexpr size_t kRingBytes = size_t{2} << 20;  // 2 MiB: a heavy frame's worth is about 1 MiB
@@ -146,15 +169,34 @@ void (*g_waitService)() = nullptr;
 // Threaded mode: the hand-off to the worker thread. Heap-allocated and never freed, so nothing
 // destroys a joinable thread at exit (libnx runs static destructors before its own exit hooks).
 constexpr size_t kPublishBytes = 32u << 10;  // the game thread hands over at least this much at once
+//
+// The hand-off itself is lock-free: one 64-bit word holds both ends, published (high half, only the
+// game thread adds to it) and consumed (low half, only the worker adds to it), so either side reads
+// a consistent pair in one load and neither takes the mutex while the other is awake. The mutex and
+// the two condition variables are only for sleeping: the worker sleeps when it has caught up, the
+// game thread sleeps in a drain. Each sleeper raises its flag under the mutex before its last check,
+// and the other side, after its update, notifies only when it sees that flag. All four accesses
+// are seq_cst, so either the sleeper's last check sees the update or the updater sees the flag. The
+// worker notifies under the mutex, so its wake cannot slip in before the game thread waits. The
+// game thread (Publish) notifies without it, since it publishes often and was still queueing on
+// the mutex in round 5; a wake it loses that way is caught by the worker's 1 ms bounded wait.
+// Before this, every 32 KB publish took the mutex the worker also takes after each batch, and on
+// Horizon a contended mutex is a kernel arbitration: 6.7% of the game thread at stock in he2_03
+// (the Nov 7 three-thread profile, svcArbitrateLock under GxWorker::Commit).
 struct Worker {
-    std::mutex mutex;
+    std::mutex mutex;                // sleeping and waking only
     std::condition_variable workCv;  // the game thread published more
     std::condition_variable idleCv;  // the worker caught up with what was published
-    size_t published = 0;            // end of what the worker may replay
-    size_t consumed = 0;             // end of what it has replayed
+    std::atomic<uint64_t> ends{0};   // published << 32 | consumed, both byte offsets into the ring
+    std::atomic<bool> workerAsleep{false};  // the worker is (about to be) waiting on workCv
+    std::atomic<bool> ownerAsleep{false};   // the game thread is (about to be) waiting on idleCv
     bool started = false;
     std::thread thread;
 };
+constexpr uint32_t PublishedEnd(uint64_t ends) noexcept { return static_cast<uint32_t>(ends >> 32); }
+constexpr uint32_t ConsumedEnd(uint64_t ends) noexcept { return static_cast<uint32_t>(ends); }
+constexpr bool CaughtUp(uint64_t ends) noexcept { return PublishedEnd(ends) == ConsumedEnd(ends); }
+static_assert(kRingBytes <= UINT32_MAX, "ring offsets must fit a half of Worker::ends");
 Worker* g_worker = nullptr;
 size_t g_publishedLocal = 0;  // the owner's copy of Worker::published
 
@@ -177,6 +219,11 @@ Stat g_ringFull;
 Stat g_replayErrors;
 Stat g_waitMs;           // Threaded: microseconds the game thread waited on the worker, totalled per drain
 Stat g_unsafeDrains;     // Threaded: a drain reached while one was already waiting; the call ran unsynchronised
+// Written by the worker thread only (its own single writer): the time it spent replaying records,
+// and the 1 ms yields it made to core 2's other threads. Busy against the frame time says whether
+// the worker is saturated (busy close to the frame) or idles while the game thread runs ahead.
+Stat g_workerBusyMicros;
+Stat g_workerYields;
 
 // The dflushcoal witness (gx_worker.h): owner-thread state, kept whether or not the
 // switch is on (it records facts, so a mid-frame flip reads a current witness) and read
@@ -188,6 +235,9 @@ uint64_t g_dflushDrainFrame = 0;     // the interval of the last completed DCFlu
 bool g_dflushDrainSeen = false;      // ... if one has completed at all
 uint64_t g_dflushRecordsAtDrain = 0; // the g_records total at that completion
 Stat g_dflushCoalesced;              // DCFlushRange drains skipped while the switch was on
+Stat g_dcNoSyncFree;                 // dcnosync: data-cache ops that returned without waiting
+Stat g_natNoSyncSkips;              // natnosync: non-GX natives that skipped a drain with records pending
+Stat g_dcNoSyncCopyDrains;           // dcnosync: ops over a screen copy, which still drained
 
 // Records that a DCFlushRange drain has completed in the current production interval:
 // the worker has consumed everything submitted so far, and the record total says what
@@ -299,6 +349,26 @@ bool CanRecord() noexcept {
 
 bool Pending() noexcept { return t_owner && g_write != 0; }
 
+bool DcNoSyncRequested() noexcept { return g_dcNoSyncRequested.load(std::memory_order_relaxed); }
+
+bool QueueIfAskedRequested() noexcept { return g_queueIfAskedRequested.load(std::memory_order_relaxed); }
+
+bool NoSyncIfAskedRequested() noexcept { return g_noSyncIfAskedRequested.load(std::memory_order_relaxed); }
+
+bool NatNoSyncRequested() noexcept {
+    return kNatNoSyncClassifies && g_natNoSyncRequested.load(std::memory_order_relaxed);
+}
+
+void NoteNatNoSync() noexcept { g_natNoSyncSkips.Add(); }
+
+void NoteDcNoSync(bool drained) noexcept {
+    if (drained) {
+        g_dcNoSyncCopyDrains.Add();
+    } else {
+        g_dcNoSyncFree.Add();
+    }
+}
+
 namespace {
 
 // Replays the records in [from, to). Immediate: an exception reaches the caller, as the inline
@@ -325,41 +395,92 @@ void ReplayRange(size_t from, size_t to, bool immediate) {
     }
 }
 
+// The worker's Horizon thread handle while it runs, for the guest profiler (0 = none yet):
+// read by SpmGxWorkerThreadHandle below, written once by the worker as it starts.
+std::atomic<uint32_t> g_workerThreadHandle{0};
+
+// How long the caught-up worker polls before it sleeps (gxspin).
+constexpr auto kWorkerSpin = std::chrono::microseconds(1000);
+
+// Polls Worker::ends for up to kWorkerSpin, yielding every turn. True when work arrived. A
+// millisecond covers the gap between 32 KB batches while the game draws (250 us did not:
+// round 5 saw no change from gxspin), and every turn yields, so core 2's other threads lose
+// nothing to it.
+bool SpinForWork(Worker& w) {
+    const auto until = std::chrono::steady_clock::now() + kWorkerSpin;
+    for (uint32_t turn = 0;; ++turn) {
+        if (!CaughtUp(w.ends.load(std::memory_order_seq_cst))) {
+            return true;
+        }
+#if defined(__SWITCH__)
+        svcSleepThread(-1);  // a yield: returns at once when nothing else on core 2 is ready
+#else
+        std::this_thread::yield();
+#endif
+        if ((turn & 7u) == 7u && std::chrono::steady_clock::now() >= until) {
+            return false;
+        }
+    }
+}
+
 void WorkerMain() {
     t_worker = true;
 #if defined(__SWITCH__)
+    g_workerThreadHandle.store(threadGetCurHandle(), std::memory_order_release);
     // Core 2, beside Aurora's frame worker: the game thread has core 0 and the GX decode thread core
     // 1. Horizon does not time-slice threads of one priority, so a long replay yields (below).
     svcSetThreadCoreMask(0xFFFF8000u, 2, 1u << 2);
 #endif
     Worker& w = *g_worker;
     auto lastBlocked = std::chrono::steady_clock::now();
-    for (;;) {
-        size_t from = 0;
-        size_t to = 0;
-        {
-            std::unique_lock lock(w.mutex);
-            if (w.consumed == w.published) {
-                w.idleCv.notify_all();
-                w.workCv.wait(lock, [&w] { return w.published != w.consumed; });
-                lastBlocked = std::chrono::steady_clock::now();
-            }
-            from = w.consumed;
-            to = w.published;
+    // Wakes a drain waiting for the worker to catch up (Worker's comment has the protocol).
+    const auto wakeOwner = [&w] {
+        if (w.ownerAsleep.load(std::memory_order_seq_cst)) {
+            std::lock_guard lock(w.mutex);
+            w.idleCv.notify_all();
         }
+    };
+    for (;;) {
+        const uint64_t ends = w.ends.load(std::memory_order_seq_cst);
+        if (CaughtUp(ends)) {
+            wakeOwner();
+            // gxspin: while the game thread is recording, the next 32 KB arrives a fraction of a
+            // millisecond later, and sleeping in between makes every publish a kernel wake (the
+            // Nov 7 a01aaf1 profile: 4.6% of the game thread in mutexLock under Publish). So
+            // poll for a short while first, yielding to core 2's other threads on every turn
+            // (Horizon does not time-slice one priority, so a bare spin would hold Aurora's
+            // frame worker off the core).
+            if (g_gxSpinRequested.load(std::memory_order_relaxed) && SpinForWork(w)) {
+                continue;
+            }
+            std::unique_lock lock(w.mutex);
+            w.workerAsleep.store(true, std::memory_order_seq_cst);
+            // Bounded, as the backstop for Publish's unlocked notify: re-checks at least once a
+            // millisecond while asleep.
+            while (!w.workCv.wait_for(lock, std::chrono::milliseconds(1),
+                                      [&w] { return !CaughtUp(w.ends.load(std::memory_order_seq_cst)); })) {
+            }
+            w.workerAsleep.store(false, std::memory_order_relaxed);
+            lastBlocked = std::chrono::steady_clock::now();
+            continue;
+        }
+        const size_t from = ConsumedEnd(ends);
+        const size_t to = PublishedEnd(ends);
 #if defined(__SWITCH__)
         if (std::chrono::steady_clock::now() - lastBlocked > std::chrono::milliseconds(1)) {
             svcSleepThread(-1);  // YieldType_WithoutCoreMigration: let core 2's other threads run
             lastBlocked = std::chrono::steady_clock::now();
+            g_workerYields.Add();
         }
 #endif
+        const auto replayStart = std::chrono::steady_clock::now();
         ReplayRange(from, to, false);
-        {
-            std::lock_guard lock(w.mutex);
-            w.consumed = to;
-            if (w.consumed == w.published) {
-                w.idleCv.notify_all();
-            }
+        g_workerBusyMicros.Add(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - replayStart).count()));
+        // Only the worker adds to the low half, and it never passes the high half, so no carry.
+        const uint64_t after = w.ends.fetch_add(to - from, std::memory_order_seq_cst) + (to - from);
+        if (CaughtUp(after)) {
+            wakeOwner();
         }
     }
 }
@@ -387,12 +508,17 @@ void Publish() {
     if (g_write == g_publishedLocal) {
         return;
     }
-    {
-        std::lock_guard lock(g_worker->mutex);
-        g_worker->published = g_write;
-    }
+    Worker& w = *g_worker;
+    w.ends.fetch_add(static_cast<uint64_t>(g_write - g_publishedLocal) << 32, std::memory_order_seq_cst);
     g_publishedLocal = g_write;
-    g_worker->workCv.notify_one();
+    if (w.workerAsleep.load(std::memory_order_seq_cst)) {
+        // Notified without the mutex. Taking it here made the game thread queue behind the
+        // worker's own sleep and wake on every hand-off (round 5, 11205df: still 6.3% of the
+        // game thread in mutexLock under Publish). The price is a wake that can land between
+        // the worker's last check and its wait; its wait is a 1 ms wait_for, so that costs at
+        // most a millisecond, never a hang.
+        w.workCv.notify_one();
+    }
 }
 
 // Waits until the worker has replayed everything published, servicing the guest's timing about once
@@ -402,22 +528,29 @@ void Publish() {
 uint64_t WaitForWorker() {
     Worker& w = *g_worker;
     const auto start = std::chrono::steady_clock::now();
+    const auto caughtUp = [&w] { return CaughtUp(w.ends.load(std::memory_order_seq_cst)); };
     bool waited = false;
-    std::unique_lock lock(w.mutex);
-    while (w.consumed != w.published) {
+    if (!caughtUp()) {
         waited = true;
-        if (w.idleCv.wait_for(lock, std::chrono::milliseconds(1), [&w] { return w.consumed == w.published; })) {
-            break;
+        std::unique_lock lock(w.mutex);
+        w.ownerAsleep.store(true, std::memory_order_seq_cst);
+        while (!caughtUp()) {
+            // The 1 ms timeout is also the backstop: a wake that went astray costs a millisecond.
+            if (w.idleCv.wait_for(lock, std::chrono::milliseconds(1), caughtUp)) {
+                break;
+            }
+            if (g_waitService != nullptr) {
+                lock.unlock();
+                g_waitService();
+                lock.lock();
+            }
         }
-        if (g_waitService != nullptr) {
-            lock.unlock();
-            g_waitService();
-            lock.lock();
-        }
+        w.ownerAsleep.store(false, std::memory_order_relaxed);
     }
-    w.consumed = 0;
-    w.published = 0;
-    lock.unlock();
+    // Rewind. The worker has replayed everything published and only adds to `ends` after a
+    // replay, so nothing races this store: at most it is reading the caught-up pair on its way to
+    // sleep, and the rewound pair is just as caught up.
+    w.ends.store(0, std::memory_order_seq_cst);
     g_publishedLocal = 0;
     if (waited) {
         const uint64_t micros =
@@ -706,6 +839,8 @@ void PrintDstepWindow(uint64_t firstFrame, uint64_t lastFrame) {
                  shown.second > 0.0 ? 1000.0 / shown.second : 0.0);
 }
 
+extern "C" void spm_vi_retrace_stats(uint64_t* retraces, uint64_t* sleeperWakes, uint64_t* idleNanos);  // vi.cpp
+
 void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*nameOf)(uint32_t)) {
     if (lastFrame < firstFrame) {
         return;
@@ -717,7 +852,14 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t peak = g_peakBytes.exchange(0, std::memory_order_relaxed);
     const uint64_t waitMicros = g_waitMs.TakeDelta();
     const uint64_t unsafeDrains = g_unsafeDrains.TakeDelta();
+    const uint64_t workerBusyMicros = g_workerBusyMicros.TakeDelta();
+    const uint64_t workerYields = g_workerYields.TakeDelta();
     const uint64_t coalesced = g_dflushCoalesced.TakeDelta();
+    const uint64_t dcFree = g_dcNoSyncFree.TakeDelta();
+    const uint64_t dcCopyDrains = g_dcNoSyncCopyDrains.TakeDelta();
+    const uint64_t natSkips = g_natNoSyncSkips.TakeDelta();
+    uint64_t viRetraces = 0, viSleeperWakes = 0, viIdleNanos = 0;
+    spm_vi_retrace_stats(&viRetraces, &viSleeperWakes, &viIdleNanos);
     const Mode mode = CurrentMode();
     if (mode == Mode::Off && records == 0) {
         return;
@@ -737,6 +879,32 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                      static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
                      static_cast<double>(waitMicros) / 1000.0 / frames, static_cast<unsigned long long>(unsafeDrains));
     }
+    if (workerBusyMicros != 0) {
+        // Measurement only: the worker's own replay time (wall clock inside ReplayRange, so a
+        // preemption by core 2's other threads counts as busy) and its voluntary yields.
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: worker replayed records %.2f ms a frame, %.1f yields a frame\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(workerBusyMicros) / 1000.0 / frames, static_cast<double>(workerYields) / frames);
+    }
+    if (natSkips != 0) {
+        // natnosync's scoreboard: non-GX natives reached with records pending that ran without
+        // draining. The wait-by-cause lines below say where the wait landed instead.
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: natnosync ran %.1f non-GX natives a frame without waiting\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(natSkips) / frames);
+    }
+    if (viRetraces != 0) {
+        // Retrace pacing (vi.cpp): about 2 sleeper wakes a frame with the game thread mostly
+        // idle means the game paces itself to every other retrace; about 1 means it is late.
+        std::fprintf(stderr,
+                     "[vi] frames %llu-%llu: %.2f retraces a frame, %.2f found a VIWaitForRetrace sleeper, "
+                     "guest idle %.2f ms a frame\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(viRetraces) / frames, static_cast<double>(viSleeperWakes) / frames,
+                     static_cast<double>(viIdleNanos) / 1e6 / frames);
+    }
     if (coalesced != 0) {
         // dflushcoal's scoreboard (gx_worker.h): flushes that returned without draining
         // in this window. They are in no drain count and no wait figure above or below;
@@ -746,6 +914,17 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                      "[gxworker] frames %llu-%llu: dflushcoal skipped %llu DCFlushRange drains (%.1f a frame)\n",
                      static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
                      static_cast<unsigned long long>(coalesced), static_cast<double>(coalesced) / frames);
+    }
+    if (dcFree != 0 || dcCopyDrains != 0) {
+        // dcnosync's scoreboard (gx_worker.h): data-cache ops that marked their range dirty
+        // without waiting for the worker, and the ones over a screen copy that still waited
+        // (those also appear in the drain and wait-by-cause figures, as before).
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: dcnosync ran %llu data-cache ops without waiting (%.1f a frame), "
+                     "%llu over screen copies waited as before\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<unsigned long long>(dcFree), static_cast<double>(dcFree) / frames,
+                     static_cast<unsigned long long>(dcCopyDrains));
     }
 
     // What made pending records run, busiest first, as drains a frame. Immediate mode's per-record
@@ -857,4 +1036,41 @@ extern "C" void spm_dstep_set(bool enabled) {
 // next DCFlushRange.
 extern "C" void spm_dflushcoal_set(bool enabled) {
     GxWorker::g_dflushCoalRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The dcnosync experiment's hook from the deko diag layer, declared and forwarded exactly
+// like the others: diag_init hands it the dk_diag.txt value once, diag_set forwards every
+// flip. DcRangeOp reads it on each data-cache op, so a flip lands on the next one.
+extern "C" void spm_dcnosync_set(bool enabled) {
+    GxWorker::g_dcNoSyncRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The gxspin switch's hook, the same pattern: the worker reads it each time it catches up.
+extern "C" void spm_gxspin_set(bool enabled) {
+    GxWorker::g_gxSpinRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The kpadnosync experiment's hook, the same pattern: NoSyncIfAsked calls read it at dispatch.
+extern "C" void spm_kpadnosync_set(bool enabled) {
+    GxWorker::g_noSyncIfAskedRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The natnosync experiment's hook, the same pattern: NativeSyncPoint reads it at every non-GX
+// native. Logs once if this build tree's file classification fails, since then it stays inert.
+extern "C" void spm_natnosync_set(bool enabled) {
+    GxWorker::g_natNoSyncRequested.store(enabled, std::memory_order_relaxed);
+    if (enabled && !GxWorker::kNatNoSyncClassifies) {
+        std::fprintf(stderr, "[gxworker] natnosync stays off: this build's file paths do not classify (%s)\n", __FILE__);
+    }
+}
+
+// The guest profiler (guest_profiler.cpp) samples the GX worker on the same ticks as the game
+// and decode threads; 0 while no worker thread has started.
+extern "C" uint32_t SpmGxWorkerThreadHandle(void) {
+    return GxWorker::g_workerThreadHandle.load(std::memory_order_acquire);
+}
+
+// The invtexq experiment's hook, the same pattern: QueueIfAsked calls read it at dispatch.
+extern "C" void spm_invtexq_set(bool enabled) {
+    GxWorker::g_queueIfAskedRequested.store(enabled, std::memory_order_relaxed);
 }
