@@ -79,10 +79,6 @@ struct TranslatedFunctionInfo {
     void (*rawCpuInvoker)(CpuContext*) = nullptr;
     bool mustRemainDynamicallyDispatchable = true;
     FunctionKind kind = FunctionKind::BaseTranslated;
-    // A native whose host signature takes no CpuContext and whose file promises it never writes the
-    // caller's guest registers (only its return value): its raw calls skip the r14-r31 save and
-    // restore (ShouldPreserveNonvolatileGprsForRawCpuCall).
-    bool leavesGuestGprs = false;
 };
 
 struct RawDispatchRecord {
@@ -277,7 +273,7 @@ private:
 inline constexpr uint32_t kOSLoadContextAddress = 0x8026DEF4u;
 
 inline bool ShouldPreserveNonvolatileGprsForRawCpuCall(const TranslatedFunctionInfo* info) noexcept {
-    return info->kind == FunctionKind::Native && !info->leavesGuestGprs && info->address != kOSLoadContextAddress;
+    return info->kind == FunctionKind::Native && info->address != kOSLoadContextAddress;
 }
 
 inline uint32_t NonvolatileFprGuardMaskFor(const TranslatedFunctionInfo* info) noexcept {
@@ -610,9 +606,7 @@ inline void InvokeDirectCpu(CpuContext* ctx) {
     }
 
     if constexpr (KnownTypedNativeCpuCall<Target>::kAvailable) {
-        // The typed catalog is GX overrides only (native_cpu_calls.inc): host signatures with no
-        // CpuContext, from hle/gx/, which write no guest register but the return value, so the
-        // r14-r31 save and restore other natives get is skipped (GxWorker::IsGxDirFile).
+        PpcNonvolatileGprGuard gprGuard(cpu);
         if (TryGetCpuContext() != cpu) {
             CpuContextScope scope(cpu);
             KnownTypedNativeCpuCall<Target>::Invoke(cpu);
@@ -716,8 +710,7 @@ public:
                   uint32_t priority = 0,
                   uint64_t moduleId = 0,
                   void (*rawCpuInvoker)(CpuContext*) = nullptr,
-                  bool mustRemainDynamicallyDispatchable = true,
-                  bool leavesGuestGprs = false)
+                  bool mustRemainDynamicallyDispatchable = true)
     {
         TranslatedFunctionInfo info;
         info.address = address;
@@ -731,7 +724,6 @@ public:
         info.rawCpuInvoker = rawCpuInvoker;
         info.mustRemainDynamicallyDispatchable = mustRemainDynamicallyDispatchable;
         info.kind = kind;
-        info.leavesGuestGprs = kind == FunctionKind::Native && leavesGuestGprs;
         TranslatedFunctionRegistry::Register(std::move(info));
     }
 
@@ -815,8 +807,7 @@ public:
                   uint32_t priority = 0,
                   uint64_t moduleId = 0,
                   void (*rawCpuInvoker)(CpuContext*) = nullptr,
-                  bool mustRemainDynamicallyDispatchable = true,
-                  bool /*leavesGuestGprs: a CpuContext native can write any register*/ = false)
+                  bool mustRemainDynamicallyDispatchable = true)
     {
         TranslatedFunctionInfo info;
         info.address = address;
@@ -920,11 +911,11 @@ struct CountedAbiRawCpuThunk {
 };
 
 #define REGISTER_NATIVE_FUNCTION(address, fn) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke, true, GxWorker::IsGxDirFile(__FILE__))
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke)
 
 #define REGISTER_NATIVE_FUNCTION_AS(address, fn, pretty_name) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_named_, __COUNTER__)(address, pretty_name, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke, true, GxWorker::IsGxDirFile(__FILE__))
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_named_, __COUNTER__)(address, pretty_name, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke)
 
 // REGISTER_NATIVE_FUNCTION for PPC_NATIVE_OVERRIDE: the same entry, with a raw invoker that counts.
 #define REGISTER_COUNTED_NATIVE_FUNCTION(address, fn) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &CountedAbiRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke, true, GxWorker::IsGxDirFile(__FILE__))
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &CountedAbiRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke)
