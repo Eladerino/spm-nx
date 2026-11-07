@@ -299,12 +299,13 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   nothing to flip at.
   All of the page's switches start off except the GX decode thread (cpthread, on core 1)
   and the GX worker thread (gxthread), which are on unless turned off there; zcull also
-  starts on. One Performance row is an experiment rather than a way to play: the
-  message-string memo (`pmsmemo`) makes the patcher that rewrites the game's instruction
-  lines for the controller check each already-patched line at the address it remembers,
-  and only re-search the lines whose check fails, instead of sweeping all of MEM1 for
-  every line on every area change; the wording patched is identical either way, and its
-  `[pmsmemo]` log line counts the checks, the fallbacks and the searches still run.
+  starts on. The message-string memo (`pmsmemo`) is on by default too: it makes the
+  patcher that rewrites the game's instruction lines for the controller check each
+  already-patched line at the address it remembers, and only re-search the lines whose
+  check fails, instead of sweeping all of MEM1 for every line on every area change. That
+  sweep was the ~600 ms frame on every door. The wording patched is identical either way,
+  `pmsmemo=0` brings the old patcher back, and the `[pmsmemo]` log line counts the checks,
+  the fallbacks and the searches still run.
   Three of them are the
   experimental GX call-record switches, best left as they are for play:
 
