@@ -516,9 +516,15 @@ uint32_t ExtractTvFormat(uint32_t tvMode) {
 // frame is only late. Reads only, nothing the guest sees changes.
 static std::atomic<uint64_t> s_viRetraces{0};
 static std::atomic<uint64_t> s_viSleeperWakes{0};
-extern "C" void spm_vi_retrace_stats(uint64_t* retraces, uint64_t* sleeperWakes) {
+extern "C" void spm_vi_retrace_stats(uint64_t* retraces, uint64_t* sleeperWakes, uint64_t* idleNanos) {
     *retraces = s_viRetraces.exchange(0, std::memory_order_relaxed);
     *sleeperWakes = s_viSleeperWakes.exchange(0, std::memory_order_relaxed);
+    // Guest idle over the window (the scheduler had no guest thread to run): with frame time
+    // quantised to retraces, idle per frame is what shows a game-thread saving below one retrace.
+    static uint64_t s_lastIdle = 0;
+    const uint64_t idle = OS_HLE_IdleNanosTotal();
+    *idleNanos = idle - s_lastIdle;
+    s_lastIdle = idle;
 }
 
 // Re-entry guard to prevent AdvanceRetrace calling itself via OSWakeupThread -> SelectThread

@@ -845,7 +845,7 @@ void PrintDstepWindow(uint64_t firstFrame, uint64_t lastFrame) {
                  shown.second > 0.0 ? 1000.0 / shown.second : 0.0);
 }
 
-extern "C" void spm_vi_retrace_stats(uint64_t* retraces, uint64_t* sleeperWakes);  // vi.cpp
+extern "C" void spm_vi_retrace_stats(uint64_t* retraces, uint64_t* sleeperWakes, uint64_t* idleNanos);  // vi.cpp
 
 void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*nameOf)(uint32_t)) {
     if (lastFrame < firstFrame) {
@@ -864,8 +864,8 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t dcFree = g_dcNoSyncFree.TakeDelta();
     const uint64_t dcCopyDrains = g_dcNoSyncCopyDrains.TakeDelta();
     const uint64_t natSkips = g_natNoSyncSkips.TakeDelta();
-    uint64_t viRetraces = 0, viSleeperWakes = 0;
-    spm_vi_retrace_stats(&viRetraces, &viSleeperWakes);
+    uint64_t viRetraces = 0, viSleeperWakes = 0, viIdleNanos = 0;
+    spm_vi_retrace_stats(&viRetraces, &viSleeperWakes, &viIdleNanos);
     const Mode mode = CurrentMode();
     if (mode == Mode::Off && records == 0) {
         return;
@@ -905,9 +905,11 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
         // Retrace pacing (vi.cpp): about 2 sleeper wakes a frame with the game thread mostly
         // idle means the game paces itself to every other retrace; about 1 means it is late.
         std::fprintf(stderr,
-                     "[vi] frames %llu-%llu: %.2f retraces a frame, %.2f found a VIWaitForRetrace sleeper\n",
+                     "[vi] frames %llu-%llu: %.2f retraces a frame, %.2f found a VIWaitForRetrace sleeper, "
+                     "guest idle %.2f ms a frame\n",
                      static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
-                     static_cast<double>(viRetraces) / frames, static_cast<double>(viSleeperWakes) / frames);
+                     static_cast<double>(viRetraces) / frames, static_cast<double>(viSleeperWakes) / frames,
+                     static_cast<double>(viIdleNanos) / 1e6 / frames);
     }
     if (coalesced != 0) {
         // dflushcoal's scoreboard (gx_worker.h): flushes that returned without draining
