@@ -123,6 +123,12 @@ GX_WORKER_KIND(0x8028EE14u, SelfDefer);  // GXLoadTexObjPreLoaded (runs the Load
 // hardware and the decode thread already does.
 GX_WORKER_KIND(0x80291458u, Queue);      // GXCallDisplayList
 
+// GXInvalidateTexAll (gx_texture.cpp): its whole body is aurora's GXInvalidateTexAll, one
+// GX_LOAD_AURORA_INVALIDATE_TEX_ALL write into the FIFO, so it qualifies for Queue (void, no
+// arguments, touches only GX state, and the replay keeps it in order with the draws and loads
+// around it). Held behind the invtexq experiment until hardware has shown it is identical.
+GX_WORKER_KIND(0x8028F198u, QueueIfAsked);  // GXInvalidateTexAll
+
 // Data-cache ops (os_cache.cpp). NoSync so the dispatch layer leaves the drain to their body,
 // DcRangeOp, which drains first exactly as an Inline call would, unless the dcnosync experiment
 // is on: then only an op over a screen copy drains (gx_worker.h has the reasoning).

@@ -123,6 +123,10 @@ std::atomic<bool> g_dflushCoalRequested{false};
 // reads it once per data-cache op and reports what it did through NoteDcNoSync.
 std::atomic<bool> g_dcNoSyncRequested{false};
 
+// ---- the invtexq experiment (gx_worker.h, Kind::QueueIfAsked) ----------------------------------
+// The switch arrives through spm_invtexq_set; the dispatch layer reads it on every such call.
+std::atomic<bool> g_queueIfAskedRequested{false};
+
 namespace {
 
 constexpr size_t kRingBytes = size_t{2} << 20;  // 2 MiB: a heavy frame's worth is about 1 MiB
@@ -182,6 +186,11 @@ Stat g_ringFull;
 Stat g_replayErrors;
 Stat g_waitMs;           // Threaded: microseconds the game thread waited on the worker, totalled per drain
 Stat g_unsafeDrains;     // Threaded: a drain reached while one was already waiting; the call ran unsynchronised
+// Written by the worker thread only (its own single writer): the time it spent replaying records,
+// and the 1 ms yields it made to core 2's other threads. Busy against the frame time says whether
+// the worker is saturated (busy close to the frame) or idles while the game thread runs ahead.
+Stat g_workerBusyMicros;
+Stat g_workerYields;
 
 // The dflushcoal witness (gx_worker.h): owner-thread state, kept whether or not the
 // switch is on (it records facts, so a mid-frame flip reads a current witness) and read
@@ -308,6 +317,8 @@ bool Pending() noexcept { return t_owner && g_write != 0; }
 
 bool DcNoSyncRequested() noexcept { return g_dcNoSyncRequested.load(std::memory_order_relaxed); }
 
+bool QueueIfAskedRequested() noexcept { return g_queueIfAskedRequested.load(std::memory_order_relaxed); }
+
 void NoteDcNoSync(bool drained) noexcept {
     if (drained) {
         g_dcNoSyncCopyDrains.Add();
@@ -368,9 +379,13 @@ void WorkerMain() {
         if (std::chrono::steady_clock::now() - lastBlocked > std::chrono::milliseconds(1)) {
             svcSleepThread(-1);  // YieldType_WithoutCoreMigration: let core 2's other threads run
             lastBlocked = std::chrono::steady_clock::now();
+            g_workerYields.Add();
         }
 #endif
+        const auto replayStart = std::chrono::steady_clock::now();
         ReplayRange(from, to, false);
+        g_workerBusyMicros.Add(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - replayStart).count()));
         {
             std::lock_guard lock(w.mutex);
             w.consumed = to;
@@ -734,6 +749,8 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t peak = g_peakBytes.exchange(0, std::memory_order_relaxed);
     const uint64_t waitMicros = g_waitMs.TakeDelta();
     const uint64_t unsafeDrains = g_unsafeDrains.TakeDelta();
+    const uint64_t workerBusyMicros = g_workerBusyMicros.TakeDelta();
+    const uint64_t workerYields = g_workerYields.TakeDelta();
     const uint64_t coalesced = g_dflushCoalesced.TakeDelta();
     const uint64_t dcFree = g_dcNoSyncFree.TakeDelta();
     const uint64_t dcCopyDrains = g_dcNoSyncCopyDrains.TakeDelta();
@@ -755,6 +772,14 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                      "drains\n",
                      static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
                      static_cast<double>(waitMicros) / 1000.0 / frames, static_cast<unsigned long long>(unsafeDrains));
+    }
+    if (workerBusyMicros != 0) {
+        // Measurement only: the worker's own replay time (wall clock inside ReplayRange, so a
+        // preemption by core 2's other threads counts as busy) and its voluntary yields.
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: worker replayed records %.2f ms a frame, %.1f yields a frame\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(workerBusyMicros) / 1000.0 / frames, static_cast<double>(workerYields) / frames);
     }
     if (coalesced != 0) {
         // dflushcoal's scoreboard (gx_worker.h): flushes that returned without draining
@@ -894,4 +919,9 @@ extern "C" void spm_dflushcoal_set(bool enabled) {
 // flip. DcRangeOp reads it on each data-cache op, so a flip lands on the next one.
 extern "C" void spm_dcnosync_set(bool enabled) {
     GxWorker::g_dcNoSyncRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The invtexq experiment's hook, the same pattern: QueueIfAsked calls read it at dispatch.
+extern "C" void spm_invtexq_set(bool enabled) {
+    GxWorker::g_queueIfAskedRequested.store(enabled, std::memory_order_relaxed);
 }

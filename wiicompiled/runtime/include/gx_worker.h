@@ -32,7 +32,11 @@
 
 namespace GxWorker {
 
-enum class Kind : uint8_t { Inline, Queue, SelfDefer, NoSync };
+enum class Kind : uint8_t { Inline, Queue, SelfDefer, NoSync, QueueIfAsked };
+
+// QueueIfAsked: a call that qualifies for Queue but is held back behind the invtexq experiment
+// (Switch Diagnostics "invtexq"): Queue while the switch is on, Inline while it is off.
+bool QueueIfAskedRequested() noexcept;
 
 enum class Mode : uint8_t {
     Off = 0,
@@ -339,6 +343,13 @@ inline bool DispatchCall(A... args) {
         Fn(args...);
         return true;
     } else if constexpr (kind == Kind::NoSync) {
+        return false;
+    } else if constexpr (kind == Kind::QueueIfAsked) {
+        static_assert(ReturnsVoid(Fn), "only void calls can be queued");
+        if (QueueIfAskedRequested() && CanRecord() && RecordCall<Fn>(args...)) {
+            return true;
+        }
+        Drain(Address);
         return false;
     } else {
         Drain(Address);

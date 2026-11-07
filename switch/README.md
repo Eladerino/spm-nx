@@ -243,6 +243,11 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   that path calls into Aurora, which the worker owns while records are pending.
   Default off; with Performance timers on the `[gxworker]` block counts the ops
   that skipped the wait and the ones over screen copies that still drained.
+  A third, queue texture invalidates (`invtexq`), records `GXInvalidateTexAll`
+  for the worker like any other queued setter instead of draining for it: its
+  body is a single command in the FIFO, so the replay keeps it in order. With
+  Performance timers on, the `[gxworker]` block also reports how many ms a
+  frame the worker spent replaying records, whatever switches are on.
   One more switch has no row at all, and is a measuring instrument rather than a way
   to play: automatic A/B (`abtoggle=<switch>` in dk_diag.txt, or
   `abtoggle=<switch>:<windows>`) flips the named switch on and off by itself at the

@@ -851,11 +851,18 @@ inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
     } else {
         static_assert(!std::is_invocable_v<decltype(Target), CpuContext*>,
                       "only typed overrides can be queued or defer themselves");
+        if constexpr (kind == GxWorker::Kind::QueueIfAsked) {
+            // Inline unless the invtexq experiment is on (gx_worker.h); then the Queue path below.
+            if (!GxWorker::QueueIfAskedRequested()) {
+                GxWorker::Drain(Address);
+                return false;
+            }
+        }
         if (!GxWorker::CanRecord()) {
             GxWorker::Drain(Address);
             return false;
         }
-        if constexpr (kind == GxWorker::Kind::Queue) {
+        if constexpr (kind == GxWorker::Kind::Queue || kind == GxWorker::Kind::QueueIfAsked) {
             using Signature = std::remove_pointer_t<decltype(Target)>;
             static_assert(GxWorker::ReturnsVoid(Target), "only void calls can be queued");
             const bool recorded = std::apply([](auto... args) { return GxWorker::RecordCall<Target>(args...); },
