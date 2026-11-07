@@ -404,8 +404,9 @@ void diag_init() {
     // A kpadnosync=1 in dk_diag.txt arms the KPADRead no-wait experiment from the start; the
     // dispatch layer reads the switch on every call, so the menu flips it live.
     if (g_diag.kpadNoSync) spm_kpadnosync_set(true);
-    // A natnosync=1 arms the general no-wait experiment from the start, the same way.
-    if (g_diag.natNoSync) spm_natnosync_set(true);
+    // natnosync is on unless dk_diag.txt says natnosync=0 (the Diag default), so its state is
+    // forwarded either way.
+    spm_natnosync_set(g_diag.natNoSync);
     if (g_diag.sqrtVerify) spm_sqrtverify_set(true);
     // gxspin is on unless dk_diag.txt says gxspin=0 (the Diag default), so its state is
     // forwarded either way; the worker reads it each time it catches up.

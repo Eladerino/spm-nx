@@ -258,7 +258,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   next real sync point. It covers the per-frame WPAD/WUD status reads too,
   since with `KPADRead` alone the wait moved to `WPADIsDpdEnabled`.
   Since the wait only moved each time, a fifth, non-graphics calls without
-  waiting (`natnosync`, default off), relaxes the whole class: every native
+  waiting (`natnosync`, on by default), relaxes the whole class: every native
   outside the GX layer (judged by the file that registers it and by its
   address being outside the SDK's GX and VI libraries) runs without waiting,
   so the wait lands on the next GX sync point. With Performance timers on,
@@ -266,7 +266,8 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   the `kpadnosync` reads. In the November 7 stock A/B it took he2_03 from
   27.8 to 36.3 fps and he1_05 from 29.0 to 36.7: the worker's replay now
   overlaps the game's own work, and the only wait left is `GXCopyDisp`
-  (0.4 to 2 ms). Default off until a full play pass with sound.
+  (0.4 to 2 ms). On by default since Brandon's play pass the same day;
+  `natnosync=0` turns it off.
   The GX worker short poll (`gxspin`, on by default) has the caught-up worker
   poll for about 1 ms, yielding, before it sleeps, so the publishes that
   arrive while the game draws are not each a kernel wake. The game thread
