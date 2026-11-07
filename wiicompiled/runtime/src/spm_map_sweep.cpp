@@ -585,6 +585,11 @@ struct Sweep {
 namespace {
 std::atomic<int> g_saveStatus{0};
 std::atomic<bool> g_infiniteHp{false}, g_maxCoins{false}, g_infiniteFlip{false}, g_maxTokens{false};
+// "godmode" (dk_diag / Diagnostics, default off): Infinite HP for test runs, set from
+// dk_diag.txt so it holds from boot without a trip through the Cheats page. Kept apart
+// from g_infiniteHp so the Cheats toggle and the Prepare graphics sweep's Quiet() can
+// turn their own copy off without turning this one off.
+std::atomic<bool> g_godMode{false};
 
 void SaveAndCheatsStep(CpuContext* cpu) {
     uint32_t seq = 0;
@@ -593,10 +598,11 @@ void SaveAndCheatsStep(CpuContext* cpu) {
         g_saveStatus = 2;
         RT_LOGF(RT_TAG_RUNTIME, "save anywhere: saved\n");
     }
-    if (!g_infiniteHp && !g_maxCoins && !g_infiniteFlip && !g_maxTokens) return;
+    const bool infiniteHp = g_infiniteHp || g_godMode.load(std::memory_order_relaxed);
+    if (!infiniteHp && !g_maxCoins && !g_infiniteFlip && !g_maxTokens) return;
     const uint32_t pouch = CallGuest(cpu, 0x8014B594, 0);                                // pouchGetPtr
     if (!Memory::Contains(pouch, 0x20)) return;
-    if (g_infiniteHp) Memory::Write32(pouch + 0x0C, Memory::Read32(pouch + 0x10));        // hp = max hp
+    if (infiniteHp) Memory::Write32(pouch + 0x0C, Memory::Read32(pouch + 0x10));        // hp = max hp
     if (g_maxCoins) Memory::Write32(pouch + 0x1C, 999);
     if (g_infiniteFlip) Memory::Write32(pouch + 0x14, 10);                                // flip meter: pouchResetFlip's full value
     if (g_maxTokens) CallGuest(cpu, 0x8014EEF8, 9999);                                    // pouchSetArcadeTokens (caps at 9999)
@@ -1657,3 +1663,5 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
     }
     return false;
 }
+
+extern "C" void spm_godmode_set(bool enabled) { SpmMapSweep::g_godMode.store(enabled, std::memory_order_relaxed); }

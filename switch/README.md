@@ -212,6 +212,10 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   indirect-call override (`REGISTER_INDIRECT_CALL_OVERRIDE`, abi_bridge.h),
   which routes function-pointer calls to a wrapper without registering a
   native, so no fresh translation is needed.
+  God mode (`godmode`, default off) is for test runs: HP stays full from boot,
+  like the Infinite HP cheat, but it lives in dk_diag.txt (`godmode=1`), so it
+  is already on after every boot and scripted runs never drive the Cheats page.
+  It is separate from the cheat, so turning either off leaves the other on.
   Another Performance row is a reserved switch rather than a way to play: AXFX
   Hi reverb native (`axfxnative`) currently does nothing. The game's
   AXFXReverbHiExp reverb callback is reached through a function table, and the
