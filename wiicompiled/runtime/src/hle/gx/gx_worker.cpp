@@ -132,7 +132,7 @@ std::atomic<bool> g_queueIfAskedRequested{false};
 std::atomic<bool> g_noSyncIfAskedRequested{false};
 
 // ---- the natnosync experiment (gx_worker.h, NativeSyncPoint) ----------------------------------
-std::atomic<bool> g_natNoSyncRequested{false};
+std::atomic<bool> g_natNoSyncRequested{false};  // Switch: on by default through diag_init
 // This file's own __FILE__ must classify as GX layer, or the classification the registration
 // macros rely on is broken in this build tree and the switch must stay inert.
 constexpr bool kNatNoSyncClassifies = IsGxLayerFile(__FILE__);
