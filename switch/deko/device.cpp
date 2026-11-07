@@ -68,6 +68,10 @@ extern "C" void spm_dcnosync_set(bool enabled);
 // way: diag_init and diag_set forward the "invtexq" switch to it.
 extern "C" void spm_invtexq_set(bool enabled);
 
+// The runtime's KPADRead no-wait experiment (gx_worker.cpp), declared here the same way:
+// diag_init and diag_set forward the "kpadnosync" switch to it.
+extern "C" void spm_kpadnosync_set(bool enabled);
+
 // The debug server (source/spm_debug_server.cpp), declared here the same way: diag_init
 // hands it the dkserver switch once the file has been read.
 extern "C" void spm_debug_server_boot(bool enabled);
@@ -118,7 +122,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"dlprobe", &Diag::dlProbe},      {"gxdedup", &Diag::gxDedup},      {"axfxnative", &Diag::axfxNative},
     {"dstep", &Diag::dstep},          {"dflushcoal", &Diag::dflushCoal}, {"vcache", &Diag::vcache},
     {"abtoggle", &Diag::abToggle},    {"wiisuppress", &Diag::wiiSuppress}, {"dcnosync", &Diag::dcNoSync},
-    {"invtexq", &Diag::invTexQ},
+    {"invtexq", &Diag::invTexQ},       {"kpadnosync", &Diag::kpadNoSync},
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
 };
 
@@ -388,6 +392,9 @@ void diag_init() {
     // Queued texture invalidates are on unless dk_diag.txt says invtexq=0 (the Diag default);
     // the dispatch layer reads the switch on every call, so the menu flips it live.
     if (g_diag.invTexQ) spm_invtexq_set(true);
+    // A kpadnosync=1 in dk_diag.txt arms the KPADRead no-wait experiment from the start; the
+    // dispatch layer reads the switch on every call, so the menu flips it live.
+    if (g_diag.kpadNoSync) spm_kpadnosync_set(true);
     // A vcache=1 in dk_diag.txt arms Aurora's decoded display-list vertex cache from
     // the start. The cache lives inside Aurora's decode path and reads the switch on
     // every list, so this only sets the initial state; the menu flips it live.
@@ -433,6 +440,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "dflushcoal")) spm_dflushcoal_set(on);
     else if (!std::strcmp(key, "dcnosync")) spm_dcnosync_set(on);
     else if (!std::strcmp(key, "invtexq")) spm_invtexq_set(on);
+    else if (!std::strcmp(key, "kpadnosync")) spm_kpadnosync_set(on);
     else if (!std::strcmp(key, "padrec")) spm_input_record_set(on);
     else if (!std::strcmp(key, "padreplay")) {
         // Arming passes the file padreplay_parse_params took from dk_diag.txt (a live

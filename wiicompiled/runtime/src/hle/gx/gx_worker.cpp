@@ -128,6 +128,9 @@ std::atomic<bool> g_dcNoSyncRequested{false};
 // The switch arrives through spm_invtexq_set; the dispatch layer reads it on every such call.
 std::atomic<bool> g_queueIfAskedRequested{false};
 
+// ---- the kpadnosync experiment (gx_worker.h, Kind::NoSyncIfAsked) -----------------------------
+std::atomic<bool> g_noSyncIfAskedRequested{false};
+
 namespace {
 
 constexpr size_t kRingBytes = size_t{2} << 20;  // 2 MiB: a heavy frame's worth is about 1 MiB
@@ -336,6 +339,8 @@ bool Pending() noexcept { return t_owner && g_write != 0; }
 bool DcNoSyncRequested() noexcept { return g_dcNoSyncRequested.load(std::memory_order_relaxed); }
 
 bool QueueIfAskedRequested() noexcept { return g_queueIfAskedRequested.load(std::memory_order_relaxed); }
+
+bool NoSyncIfAskedRequested() noexcept { return g_noSyncIfAskedRequested.load(std::memory_order_relaxed); }
 
 void NoteDcNoSync(bool drained) noexcept {
     if (drained) {
@@ -955,6 +960,11 @@ extern "C" void spm_dflushcoal_set(bool enabled) {
 // flip. DcRangeOp reads it on each data-cache op, so a flip lands on the next one.
 extern "C" void spm_dcnosync_set(bool enabled) {
     GxWorker::g_dcNoSyncRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The kpadnosync experiment's hook, the same pattern: NoSyncIfAsked calls read it at dispatch.
+extern "C" void spm_kpadnosync_set(bool enabled) {
+    GxWorker::g_noSyncIfAskedRequested.store(enabled, std::memory_order_relaxed);
 }
 
 // The guest profiler (guest_profiler.cpp) samples the GX worker on the same ticks as the game

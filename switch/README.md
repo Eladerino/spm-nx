@@ -252,6 +252,10 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   top of `dcnosync`); `invtexq=0` turns it off. With
   Performance timers on, the `[gxworker]` block also reports how many ms a
   frame the worker spent replaying records, whatever switches are on.
+  A fourth, controller read without waiting (`kpadnosync`, default off), lets
+  `KPADRead`, a non-GX native and the last drain left in a frame once the
+  others are on, run without waiting for the worker; the wait moves to the
+  next real sync point.
   One more switch has no row at all, and is a measuring instrument rather than a way
   to play: automatic A/B (`abtoggle=<switch>` in dk_diag.txt, or
   `abtoggle=<switch>:<windows>`) flips the named switch on and off by itself at the
