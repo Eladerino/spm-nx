@@ -47,6 +47,7 @@ extern "C" void spm_gxskip_set(bool enabled);
 extern "C" void spm_dlprobe_set(bool enabled);
 // The runtime's AXFX Hi reverb native experiment (ax_effects.cpp), declared here the same
 // way: diag_init and diag_set forward the "axfxnative" switch to it.
+extern "C" void spm_reverboff_set(bool enabled);  // ax_effects.cpp, the same pattern
 extern "C" void spm_axfx_native_set(bool enabled);
 // The runtime's GX setter dedup experiment (gx_vertex.cpp), declared here the same way:
 // diag_init and diag_set forward the "gxdedup" switch to it.
@@ -126,6 +127,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},  {"dkserver", &Diag::dkServer},
     {"rttlog", &Diag::rttLog},        {"pmsmemo", &Diag::pmsMemo},      {"gxskip", &Diag::gxSkip},
     {"dlprobe", &Diag::dlProbe},      {"gxdedup", &Diag::gxDedup},      {"axfxnative", &Diag::axfxNative},
+    {"reverboff", &Diag::reverbOff},
     {"dstep", &Diag::dstep},          {"dflushcoal", &Diag::dflushCoal}, {"vcache", &Diag::vcache},
     {"abtoggle", &Diag::abToggle},    {"wiisuppress", &Diag::wiiSuppress}, {"dcnosync", &Diag::dcNoSync},
     {"invtexq", &Diag::invTexQ},       {"kpadnosync", &Diag::kpadNoSync},
@@ -383,6 +385,7 @@ void diag_init() {
     // the start. The wrapper reads the switch on every callback, so this only sets the
     // initial state; the menu and the command channel flip it live.
     if (g_diag.axfxNative) spm_axfx_native_set(true);
+    if (g_diag.reverbOff) spm_reverboff_set(true);
     // A gxdedup=1 in dk_diag.txt arms the runtime's GX setter dedup experiment from the start.
     if (g_diag.gxDedup) spm_gxdedup_set(true);
     // A dstep=1 in dk_diag.txt arms the runtime's double-step mode from the start. The
@@ -449,6 +452,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "gxskip")) spm_gxskip_set(on);
     else if (!std::strcmp(key, "dlprobe")) spm_dlprobe_set(on);
     else if (!std::strcmp(key, "axfxnative")) spm_axfx_native_set(on);
+    else if (!std::strcmp(key, "reverboff")) spm_reverboff_set(on);
     else if (!std::strcmp(key, "gxdedup")) spm_gxdedup_set(on);
     else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
     else if (!std::strcmp(key, "dflushcoal")) spm_dflushcoal_set(on);
