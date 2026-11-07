@@ -262,7 +262,11 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   outside the GX layer (judged by the file that registers it and by its
   address being outside the SDK's GX and VI libraries) runs without waiting,
   so the wait lands on the next GX sync point. With Performance timers on,
-  the `[gxworker]` block counts the natives that skipped a wait.
+  the `[gxworker]` block counts the natives that skipped a wait. It includes
+  the `kpadnosync` reads. In the November 7 stock A/B it took he2_03 from
+  27.8 to 36.3 fps and he1_05 from 29.0 to 36.7: the worker's replay now
+  overlaps the game's own work, and the only wait left is `GXCopyDisp`
+  (0.4 to 2 ms). Default off until a full play pass with sound.
   The GX worker short poll (`gxspin`, on by default) has the caught-up worker
   poll for about 1 ms, yielding, before it sleeps, so the publishes that
   arrive while the game draws are not each a kernel wake. The game thread

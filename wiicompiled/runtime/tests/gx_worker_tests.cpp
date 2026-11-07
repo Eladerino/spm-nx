@@ -330,6 +330,11 @@ void TestNatNoSync() {
     GxWorker::NativeSyncPoint<0x8028CD50u, false>();
     Check(!GxWorker::Pending(), "natnosync on: an address in the GX library drains whatever its file");
     Check(Same({"value 12"}), "natnosync on: replayed in order");
+    g_log.clear();
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(13u), "natnosync on: a setter before the pad read");
+    Check(!GxWorker::DispatchCall<0x80000040u, &ReadPad>(), "natnosync on: the pad read runs at the call");
+    Check(GxWorker::Pending(), "natnosync on: the pad read (kpadnosync off) leaves the record pending");
+    GxWorker::Drain();
     spm_natnosync_set(false);
 }
 
