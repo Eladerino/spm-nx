@@ -255,7 +255,11 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   A fourth, controller read without waiting (`kpadnosync`, default off), lets
   `KPADRead`, a non-GX native and the last drain left in a frame once the
   others are on, run without waiting for the worker; the wait moves to the
-  next real sync point.
+  next real sync point. It covers the per-frame WPAD/WUD status reads too,
+  since with `KPADRead` alone the wait moved to `WPADIsDpdEnabled`.
+  The GX worker short poll (`gxspin`, on by default) has the caught-up worker
+  poll for about 250 us, yielding, before it sleeps, so the publishes that
+  arrive while the game draws are not each a kernel wake.
   One more switch has no row at all, and is a measuring instrument rather than a way
   to play: automatic A/B (`abtoggle=<switch>` in dk_diag.txt, or
   `abtoggle=<switch>:<windows>`) flips the named switch on and off by itself at the

@@ -137,6 +137,17 @@ GX_WORKER_KIND(0x8028F198u, QueueIfAsked);  // GXInvalidateTexAll
 // it pass lets the game thread run on to the next sync point (GXCopyDisp at the latest) while the
 // worker finishes. Held behind the kpadnosync experiment until hardware shows where the wait goes.
 GX_WORKER_KIND(0x802DE7B4u, NoSyncIfAsked);  // KPADRead
+// The rest of the per-frame input reads (wpad.cpp), under the same switch: with KPADRead alone
+// relaxed, hardware showed its whole wait move to the next of these (WPADIsDpdEnabled), so they
+// go together. Each only reads the controller state or answers a constant; none touches GX.
+// The rarer WPAD calls that complete a guest callback (Init, SetDataFormat, ControlMotor,
+// GetInfoAsync, StopSimpleSync) stay Inline.
+GX_WORKER_KIND(0x802CCBB4u, NoSyncIfAsked);  // WPADGetStatus
+GX_WORKER_KIND(0x802D0874u, NoSyncIfAsked);  // WPADGetDpdSensitivity
+GX_WORKER_KIND(0x802D087Cu, NoSyncIfAsked);  // WPADIsDpdEnabled
+GX_WORKER_KIND(0x802D97B0u, NoSyncIfAsked);  // WUDGetStatus
+GX_WORKER_KIND(0x802CE3CCu, NoSyncIfAsked);  // WPADGetDataFormat
+GX_WORKER_KIND(0x802CE208u, NoSyncIfAsked);  // WPADProbe
 
 // Data-cache ops (os_cache.cpp). NoSync so the dispatch layer leaves the drain to their body,
 // DcRangeOp, which drains first exactly as an Inline call would, unless the dcnosync experiment
