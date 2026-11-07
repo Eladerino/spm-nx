@@ -3251,10 +3251,21 @@ void ReleaseControllers() noexcept {
 // Aurora reports which of that screen's parts are drawn (UserData/button_icons/<style>/marker<N>,
 // tools/make-button-icons.py): marker 1 = the remote (the screen is up), 2-6 = the Move, Flip, Jump, Use a Pixl and
 // Use Tippi bubbles.
+// How long the panel stays up, fading out, after the game's screen starts
+// closing: the game's screen keeps closing after this panel would drop, and
+// in that window the remote's button faces sit uncovered (the model body
+// already renders as nothing). Holding the opaque card through a short fade
+// covers the window. The panel never blocks game input, so the hold costs
+// no input feel.
+constexpr int kControlsPanelCloseHoldMs = 250;
+
 void DrawControlsPanel() {
     const int style = aurora_button_icon_style();
     static double shownSince = -1.0;
     static bool seen[8] = {};  // actions shown since the screen opened (bubbles slide in one after another)
+    static double closeStarted = -1.0;   // the close hold: when it began (ImGui time, shownSince's clock); -1 = not closing
+    static float closeStartAlpha = 0.0f; // the fade-in alpha the panel had when the hold began
+    static int closeStyle = -1;          // the style the closing panel was showing
     // The screen is up while the remote's body (marker 1) and its Move bubble (marker 2, on every version of it) are
     // drawn: either alone also appears elsewhere, and a panel opened there could not be closed (issue #7).
     const bool screenUp = aurora_button_icon_marker(1) && (seen[2] || aurora_button_icon_marker(2));
@@ -3268,18 +3279,53 @@ void DrawControlsPanel() {
         dismissed = true;
     prevButtons = buttons;
     if (!screenUp) dismissed = false;
-    if (style < 0 || style > 2 || !screenUp || dismissed) {
+    const auto dropPanel = [&]() {
         if (shownSince >= 0.0)  // closed: what it showed (diagnoses a missing callout)
-            std::fprintf(stderr, "[controls panel] style %d showed move %d flip %d jump %d pixl %d tippi %d\n", style, seen[2],
-                         seen[3], seen[4], seen[5], seen[6]);
+            std::fprintf(stderr, "[controls panel] style %d showed move %d flip %d jump %d pixl %d tippi %d\n",
+                         closeStarted >= 0.0 ? closeStyle : style, seen[2], seen[3], seen[4], seen[5], seen[6]);
         shownSince = -1.0;
+        closeStarted = -1.0;
         std::fill(std::begin(seen), std::end(seen), false);
+    };
+    // States: up (screenUp), closing (the hold below), down (shownSince < 0).
+    // A dismissal drops at once, as shipped: it reaches the drop through the
+    // dismissed term, never through the hold. An invalid style likewise drops
+    // at once, and a panel that never showed never enters the hold at all.
+    bool holdDrawing = false;
+    if (!dismissed && style >= 0 && style <= 2 && !screenUp && shownSince >= 0.0 &&
+        (closeStarted < 0.0 || style == closeStyle)) {
+        const double now = ImGui::GetTime();
+        if (closeStarted < 0.0) {
+            closeStarted = now;
+            closeStyle = style;
+            closeStartAlpha = std::min(1.0f, static_cast<float>(now - shownSince) / 0.2f);
+        }
+        if ((now - closeStarted) * 1000.0 < kControlsPanelCloseHoldMs)
+            holdDrawing = true;  // keep drawing this frame, fading out (alpha below)
+        else {
+            dropPanel();  // the [controls panel] line fires here, at the final drop
+            return;
+        }
+    } else if (style < 0 || style > 2 || !screenUp || dismissed) {
+        dropPanel();
         return;
+    }
+    if (!holdDrawing && closeStarted >= 0.0) {
+        // The screen re-opened during the hold: cancel it and resume as up,
+        // restarting the fade-in clock at the captured alpha so a panel that
+        // was still fading in resumes from there instead of jumping ahead.
+        shownSince = ImGui::GetTime() - static_cast<double>(closeStartAlpha) * 0.2;
+        closeStarted = -1.0;
     }
     if (shownSince < 0.0) shownSince = ImGui::GetTime();
     for (int m = 2; m <= 6; ++m) seen[m] = seen[m] || aurora_button_icon_marker(m);
     seen[7] = true;  // Stylish moves (shake): not on the game's screen, always worth showing
-    const float alpha = std::min(1.0f, static_cast<float>(ImGui::GetTime() - shownSince) / 0.2f);  // fade in
+    const float alpha =
+        holdDrawing
+            ? closeStartAlpha *
+                  std::max(0.0f, 1.0f - static_cast<float>((ImGui::GetTime() - closeStarted) * 1000.0 /
+                                                           kControlsPanelCloseHoldMs))  // the hold's fade out
+            : std::min(1.0f, static_cast<float>(ImGui::GetTime() - shownSince) / 0.2f);  // fade in
 
     struct Sprite { ImTextureID id{}; float aspect = 1.0f; };
     struct Style {
