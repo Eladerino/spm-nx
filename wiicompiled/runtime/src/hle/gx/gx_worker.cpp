@@ -32,6 +32,7 @@
 // libnx's svc wrappers (switch/kernel/svc.h), declared here so this file need not include <switch.h>
 // (its global Thread and Mutex types collide with the runtime's in a unity build).
 extern "C" uint32_t svcSetThreadCoreMask(uint32_t handle, int32_t coreId, uint32_t affinityMask);
+extern "C" uint32_t threadGetCurHandle(void);  // libnx (switch.h is not included here)
 extern "C" void svcSleepThread(int64_t nanoseconds);
 #endif
 
@@ -353,9 +354,14 @@ void ReplayRange(size_t from, size_t to, bool immediate) {
     }
 }
 
+// The worker's Horizon thread handle while it runs, for the guest profiler (0 = none yet):
+// read by SpmGxWorkerThreadHandle below, written once by the worker as it starts.
+std::atomic<uint32_t> g_workerThreadHandle{0};
+
 void WorkerMain() {
     t_worker = true;
 #if defined(__SWITCH__)
+    g_workerThreadHandle.store(threadGetCurHandle(), std::memory_order_release);
     // Core 2, beside Aurora's frame worker: the game thread has core 0 and the GX decode thread core
     // 1. Horizon does not time-slice threads of one priority, so a long replay yields (below).
     svcSetThreadCoreMask(0xFFFF8000u, 2, 1u << 2);
@@ -919,6 +925,12 @@ extern "C" void spm_dflushcoal_set(bool enabled) {
 // flip. DcRangeOp reads it on each data-cache op, so a flip lands on the next one.
 extern "C" void spm_dcnosync_set(bool enabled) {
     GxWorker::g_dcNoSyncRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The guest profiler (guest_profiler.cpp) samples the GX worker on the same ticks as the game
+// and decode threads; 0 while no worker thread has started.
+extern "C" uint32_t SpmGxWorkerThreadHandle(void) {
+    return GxWorker::g_workerThreadHandle.load(std::memory_order_acquire);
 }
 
 // The invtexq experiment's hook, the same pattern: QueueIfAsked calls read it at dispatch.
