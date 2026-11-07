@@ -23,6 +23,8 @@
 template <> struct GxWorker::KindOf<0x80000010u> { static constexpr Kind kKind = Kind::NoSync; };
 template <> struct GxWorker::KindOf<0x80000020u> { static constexpr Kind kKind = Kind::SelfDefer; };
 template <> struct GxWorker::KindOf<0x80000030u> { static constexpr Kind kKind = Kind::QueueIfAsked; };
+template <> struct GxWorker::KindOf<0x80000040u> { static constexpr Kind kKind = Kind::NoSyncIfAsked; };
+extern "C" void spm_kpadnosync_set(bool enabled);
 
 extern "C" void spm_invtexq_set(bool enabled);
 
@@ -274,6 +276,25 @@ void TestQueueIfAsked() {
     spm_invtexq_set(false);
 }
 
+void ReadPad() { g_log.push_back("pad"); }
+
+void TestNoSyncIfAsked() {
+    SetMode(GxWorker::Mode::Deferred);
+    g_log.clear();
+    spm_kpadnosync_set(false);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(8u), "kpadnosync off: the setter defers itself");
+    Check(!GxWorker::DispatchCall<0x80000040u, &ReadPad>(), "kpadnosync off: the caller runs it");
+    Check(!GxWorker::Pending(), "kpadnosync off: the call drained what was pending");
+    g_log.clear();
+    spm_kpadnosync_set(true);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(9u), "kpadnosync on: the setter defers itself");
+    Check(!GxWorker::DispatchCall<0x80000040u, &ReadPad>(), "kpadnosync on: the caller runs it");
+    Check(GxWorker::Pending(), "kpadnosync on: the record stays pending");
+    GxWorker::Drain();
+    Check(Same({"value 9"}), "kpadnosync on: the record replays at the next drain");
+    spm_kpadnosync_set(false);
+}
+
 const char* TestName(uint32_t address) { return address == 0x80001234u ? "GXGetTest" : nullptr; }
 
 void TestDrainCausesPrint() {
@@ -480,6 +501,7 @@ int main() {
     TestDrainCausesPrint();
     TestNoSyncAndDeferCall();
     TestQueueIfAsked();
+    TestNoSyncIfAsked();
     TestThreadedOrder();
     TestThreadedContainsThrowAndNestedDrain();
     TestThreadedRingFull();

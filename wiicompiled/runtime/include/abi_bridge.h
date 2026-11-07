@@ -848,6 +848,11 @@ inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
         return false;
     } else if constexpr (kind == GxWorker::Kind::NoSync) {
         return false;
+    } else if constexpr (kind == GxWorker::Kind::NoSyncIfAsked) {
+        if (!GxWorker::NoSyncIfAskedRequested()) {
+            GxWorker::Drain(Address);
+        }
+        return false;
     } else {
         static_assert(!std::is_invocable_v<decltype(Target), CpuContext*>,
                       "only typed overrides can be queued or defer themselves");

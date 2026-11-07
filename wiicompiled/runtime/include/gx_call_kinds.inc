@@ -129,6 +129,15 @@ GX_WORKER_KIND(0x80291458u, Queue);      // GXCallDisplayList
 // around it). Held behind the invtexq experiment until hardware has shown it is identical.
 GX_WORKER_KIND(0x8028F198u, QueueIfAsked);  // GXInvalidateTexAll
 
+// KPADRead (kpad.cpp): not a GX call at all. It reads the controller (the HID sample, the
+// recorder, the menu and startup-cover input filters, the input bindings) and writes the guest's
+// KPADStatus; nothing in it reads or writes GX or Aurora state, so the records pending at it lose
+// nothing by staying pending. With dcnosync and invtexq on it is the one drain left in a frame at
+// stock (8-11 ms, the worker's end-of-frame tail), and SPM reads the pad after drawing, so letting
+// it pass lets the game thread run on to the next sync point (GXCopyDisp at the latest) while the
+// worker finishes. Held behind the kpadnosync experiment until hardware shows where the wait goes.
+GX_WORKER_KIND(0x802DE7B4u, NoSyncIfAsked);  // KPADRead
+
 // Data-cache ops (os_cache.cpp). NoSync so the dispatch layer leaves the drain to their body,
 // DcRangeOp, which drains first exactly as an Inline call would, unless the dcnosync experiment
 // is on: then only an op over a screen copy drains (gx_worker.h has the reasoning).

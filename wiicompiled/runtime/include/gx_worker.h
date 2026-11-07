@@ -32,7 +32,11 @@
 
 namespace GxWorker {
 
-enum class Kind : uint8_t { Inline, Queue, SelfDefer, NoSync, QueueIfAsked };
+enum class Kind : uint8_t { Inline, Queue, SelfDefer, NoSync, QueueIfAsked, NoSyncIfAsked };
+
+// NoSyncIfAsked: a non-GX native held back behind the kpadnosync experiment (Switch Diagnostics
+// "kpadnosync"): NoSync while the switch is on, Inline while it is off.
+bool NoSyncIfAskedRequested() noexcept;
 
 // QueueIfAsked: a call that qualifies for Queue but is held back behind the invtexq experiment
 // (Switch Diagnostics "invtexq"): Queue while the switch is on, Inline while it is off.
@@ -343,6 +347,11 @@ inline bool DispatchCall(A... args) {
         Fn(args...);
         return true;
     } else if constexpr (kind == Kind::NoSync) {
+        return false;
+    } else if constexpr (kind == Kind::NoSyncIfAsked) {
+        if (!NoSyncIfAskedRequested()) {
+            Drain(Address);
+        }
         return false;
     } else if constexpr (kind == Kind::QueueIfAsked) {
         static_assert(ReturnsVoid(Fn), "only void calls can be queued");
