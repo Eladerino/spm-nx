@@ -169,9 +169,11 @@ constexpr size_t kPublishBytes = 32u << 10;  // the game thread hands over at le
 // a consistent pair in one load and neither takes the mutex while the other is awake. The mutex and
 // the two condition variables are only for sleeping: the worker sleeps when it has caught up, the
 // game thread sleeps in a drain. Each sleeper raises its flag under the mutex before its last check,
-// and the other side, after its update, takes the mutex to notify only when it sees that flag. All
-// four accesses are seq_cst, so either the sleeper's last check sees the update or the updater sees
-// the flag (and then its notify, taken under the mutex, cannot slip in before the sleeper waits).
+// and the other side, after its update, notifies only when it sees that flag. All four accesses
+// are seq_cst, so either the sleeper's last check sees the update or the updater sees the flag. The
+// worker notifies under the mutex, so its wake cannot slip in before the game thread waits. The
+// game thread (Publish) notifies without it, since it publishes often and was still queueing on
+// the mutex in round 5; a wake it loses that way is caught by the worker's 1 ms bounded wait.
 // Before this, every 32 KB publish took the mutex the worker also takes after each batch, and on
 // Horizon a contended mutex is a kernel arbitration: 6.7% of the game thread at stock in he2_03
 // (the Nov 7 three-thread profile, svcArbitrateLock under GxWorker::Commit).
@@ -385,9 +387,12 @@ void ReplayRange(size_t from, size_t to, bool immediate) {
 std::atomic<uint32_t> g_workerThreadHandle{0};
 
 // How long the caught-up worker polls before it sleeps (gxspin).
-constexpr auto kWorkerSpin = std::chrono::microseconds(250);
+constexpr auto kWorkerSpin = std::chrono::microseconds(1000);
 
-// Polls Worker::ends for up to kWorkerSpin, yielding every turn. True when work arrived.
+// Polls Worker::ends for up to kWorkerSpin, yielding every turn. True when work arrived. A
+// millisecond covers the gap between 32 KB batches while the game draws (250 us did not:
+// round 5 saw no change from gxspin), and every turn yields, so core 2's other threads lose
+// nothing to it.
 bool SpinForWork(Worker& w) {
     const auto until = std::chrono::steady_clock::now() + kWorkerSpin;
     for (uint32_t turn = 0;; ++turn) {
@@ -437,7 +442,11 @@ void WorkerMain() {
             }
             std::unique_lock lock(w.mutex);
             w.workerAsleep.store(true, std::memory_order_seq_cst);
-            w.workCv.wait(lock, [&w] { return !CaughtUp(w.ends.load(std::memory_order_seq_cst)); });
+            // Bounded, as the backstop for Publish's unlocked notify: re-checks at least once a
+            // millisecond while asleep.
+            while (!w.workCv.wait_for(lock, std::chrono::milliseconds(1),
+                                      [&w] { return !CaughtUp(w.ends.load(std::memory_order_seq_cst)); })) {
+            }
             w.workerAsleep.store(false, std::memory_order_relaxed);
             lastBlocked = std::chrono::steady_clock::now();
             continue;
@@ -490,7 +499,11 @@ void Publish() {
     w.ends.fetch_add(static_cast<uint64_t>(g_write - g_publishedLocal) << 32, std::memory_order_seq_cst);
     g_publishedLocal = g_write;
     if (w.workerAsleep.load(std::memory_order_seq_cst)) {
-        std::lock_guard lock(w.mutex);
+        // Notified without the mutex. Taking it here made the game thread queue behind the
+        // worker's own sleep and wake on every hand-off (round 5, 11205df: still 6.3% of the
+        // game thread in mutexLock under Publish). The price is a wake that can land between
+        // the worker's last check and its wait; its wait is a 1 ms wait_for, so that costs at
+        // most a millisecond, never a hang.
         w.workCv.notify_one();
     }
 }
