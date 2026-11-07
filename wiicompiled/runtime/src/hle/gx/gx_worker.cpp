@@ -169,12 +169,6 @@ void (*g_waitService)() = nullptr;
 // Threaded mode: the hand-off to the worker thread. Heap-allocated and never freed, so nothing
 // destroys a joinable thread at exit (libnx runs static destructors before its own exit hooks).
 constexpr size_t kPublishBytes = 32u << 10;  // the game thread hands over at least this much at once
-// The gxpubsmall experiment: hand over every 4 KB instead, so the worker starts on a frame's
-// records sooner and less of the frame is left to replay when the game thread drains at
-// GXCopyDisp (about 3 ms a frame at stock in 3D, with the worker about half idle). Each extra
-// publish is one atomic add plus a notify, which the lock-free hand-off made cheap.
-constexpr size_t kPublishBytesSmall = 4u << 10;
-std::atomic<size_t> g_publishBytes{kPublishBytes};
 //
 // The hand-off itself is lock-free: one 64-bit word holds both ends, published (high half, only the
 // game thread adds to it) and consumed (low half, only the worker adds to it), so either side reads
@@ -655,7 +649,7 @@ void Commit() {
     g_reserved = false;
     if (CurrentMode() == Mode::Immediate) {
         Drain(DrainCause::kCommit);
-    } else if (Threaded() && g_write - g_publishedLocal >= g_publishBytes.load(std::memory_order_relaxed)) {
+    } else if (Threaded() && g_write - g_publishedLocal >= kPublishBytes) {
         Publish();
     }
 }
@@ -1063,11 +1057,6 @@ extern "C" void spm_kpadnosync_set(bool enabled) {
 
 // The natnosync experiment's hook, the same pattern: NativeSyncPoint reads it at every non-GX
 // native. Logs once if this build tree's file classification fails, since then it stays inert.
-extern "C" void spm_gxpubsmall_set(bool enabled) {
-    GxWorker::g_publishBytes.store(enabled ? GxWorker::kPublishBytesSmall : GxWorker::kPublishBytes,
-                                   std::memory_order_relaxed);
-}
-
 extern "C" void spm_natnosync_set(bool enabled) {
     GxWorker::g_natNoSyncRequested.store(enabled, std::memory_order_relaxed);
     if (enabled && !GxWorker::kNatNoSyncClassifies) {
