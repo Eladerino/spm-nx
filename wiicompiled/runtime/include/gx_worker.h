@@ -264,13 +264,6 @@ constexpr bool IsGxLayerFile(const char* path) {
            PathHas(path, "storage/dvd.cpp");
 }
 
-// The GX overrides proper (src/hle/gx/): typed ones there write no guest register but their return
-// value (no fiber switch mid-call: the GXBegin timing service defers them, and runs interrupt
-// callbacks on a private context, guest_interrupt_context.h), so their raw calls skip the r14-r31
-// save and restore (abi_bridge.h TranslatedFunctionInfo::leavesGuestGprs). Measured on Nov 7:
-// about 28,000 GX override calls a frame at stock.
-constexpr bool IsGxDirFile(const char* path) { return PathHas(path, "hle/gx/"); }
-
 // US Rev 0 library bounds (us0_names.tsv): __VIRetraceHandler .. DEMOPadInit, and
 // __GXDefaultTexRegionCallback .. FindContainHeap_ (the MEM heap library starts there).
 constexpr bool IsGxLayerAddress(uint32_t address) {
