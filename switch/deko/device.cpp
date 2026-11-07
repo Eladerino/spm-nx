@@ -364,9 +364,11 @@ void diag_init() {
     // the start. It only skips the one measured tutorial tuple, so boot and the title
     // are untouched either way.
     if (g_diag.wiiSuppress) spm_wii_suppress_set(true);
-    // A pmsmemo=1 in dk_diag.txt arms the runtime's message-string patch memo from the
-    // start, so the session's first area changes already run memoised passes.
-    if (g_diag.pmsMemo) spm_pmsmemo_set(true);
+    // The runtime's message-string patch memo, on unless dk_diag.txt says pmsmemo=0, armed
+    // from the start so the session's first area changes already run memoised passes. The
+    // runtime's own default stays off (other ports never call this), so the boot value is
+    // always handed over, on or off.
+    spm_pmsmemo_set(g_diag.pmsMemo);
     // A dkserver=1 in dk_diag.txt starts the debug server (TCP 6543, LAN only, no auth).
     // With the switch off this call returns at once: no socket, no thread.
     spm_debug_server_boot(g_diag.dkServer);

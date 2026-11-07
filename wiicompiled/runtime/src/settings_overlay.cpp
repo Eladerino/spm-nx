@@ -3807,8 +3807,10 @@ void PatchMessageStrings() {
 
 // ---- pmsmemo: the message-string patch memo (Switch Diagnostics "pmsmemo") ----
 //
-// An experiment, off unless the Diagnostics page (or dk_diag.txt) says so; Draw() runs
-// PatchMessageStrings above whenever it is off, and that function is untouched. A pass of
+// Off in the runtime unless spm_pmsmemo_set turns it on; the Switch build does so by
+// default (Diag::pmsMemo, pmsmemo=0 in dk_diag.txt turns it off), since the Nov 7 door
+// test measured the search-every-pass patcher at one ~600-650 ms frame per door. Draw()
+// runs PatchMessageStrings above whenever it is off, and that function is untouched. A pass of
 // PatchMessageStrings costs a std::search of MEM1 (24 MiB) per line, and the Run-4 guest
 // profile put it at 3.6% self on the game thread over a transit-heavy route: the lines
 // and their addresses are stable pass to pass, so the searches mostly re-prove what the
@@ -4228,7 +4230,7 @@ constexpr DiagRow kDiagRows[] = {
     {"profile", "Guest profiler (profile)", nullptr,
      "Samples the game thread, and the GX decode thread and GX worker while they run, 200 times a second while on. Turning it off prints the most-sampled guest functions and every sampled stack to the log (switch/scripts/profile-report.py names them)."},
     {"pmsmemo", "Message-string memo (pmsmemo)", nullptr,
-     "An experiment: the game's instruction lines are rewritten for the controller by searching all of MEM1 for each line on every area change. While this is on, the patcher instead remembers where each line was patched and checks the bytes at that address first, only searching again for a line whose check fails. The wording patched is identical either way; with Performance timers or any trace on, a [pmsmemo] line in the log counts the checks, the fallbacks and the searches still run. For measuring the saving on routes with many area changes; leave off for normal play. Takes effect at once."},
+     "On by default (pmsmemo=0 turns it off): the game's instruction lines are rewritten for the controller by searching all of MEM1 for each line on every area change. While this is on, the patcher instead remembers where each line was patched and checks the bytes at that address first, only searching again for a line whose check fails. The wording patched is identical either way; with Performance timers or any trace on, a [pmsmemo] line in the log counts the checks, the fallbacks and the searches still run. Without it each door or area change spends about 600 ms on those searches in one frame, the hitch you see going through a door. Takes effect at once."},
     {"fps30", "30 fps cap (fps30)", nullptr,
      "Caps the picture at 30 frames a second while you play: gameplay frames are shown one in two, each held for two screen refreshes, while the game itself keeps its own pace. For a locked 30 in places that cannot hold 60, or for curiosity. Takes effect at once; the title screen and the Prepare graphics sweep are not capped."},
     {"gxskip", "GX suppression spike (gxskip)", nullptr,
