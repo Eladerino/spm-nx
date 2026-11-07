@@ -241,7 +241,9 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   thread and does not drain at all. Only a range over a remembered `GXCopyTex`
   destination (doors, the 3D flip, character switches) still drains, because
   that path calls into Aurora, which the worker owns while records are pending.
-  Default off; with Performance timers on the `[gxworker]` block counts the ops
+  On by default since the November 7 stock A/B (he2_03 +16%, he1_05 +11%,
+  with 3D flips, doors and map changes checked on hardware); `dcnosync=0` in
+  dk_diag.txt turns it off. With Performance timers on the `[gxworker]` block counts the ops
   that skipped the wait and the ones over screen copies that still drained.
   A third, queue texture invalidates (`invtexq`), records `GXInvalidateTexAll`
   for the worker like any other queued setter instead of draining for it: its

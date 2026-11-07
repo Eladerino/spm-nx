@@ -199,7 +199,7 @@ void PrintDstepWindow(uint64_t firstFrame, uint64_t lastFrame);
 // count, so a hardware A/B reads the DCFlushRange wait with the switch off against
 // the same wait plus the skip count with it on.
 
-// ---- the dcnosync experiment (Switch Diagnostics "dcnosync"; state in gx_worker.cpp) ---------
+// ---- dcnosync (Switch Diagnostics "dcnosync", on by default on Switch; state in gx_worker.cpp) -
 //
 // The data-cache ops (DCInvalidateRange, DCFlushRange, DCStoreRange, DCFlushRangeNoSync) are
 // NoSync in gx_call_kinds.inc, and their shared body (os_cache.cpp DcRangeOp) decides about the
