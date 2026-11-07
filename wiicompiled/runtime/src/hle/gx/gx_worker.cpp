@@ -156,15 +156,32 @@ void (*g_waitService)() = nullptr;
 // Threaded mode: the hand-off to the worker thread. Heap-allocated and never freed, so nothing
 // destroys a joinable thread at exit (libnx runs static destructors before its own exit hooks).
 constexpr size_t kPublishBytes = 32u << 10;  // the game thread hands over at least this much at once
+//
+// The hand-off itself is lock-free: one 64-bit word holds both ends, published (high half, only the
+// game thread adds to it) and consumed (low half, only the worker adds to it), so either side reads
+// a consistent pair in one load and neither takes the mutex while the other is awake. The mutex and
+// the two condition variables are only for sleeping: the worker sleeps when it has caught up, the
+// game thread sleeps in a drain. Each sleeper raises its flag under the mutex before its last check,
+// and the other side, after its update, takes the mutex to notify only when it sees that flag. All
+// four accesses are seq_cst, so either the sleeper's last check sees the update or the updater sees
+// the flag (and then its notify, taken under the mutex, cannot slip in before the sleeper waits).
+// Before this, every 32 KB publish took the mutex the worker also takes after each batch, and on
+// Horizon a contended mutex is a kernel arbitration: 6.7% of the game thread at stock in he2_03
+// (the Nov 7 three-thread profile, svcArbitrateLock under GxWorker::Commit).
 struct Worker {
-    std::mutex mutex;
+    std::mutex mutex;                // sleeping and waking only
     std::condition_variable workCv;  // the game thread published more
     std::condition_variable idleCv;  // the worker caught up with what was published
-    size_t published = 0;            // end of what the worker may replay
-    size_t consumed = 0;             // end of what it has replayed
+    std::atomic<uint64_t> ends{0};   // published << 32 | consumed, both byte offsets into the ring
+    std::atomic<bool> workerAsleep{false};  // the worker is (about to be) waiting on workCv
+    std::atomic<bool> ownerAsleep{false};   // the game thread is (about to be) waiting on idleCv
     bool started = false;
     std::thread thread;
 };
+constexpr uint32_t PublishedEnd(uint64_t ends) noexcept { return static_cast<uint32_t>(ends >> 32); }
+constexpr uint32_t ConsumedEnd(uint64_t ends) noexcept { return static_cast<uint32_t>(ends); }
+constexpr bool CaughtUp(uint64_t ends) noexcept { return PublishedEnd(ends) == ConsumedEnd(ends); }
+static_assert(kRingBytes <= UINT32_MAX, "ring offsets must fit a half of Worker::ends");
 Worker* g_worker = nullptr;
 size_t g_publishedLocal = 0;  // the owner's copy of Worker::published
 
@@ -368,19 +385,26 @@ void WorkerMain() {
 #endif
     Worker& w = *g_worker;
     auto lastBlocked = std::chrono::steady_clock::now();
-    for (;;) {
-        size_t from = 0;
-        size_t to = 0;
-        {
-            std::unique_lock lock(w.mutex);
-            if (w.consumed == w.published) {
-                w.idleCv.notify_all();
-                w.workCv.wait(lock, [&w] { return w.published != w.consumed; });
-                lastBlocked = std::chrono::steady_clock::now();
-            }
-            from = w.consumed;
-            to = w.published;
+    // Wakes a drain waiting for the worker to catch up (Worker's comment has the protocol).
+    const auto wakeOwner = [&w] {
+        if (w.ownerAsleep.load(std::memory_order_seq_cst)) {
+            std::lock_guard lock(w.mutex);
+            w.idleCv.notify_all();
         }
+    };
+    for (;;) {
+        const uint64_t ends = w.ends.load(std::memory_order_seq_cst);
+        if (CaughtUp(ends)) {
+            wakeOwner();
+            std::unique_lock lock(w.mutex);
+            w.workerAsleep.store(true, std::memory_order_seq_cst);
+            w.workCv.wait(lock, [&w] { return !CaughtUp(w.ends.load(std::memory_order_seq_cst)); });
+            w.workerAsleep.store(false, std::memory_order_relaxed);
+            lastBlocked = std::chrono::steady_clock::now();
+            continue;
+        }
+        const size_t from = ConsumedEnd(ends);
+        const size_t to = PublishedEnd(ends);
 #if defined(__SWITCH__)
         if (std::chrono::steady_clock::now() - lastBlocked > std::chrono::milliseconds(1)) {
             svcSleepThread(-1);  // YieldType_WithoutCoreMigration: let core 2's other threads run
@@ -392,12 +416,10 @@ void WorkerMain() {
         ReplayRange(from, to, false);
         g_workerBusyMicros.Add(static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - replayStart).count()));
-        {
-            std::lock_guard lock(w.mutex);
-            w.consumed = to;
-            if (w.consumed == w.published) {
-                w.idleCv.notify_all();
-            }
+        // Only the worker adds to the low half, and it never passes the high half, so no carry.
+        const uint64_t after = w.ends.fetch_add(to - from, std::memory_order_seq_cst) + (to - from);
+        if (CaughtUp(after)) {
+            wakeOwner();
         }
     }
 }
@@ -425,12 +447,13 @@ void Publish() {
     if (g_write == g_publishedLocal) {
         return;
     }
-    {
-        std::lock_guard lock(g_worker->mutex);
-        g_worker->published = g_write;
-    }
+    Worker& w = *g_worker;
+    w.ends.fetch_add(static_cast<uint64_t>(g_write - g_publishedLocal) << 32, std::memory_order_seq_cst);
     g_publishedLocal = g_write;
-    g_worker->workCv.notify_one();
+    if (w.workerAsleep.load(std::memory_order_seq_cst)) {
+        std::lock_guard lock(w.mutex);
+        w.workCv.notify_one();
+    }
 }
 
 // Waits until the worker has replayed everything published, servicing the guest's timing about once
@@ -440,22 +463,29 @@ void Publish() {
 uint64_t WaitForWorker() {
     Worker& w = *g_worker;
     const auto start = std::chrono::steady_clock::now();
+    const auto caughtUp = [&w] { return CaughtUp(w.ends.load(std::memory_order_seq_cst)); };
     bool waited = false;
-    std::unique_lock lock(w.mutex);
-    while (w.consumed != w.published) {
+    if (!caughtUp()) {
         waited = true;
-        if (w.idleCv.wait_for(lock, std::chrono::milliseconds(1), [&w] { return w.consumed == w.published; })) {
-            break;
+        std::unique_lock lock(w.mutex);
+        w.ownerAsleep.store(true, std::memory_order_seq_cst);
+        while (!caughtUp()) {
+            // The 1 ms timeout is also the backstop: a wake that went astray costs a millisecond.
+            if (w.idleCv.wait_for(lock, std::chrono::milliseconds(1), caughtUp)) {
+                break;
+            }
+            if (g_waitService != nullptr) {
+                lock.unlock();
+                g_waitService();
+                lock.lock();
+            }
         }
-        if (g_waitService != nullptr) {
-            lock.unlock();
-            g_waitService();
-            lock.lock();
-        }
+        w.ownerAsleep.store(false, std::memory_order_relaxed);
     }
-    w.consumed = 0;
-    w.published = 0;
-    lock.unlock();
+    // Rewind. The worker has replayed everything published and only adds to `ends` after a
+    // replay, so nothing races this store: at most it is reading the caught-up pair on its way to
+    // sleep, and the rewound pair is just as caught up.
+    w.ends.store(0, std::memory_order_seq_cst);
     g_publishedLocal = 0;
     if (waited) {
         const uint64_t micros =
