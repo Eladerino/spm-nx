@@ -131,6 +131,10 @@ std::atomic<bool> g_queueIfAskedRequested{false};
 // ---- the kpadnosync experiment (gx_worker.h, Kind::NoSyncIfAsked) -----------------------------
 std::atomic<bool> g_noSyncIfAskedRequested{false};
 
+// gxspin (on by default; dk_diag gxspin=0 turns it off): the caught-up worker polls briefly
+// before sleeping (WorkerMain). Forwarded through spm_gxspin_set.
+std::atomic<bool> g_gxSpinRequested{true};
+
 namespace {
 
 constexpr size_t kRingBytes = size_t{2} << 20;  // 2 MiB: a heavy frame's worth is about 1 MiB
@@ -380,6 +384,27 @@ void ReplayRange(size_t from, size_t to, bool immediate) {
 // read by SpmGxWorkerThreadHandle below, written once by the worker as it starts.
 std::atomic<uint32_t> g_workerThreadHandle{0};
 
+// How long the caught-up worker polls before it sleeps (gxspin).
+constexpr auto kWorkerSpin = std::chrono::microseconds(250);
+
+// Polls Worker::ends for up to kWorkerSpin, yielding every turn. True when work arrived.
+bool SpinForWork(Worker& w) {
+    const auto until = std::chrono::steady_clock::now() + kWorkerSpin;
+    for (uint32_t turn = 0;; ++turn) {
+        if (!CaughtUp(w.ends.load(std::memory_order_seq_cst))) {
+            return true;
+        }
+#if defined(__SWITCH__)
+        svcSleepThread(-1);  // a yield: returns at once when nothing else on core 2 is ready
+#else
+        std::this_thread::yield();
+#endif
+        if ((turn & 7u) == 7u && std::chrono::steady_clock::now() >= until) {
+            return false;
+        }
+    }
+}
+
 void WorkerMain() {
     t_worker = true;
 #if defined(__SWITCH__)
@@ -401,6 +426,15 @@ void WorkerMain() {
         const uint64_t ends = w.ends.load(std::memory_order_seq_cst);
         if (CaughtUp(ends)) {
             wakeOwner();
+            // gxspin: while the game thread is recording, the next 32 KB arrives a fraction of a
+            // millisecond later, and sleeping in between makes every publish a kernel wake (the
+            // Nov 7 a01aaf1 profile: 4.6% of the game thread in mutexLock under Publish). So
+            // poll for a short while first, yielding to core 2's other threads on every turn
+            // (Horizon does not time-slice one priority, so a bare spin would hold Aurora's
+            // frame worker off the core).
+            if (g_gxSpinRequested.load(std::memory_order_relaxed) && SpinForWork(w)) {
+                continue;
+            }
             std::unique_lock lock(w.mutex);
             w.workerAsleep.store(true, std::memory_order_seq_cst);
             w.workCv.wait(lock, [&w] { return !CaughtUp(w.ends.load(std::memory_order_seq_cst)); });
@@ -960,6 +994,11 @@ extern "C" void spm_dflushcoal_set(bool enabled) {
 // flip. DcRangeOp reads it on each data-cache op, so a flip lands on the next one.
 extern "C" void spm_dcnosync_set(bool enabled) {
     GxWorker::g_dcNoSyncRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The gxspin switch's hook, the same pattern: the worker reads it each time it catches up.
+extern "C" void spm_gxspin_set(bool enabled) {
+    GxWorker::g_gxSpinRequested.store(enabled, std::memory_order_relaxed);
 }
 
 // The kpadnosync experiment's hook, the same pattern: NoSyncIfAsked calls read it at dispatch.
