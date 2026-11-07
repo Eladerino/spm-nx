@@ -2,6 +2,7 @@ extern "C" unsigned g_spmAudit[8];
 extern "C" unsigned g_spmGameClear;
 extern "C" int g_spmSweepDump;
 #include "spm_map_sweep.h"
+#include <aurora/aurora.h>
 #include "spm_prepare_graphics.h"
 #include "abi_bridge.h"
 #include "memory.h"
@@ -1364,9 +1365,9 @@ bool FlagValue(int flag) {
 // 32 in he1_01, the protected help window is group 8 pose 9 in mac_08, the
 // Shooting Star action command is group 19 pose 31, and ordinary gameplay
 // draws nothing. The first wiisuppress skipped only (20, 32); since Nov 6 it
-// skips every n_controler draw except the Controls screen's (8, 9) (see the
-// comment at the skip for why), so the Controls panel still opens from
-// marker1. Skips are counted and logged (first fire and every 600th). device.cpp
+// skips every n_controler draw except while the Controls screen's bubbles are
+// up (see the comment at the skip for why), so the Controls panel still opens
+// from marker1. Skips are counted and logged (first fire and every 600th). device.cpp
 // forwards the
 // switch through spm_wii_suppress_set, the same handshake as poselog.
 //
@@ -1471,10 +1472,20 @@ extern "C" bool spm_suppress_anim_pose(CpuContext* ctx) {
     // has the replacement panel, which opens from marker1 (fired by this model's
     // draws; the (8, 9) draw is kept below for exactly that). With poselog also on,
     // the draw is still logged below before it is skipped.
-    // (8, 9) is the game's Controls screen: the replacement panel detects that
-    // screen through this very draw (its marker 1), so the draw must keep
-    // happening there; the panel is what covers the model on that screen.
-    const bool hide = g_wiiSuppress.load() && !(groupId == 8 && id == 9);
+    // The Controls screen is the one place the draw must keep happening: the
+    // replacement panel detects that screen through this very draw (its marker 1),
+    // and the panel is what covers the model there. The screen is recognised by its
+    // own bubbles (Move, Flip, Jump, Use a Pixl, Use Tippi: markers 2-6), which are
+    // 2D textures this hook never skips, rather than by the draw's (group, pose):
+    // those are load-order slot numbers, (8, 9) was only ever captured in mac_08,
+    // and the screen opens from every map (it opened in he1_01 and he2_03 on Nov 6).
+    // Until the first bubble draws, the remote is skipped like anywhere else, so its
+    // faces never show ahead of the panel; once a bubble draws, the remote draws too,
+    // marker 1 fires and the panel opens. When the screen closes and its bubbles go,
+    // the skip resumes, which keeps the faces off during the game's own close.
+    bool controlsScreen = false;
+    for (int m = 2; m <= 6 && !controlsScreen; ++m) controlsScreen = aurora_button_icon_marker(m);
+    const bool hide = g_wiiSuppress.load() && !controlsScreen;
     if (hide) {
         static std::atomic<uint32_t> fired{0};
         const uint32_t n = fired.fetch_add(1) + 1;
