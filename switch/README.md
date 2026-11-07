@@ -247,7 +247,9 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   that skipped the wait and the ones over screen copies that still drained.
   A third, queue texture invalidates (`invtexq`), records `GXInvalidateTexAll`
   for the worker like any other queued setter instead of draining for it: its
-  body is a single command in the FIFO, so the replay keeps it in order. With
+  body is a single command in the FIFO, so the replay keeps it in order. On by
+  default since the November 7 stock A/B (+3.9% in he2_03, +2.7% in he1_05 on
+  top of `dcnosync`); `invtexq=0` turns it off. With
   Performance timers on, the `[gxworker]` block also reports how many ms a
   frame the worker spent replaying records, whatever switches are on.
   One more switch has no row at all, and is a measuring instrument rather than a way

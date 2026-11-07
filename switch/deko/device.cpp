@@ -385,7 +385,7 @@ void diag_init() {
     // default, like cpthread's). DcRangeOp reads the switch on every data-cache op, so this
     // only sets the initial state; the menu and the command channel flip it live.
     if (g_diag.dcNoSync) spm_dcnosync_set(true);
-    // An invtexq=1 in dk_diag.txt arms the GXInvalidateTexAll queue experiment from the start;
+    // Queued texture invalidates are on unless dk_diag.txt says invtexq=0 (the Diag default);
     // the dispatch layer reads the switch on every call, so the menu flips it live.
     if (g_diag.invTexQ) spm_invtexq_set(true);
     // A vcache=1 in dk_diag.txt arms Aurora's decoded display-list vertex cache from
