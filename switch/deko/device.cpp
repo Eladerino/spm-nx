@@ -381,9 +381,9 @@ void diag_init() {
     // from the start. The witness it reads is kept from the first frame either way, so
     // this only sets the initial switch state; the menu flips it live.
     if (g_diag.dflushCoal) spm_dflushcoal_set(true);
-    // A dcnosync=1 in dk_diag.txt arms the runtime's DCFlushRange no-wait experiment from
-    // the start. DcRangeOp reads the switch on every data-cache op, so this only sets the
-    // initial state; the menu and the command channel flip it live.
+    // DCFlushRange without waiting is on unless dk_diag.txt says dcnosync=0 (the Diag
+    // default, like cpthread's). DcRangeOp reads the switch on every data-cache op, so this
+    // only sets the initial state; the menu and the command channel flip it live.
     if (g_diag.dcNoSync) spm_dcnosync_set(true);
     // An invtexq=1 in dk_diag.txt arms the GXInvalidateTexAll queue experiment from the start;
     // the dispatch layer reads the switch on every call, so the menu flips it live.
