@@ -19,9 +19,12 @@
 #include <thread>
 #include <vector>
 
-// Two test addresses with kinds of their own, as gx_call_kinds.inc gives the real ones.
+// Test addresses with kinds of their own, as gx_call_kinds.inc gives the real ones.
 template <> struct GxWorker::KindOf<0x80000010u> { static constexpr Kind kKind = Kind::NoSync; };
 template <> struct GxWorker::KindOf<0x80000020u> { static constexpr Kind kKind = Kind::SelfDefer; };
+template <> struct GxWorker::KindOf<0x80000030u> { static constexpr Kind kKind = Kind::QueueIfAsked; };
+
+extern "C" void spm_invtexq_set(bool enabled);
 
 namespace {
 
@@ -247,6 +250,30 @@ void TestNoSyncAndDeferCall() {
     Check(Same({"get 7", "value 7"}), "nosync: the getter saw the game-side value before the replay");
 }
 
+void Invalidate() { g_log.push_back("invalidate"); }
+
+void TestQueueIfAsked() {
+    SetMode(GxWorker::Mode::Deferred);
+    g_log.clear();
+    // Off: Inline. The pending setter replays first, then the caller runs the call itself.
+    spm_invtexq_set(false);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(3u), "invtexq off: the setter defers itself");
+    Check(!GxWorker::DispatchCall<0x80000030u, &Invalidate>(), "invtexq off: the caller runs it");
+    Check(!GxWorker::Pending(), "invtexq off: the call drained what was pending");
+    Invalidate();
+    Check(Same({"value 3", "invalidate"}), "invtexq off: inline, after the pending record");
+    // On: Queue. Recorded behind the pending setter, nothing runs until the drain.
+    g_log.clear();
+    spm_invtexq_set(true);
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(4u), "invtexq on: the setter defers itself");
+    Check(GxWorker::DispatchCall<0x80000030u, &Invalidate>(), "invtexq on: recorded");
+    Check(GxWorker::DispatchCall<0x80000020u, &SetValue>(5u), "invtexq on: a later setter defers itself");
+    Check(g_log.empty(), "invtexq on: nothing ran at the calls");
+    GxWorker::Drain();
+    Check(Same({"value 4", "invalidate", "value 5"}), "invtexq on: replayed in call order");
+    spm_invtexq_set(false);
+}
+
 const char* TestName(uint32_t address) { return address == 0x80001234u ? "GXGetTest" : nullptr; }
 
 void TestDrainCausesPrint() {
@@ -452,6 +479,7 @@ int main() {
     TestFrameBoundaryDrains();
     TestDrainCausesPrint();
     TestNoSyncAndDeferCall();
+    TestQueueIfAsked();
     TestThreadedOrder();
     TestThreadedContainsThrowAndNestedDrain();
     TestThreadedRingFull();
