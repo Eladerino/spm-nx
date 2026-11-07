@@ -213,8 +213,18 @@ extern "C" void spm_input_record_set(bool enabled);
 // string names the default, pad-record.bin), or disarms with nullptr. The
 // default name also picks up its continuation segments (pad-record.segN.bin).
 extern "C" void spm_input_replay_set(const char* filename);
-// Finalizes an armed recording from the port's own exit path:
-// switch/source/spm_switch_init.cpp calls this from userAppExit(), the
-// shutdown an applet close actually runs. Registered with std::atexit too,
-// as a backstop; safe to call more than once and when not recording.
+// Finalizes an armed recording: writes every pending record and stops the
+// recording. Called from the scaffold's applet hook and message watcher and
+// from userAppExit() (switch/source/spm_switch_init.cpp), plus a std::atexit
+// registration as a backstop; safe to call more than once and when not
+// recording. userAppExit alone was NOT enough: on a HOME-menu close nothing
+// in the process runs the shutdown (see spm_switch_init.cpp), so the applet
+// triggers there are the ones that carry this.
 extern "C" void spm_input_flush_at_exit(void);
+// Appends an armed recording's not-yet-saved records to its file WITHOUT
+// stopping the recording: the periodic safety flush's single write path,
+// callable from outside RecordSample's bookkeeping. The scaffold calls it
+// when the game loses the screen (flush what the run produced while the
+// outcome is still in the player's hands); recording continues if play
+// resumes. Safe to call any number of times and when not recording.
+extern "C" void spm_input_flush_pending(void);

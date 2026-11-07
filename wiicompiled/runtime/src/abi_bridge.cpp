@@ -58,6 +58,26 @@ std::vector<RawDispatchRecord>& DynamicRawDispatchEntries() {
     return entries;
 }
 
+// RegisterIndirectCallOverride's table (abi_bridge.h). Requests arrive during static
+// initialisation; Finalize resolves each against the generated record and fills `record`, after
+// which the table is read-only.
+struct IndirectCallOverride {
+    uint32_t address = 0;
+    void (*entry)(CpuContext*) = nullptr;
+    const char* name = "";
+    RawDispatchRecord record{};
+    bool resolved = false;
+};
+constexpr size_t kMaxIndirectCallOverrides = 8;
+std::array<IndirectCallOverride, kMaxIndirectCallOverrides>& IndirectCallOverrides() {
+    static std::array<IndirectCallOverride, kMaxIndirectCallOverrides> overrides{};
+    return overrides;
+}
+size_t& IndirectCallOverrideCount() {
+    static size_t count = 0;
+    return count;
+}
+
 const StaticIndirectDispatchTable*& GeneratedIndirectDispatchTable() {
     static const StaticIndirectDispatchTable* table = nullptr;
     return table;
@@ -337,6 +357,65 @@ void TranslatedFunctionRegistry::Register(TranslatedFunctionInfo info) {
     }
 }
 
+void RegisterIndirectCallOverride(uint32_t address, void (*entry)(CpuContext*), const char* name) {
+    std::lock_guard<std::mutex> lock(RegistryMutex());
+    if (RegistryFrozen().load(std::memory_order_acquire) || entry == nullptr) {
+        return;
+    }
+    size_t& count = IndirectCallOverrideCount();
+    if (count >= kMaxIndirectCallOverrides) {
+        RT_LOG(RT_TAG_RUNTIME) << "Indirect call override table full; dropping " << (name ? name : "") << std::endl;
+        return;
+    }
+    IndirectCallOverrides()[count++] = IndirectCallOverride{address, entry, name ? name : ""};
+}
+
+namespace {
+
+// Under RegistryMutex, after validation: each override takes a copy of the generated record for
+// its address (same register-preservation contract as the translated body it wraps) with only
+// the entry replaced. An address with no generated or dynamic raw record is reported and skipped.
+void ResolveIndirectCallOverridesLocked() {
+    for (size_t i = 0; i < IndirectCallOverrideCount(); ++i) {
+        auto& entry = IndirectCallOverrides()[i];
+        const RawDispatchRecord* base = FindStaticIndirectDispatchEntry(GeneratedIndirectDispatchTable(), entry.address);
+        if (base == nullptr) {
+            const auto& entries = DynamicRawDispatchEntries();
+            const auto it = std::lower_bound(entries.begin(), entries.end(), entry.address,
+                [](const RawDispatchRecord& record, uint32_t target) { return record.address < target; });
+            if (it != entries.end() && it->address == entry.address) {
+                base = &*it;
+            }
+        }
+        if (base == nullptr) {
+            RT_LOG(RT_TAG_RUNTIME) << "Indirect call override " << entry.name << " at 0x" << std::hex << entry.address
+                      << std::dec << " has no raw dispatch record; not installed" << std::endl;
+            continue;
+        }
+        entry.record = *base;
+        entry.record.entry = entry.entry;
+        entry.resolved = true;
+        RT_LOG(RT_TAG_RUNTIME) << "Indirect call override " << entry.name << " installed at 0x" << std::hex
+                  << entry.address << std::dec << std::endl;
+    }
+}
+
+} // namespace
+
+const RawDispatchRecord* TranslatedFunctionRegistry::ApplyIndirectCallOverride(uint32_t address,
+                                                                               const RawDispatchRecord* record) {
+    if (record == nullptr) {
+        return record;
+    }
+    for (size_t i = 0; i < IndirectCallOverrideCount(); ++i) {
+        const auto& entry = IndirectCallOverrides()[i];
+        if (entry.resolved && entry.address == address) {
+            return &entry.record;
+        }
+    }
+    return record;
+}
+
 void TranslatedFunctionRegistry::Finalize() {
     if (const size_t overrides = PriorityOverrideCount(); overrides != 0) {
         RT_LOG(RT_TAG_RUNTIME) << overrides
@@ -360,6 +439,7 @@ void TranslatedFunctionRegistry::Finalize() {
             auto& addressEntries = AddressEntries();
             addressEntries.clear();
             addressEntries.rehash(0);
+            ResolveIndirectCallOverridesLocked();
             RegistryFrozen().store(true, std::memory_order_release);
             lookupPublished_.store(true, std::memory_order_release);
         }

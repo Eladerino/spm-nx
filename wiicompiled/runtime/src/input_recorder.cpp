@@ -462,6 +462,16 @@ void FlushAtExit() {
     StopRecordingLocked();
 }
 
+// The safety flush without the stop: same mutex, same single write path as
+// the periodic flush, for callers that learn about danger from outside
+// RecordSample's bookkeeping (the scaffold's applet hook / message watcher,
+// when the game loses the screen). Recording continues afterwards.
+void FlushPending() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_recorder.Recording()) return;
+    FlushPendingLocked();
+}
+
 void RegisterExitHookLocked() {
     if (g_exitHookRegistered) return;
     g_exitHookRegistered = true;
@@ -546,6 +556,10 @@ extern "C" void spm_input_record_set(bool enabled) {
 
 extern "C" void spm_input_flush_at_exit(void) {
     InputRecorder::FlushAtExit();
+}
+
+extern "C" void spm_input_flush_pending(void) {
+    InputRecorder::FlushPending();
 }
 
 extern "C" void spm_input_replay_set(const char* filename) {

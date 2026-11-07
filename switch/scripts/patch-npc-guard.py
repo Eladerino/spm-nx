@@ -24,6 +24,15 @@ rate-limited) and jumps to the handler's own epilogue, so the evt command
 completes with its normal return code (2) and no write happens. Handlers
 whose result is already NULL-checked (evt_npc_rotate) get the swap only.
 
+evt_npc_walk_to (0x800FF22C) is multi-phase, but its resolver call sits
+before the phase split: every invocation, first run or continuation,
+resolves the name first (name in r28 from the args[0] evtGetValue), then
+branches on firstRun. Its walk state lives in the NPC entry (+0x418..
++0x568) and in the evt entry's per-command temp words (+0x74/+0x78), which
+its own first run sets up again, so a miss can end the command at the shared
+epilogue (loc_800FFADC) with return code 2, the value its finished-walk exits
+use: the script moves on as if the walk had completed, nothing is written.
+
 The gn1_01 world_end scene script (0x80D567D8) resolves more names than the
 original audit set: with set_position guarded, the Nov 6 run advanced one
 script word and panicked in evt_npc_set_property, and every later
@@ -40,10 +49,6 @@ path, so the preset yields the same completion code the command would have
 returned on a hit.
 
 Audited but deliberately NOT patched here:
-- evt_npc_walk_to (0x800FF22C): also resolves through the asserting lookup
-  and dereferences unchecked, but it is a multi-phase command with several
-  return sites and its post-resolution phases were not fully decoded; a
-  blind epilogue jump could corrupt its walk state. Follow-up audit item.
 - func_800FD98C / func_800FDA58 / func_800FDB3C: unnamed part-accessor
   handlers that hand the result to npcGetPartById; a different command
   family from the position/rotation/scale handlers, left for the same
@@ -95,6 +100,7 @@ HANDLERS = {
     "func_800FE584": ("evt_npc_set_scale", "loc_800FE62C", "r30", 1, False),
     "func_800FDCBC": ("evt_npc_rotate", None, None, 1, False),
     "func_800FFB14": ("evt_npc_jump_to", "loc_800FFD10", "0", 1, True),
+    "func_800FF22C": ("evt_npc_walk_to", "loc_800FFADC", "r28", 1, True),
     "func_801042B4": ("evt_npc_set_property", "loc_801044D8", "0", 1, False),
     "func_80102728": ("evt_npc_set_anim", "loc_801027A0", "0", 1, False),
     "func_80102CAC": ("evt_npc_flag8_onoff", "loc_80102D18", "0", 1, False),
@@ -296,16 +302,18 @@ def main() -> int:
             if epilogue is not None and not any(epilogue + ":" in l for l in body):
                 print(f"patch-npc-guard: {name}: epilogue {epilogue} not found", file=sys.stderr)
                 return 1
-            if name_expr == "r30":
-                # The guard logs the NPC name from r30; that only works if every
-                # resolver call in this handler round-trips r30 through ctx
-                # (the resolver restores the caller's callee-saved registers).
+            if name_expr in ("r28", "r30"):
+                # The guard logs the NPC name from a callee-saved register; that
+                # only works if every resolver call in this handler round-trips
+                # that register through ctx (the resolver restores the caller's
+                # callee-saved registers).
+                spill = f"ctx->gpr[{name_expr[1:]}] = {name_expr};"
                 for ci in calls:
                     window = body[max(0, ci - 40):ci]
-                    if not any("ctx->gpr[30] = r30;" in l for l in window):
+                    if not any(spill in l for l in window):
                         print(
                             f"patch-npc-guard: {name}: call at body line {ci} does not "
-                            "preserve r30 through ctx; refusing to log from it",
+                            f"preserve {name_expr} through ctx; refusing to log from it",
                             file=sys.stderr,
                         )
                         return 1

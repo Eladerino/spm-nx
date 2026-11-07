@@ -32,7 +32,15 @@
 
 namespace GxWorker {
 
-enum class Kind : uint8_t { Inline, Queue, SelfDefer, NoSync };
+enum class Kind : uint8_t { Inline, Queue, SelfDefer, NoSync, QueueIfAsked, NoSyncIfAsked };
+
+// NoSyncIfAsked: a non-GX native held back behind the kpadnosync experiment (Switch Diagnostics
+// "kpadnosync"): NoSync while the switch is on, Inline while it is off.
+bool NoSyncIfAskedRequested() noexcept;
+
+// QueueIfAsked: a call that qualifies for Queue but is held back behind the invtexq experiment
+// (Switch Diagnostics "invtexq"): Queue while the switch is on, Inline while it is off.
+bool QueueIfAskedRequested() noexcept;
 
 enum class Mode : uint8_t {
     Off = 0,
@@ -195,6 +203,95 @@ void PrintDstepWindow(uint64_t firstFrame, uint64_t lastFrame);
 // count, so a hardware A/B reads the DCFlushRange wait with the switch off against
 // the same wait plus the skip count with it on.
 
+// ---- dcnosync (Switch Diagnostics "dcnosync", on by default on Switch; state in gx_worker.cpp) -
+//
+// The data-cache ops (DCInvalidateRange, DCFlushRange, DCStoreRange, DCFlushRangeNoSync) are
+// NoSync in gx_call_kinds.inc, and their shared body (os_cache.cpp DcRangeOp) decides about the
+// drain itself. With the switch off it drains first, exactly as the dispatch layer did when they
+// were Inline, so nothing changes. With it on, an op drains only when its range overlaps a
+// remembered GXCopyTex destination: those are the only ranges whose body calls into Aurora
+// (downloading a pending screen copy for the CPU to read, or retiring one whose memory was
+// reused), and Aurora belongs to the worker while records are pending. Every other op only marks
+// game-side caches dirty (texture objects, TLUTs: game-thread state under their own mutexes, read
+// by the next GXLoadTexObj / GXLoadTlut on the game thread) and bumps the guest-write generations
+// (atomic, fenced: gx_guest_write.h), so it runs without waiting. Records pending at the op lose
+// nothing: the guest wrote the bytes before flushing them, so those records replayed during the
+// old drain already saw the new bytes, and see the same bytes replayed later.
+bool DcNoSyncRequested() noexcept;
+
+// Counts one data-cache op made under the switch for the perftimer's [gxworker] block: `drained`
+// when its range overlapped a screen copy and it waited as before, otherwise it did not wait.
+void NoteDcNoSync(bool drained) noexcept;
+
+// ---- natnosync (Switch Diagnostics "natnosync", default off; state in gx_worker.cpp) ----------
+//
+// Every native outside the GX layer is a sync point today (Inline by default), although almost
+// none of them touches anything a record changes. At stock the frame's one long wait (8-9 ms)
+// sits at whichever such native the game reaches first after drawing, and relaxing them one at a
+// time only moved it (KPADRead, then WPADIsDpdEnabled, then OSDisableInterrupts: round 5). This
+// switch relaxes the whole class at once: an unlisted native runs without draining when it is
+// outside the GX layer, so the wait lands on the next real sync point (a GX getter or wait,
+// GXDrawDone, GXCopyDisp, or the frame boundary). It covers the kpadnosync natives too (Kind::
+// NoSyncIfAsked): round 6 found that natnosync alone left the whole wait on KPADRead, and the two
+// together took he2_03 from 27.8 to 36.3 fps at stock.
+//
+// "Outside the GX layer" is two independent checks, both required:
+//   - the file that registered it is not one that touches GX or Aurora state (IsGxLayerFile:
+//     src/hle/gx/, hle/vi.cpp, os/os_cache.cpp, storage/dvd.cpp), which covers the game-specific
+//     GX helpers registered at addresses far from the SDK's GX library; and
+//   - its address is outside the SDK's GX and VI libraries (IsGxLayerAddress), so a GX override
+//     still drains even if a build tree's __FILE__ spelling defeats the first check.
+// What the rest touch (OS interrupts, threads, alarms, messages, time, heaps, input, audio, NAND,
+// stdio) is the same set the ~290 unsynchronised drains a frame already run alongside the worker
+// from inside a drain's wait service, so concurrency with the replay is not new.
+constexpr bool PathHas(const char* path, const char* needle) {
+    for (; *path != '\0'; ++path) {
+        const char* a = path;
+        const char* b = needle;
+        while (*b != '\0' && (*a == *b || (*b == '/' && *a == '\\'))) {
+            ++a;
+            ++b;
+        }
+        if (*b == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
+constexpr bool IsGxLayerFile(const char* path) {
+    return PathHas(path, "hle/gx/") || PathHas(path, "hle/vi.cpp") || PathHas(path, "os/os_cache.cpp") ||
+           PathHas(path, "storage/dvd.cpp");
+}
+
+// US Rev 0 library bounds (us0_names.tsv): __VIRetraceHandler .. DEMOPadInit, and
+// __GXDefaultTexRegionCallback .. FindContainHeap_ (the MEM heap library starts there).
+constexpr bool IsGxLayerAddress(uint32_t address) {
+    return (address >= 0x8027FD14u && address < 0x802845E4u) || (address >= 0x80289900u && address < 0x80292424u);
+}
+
+// True while the switch is on and this process's own file classification works (checked once,
+// at the first query: gx_worker.cpp must classify as GX layer, or the switch stays inert and says
+// so in the log).
+bool NatNoSyncRequested() noexcept;
+
+// Counts one drain skipped under the switch, with records pending, for the [gxworker] block.
+void NoteNatNoSync() noexcept;
+
+// The Inline sync point of a native registered at `Address` from a file classified `GxLayer`.
+template <uint32_t Address, bool GxLayer>
+inline void NativeSyncPoint() {
+    if constexpr (!GxLayer && !IsGxLayerAddress(Address)) {
+        if (NatNoSyncRequested()) {
+            if (Pending()) {
+                NoteNatNoSync();
+            }
+            return;
+        }
+    }
+    Drain(Address);
+}
+
 template <auto Fn, typename Tuple>
 void ReplayTuple(void* payload) {
     Tuple* args = static_cast<Tuple*>(payload);
@@ -319,6 +416,18 @@ inline bool DispatchCall(A... args) {
         Fn(args...);
         return true;
     } else if constexpr (kind == Kind::NoSync) {
+        return false;
+    } else if constexpr (kind == Kind::NoSyncIfAsked) {
+        if (!NoSyncIfAskedRequested() && !NatNoSyncRequested()) {
+            Drain(Address);
+        }
+        return false;
+    } else if constexpr (kind == Kind::QueueIfAsked) {
+        static_assert(ReturnsVoid(Fn), "only void calls can be queued");
+        if (QueueIfAskedRequested() && CanRecord() && RecordCall<Fn>(args...)) {
+            return true;
+        }
+        Drain(Address);
         return false;
     } else {
         Drain(Address);

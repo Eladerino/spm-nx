@@ -47,6 +47,8 @@ extern "C" void spm_gxskip_set(bool enabled);
 extern "C" void spm_dlprobe_set(bool enabled);
 // The runtime's AXFX Hi reverb native experiment (ax_effects.cpp), declared here the same
 // way: diag_init and diag_set forward the "axfxnative" switch to it.
+extern "C" void spm_reverboff_set(bool enabled);  // ax_effects.cpp, the same pattern
+extern "C" void spm_godmode_set(bool enabled);    // spm_map_sweep.cpp, the same pattern
 extern "C" void spm_axfx_native_set(bool enabled);
 // The runtime's GX setter dedup experiment (gx_vertex.cpp), declared here the same way:
 // diag_init and diag_set forward the "gxdedup" switch to it.
@@ -59,6 +61,24 @@ extern "C" void spm_dstep_set(bool enabled);
 // The runtime's DCFlushRange drain coalescing experiment (gx_worker.cpp), declared
 // here the same way: diag_init and diag_set forward the "dflushcoal" switch to it.
 extern "C" void spm_dflushcoal_set(bool enabled);
+
+// The runtime's DCFlushRange no-wait experiment (gx_worker.cpp), declared here the same
+// way: diag_init and diag_set forward the "dcnosync" switch to it.
+extern "C" void spm_dcnosync_set(bool enabled);
+
+// The runtime's GXInvalidateTexAll queue experiment (gx_worker.cpp), declared here the same
+// way: diag_init and diag_set forward the "invtexq" switch to it.
+extern "C" void spm_invtexq_set(bool enabled);
+
+// The runtime's KPADRead no-wait experiment (gx_worker.cpp), declared here the same way:
+// diag_init and diag_set forward the "kpadnosync" switch to it.
+extern "C" void spm_kpadnosync_set(bool enabled);
+// The natnosync experiment's hook (gx_worker.cpp), forwarded the same way.
+extern "C" void spm_natnosync_set(bool enabled);
+
+// The GX worker's poll-before-sleep (gx_worker.cpp), declared here the same way: diag_init
+// and diag_set forward the "gxspin" switch to it.
+extern "C" void spm_gxspin_set(bool enabled);
 
 // The debug server (source/spm_debug_server.cpp), declared here the same way: diag_init
 // hands it the dkserver switch once the file has been read.
@@ -108,8 +128,12 @@ constexpr DiagKey kDiagKeys[] = {
     {"zcull", &Diag::zcull},          {"guestcore", &Diag::guestCore},  {"dkserver", &Diag::dkServer},
     {"rttlog", &Diag::rttLog},        {"pmsmemo", &Diag::pmsMemo},      {"gxskip", &Diag::gxSkip},
     {"dlprobe", &Diag::dlProbe},      {"gxdedup", &Diag::gxDedup},      {"axfxnative", &Diag::axfxNative},
+    {"reverboff", &Diag::reverbOff},  {"godmode", &Diag::godMode},
     {"dstep", &Diag::dstep},          {"dflushcoal", &Diag::dflushCoal}, {"vcache", &Diag::vcache},
-    {"abtoggle", &Diag::abToggle},    {"wiisuppress", &Diag::wiiSuppress},
+    {"abtoggle", &Diag::abToggle},    {"wiisuppress", &Diag::wiiSuppress}, {"dcnosync", &Diag::dcNoSync},
+    {"invtexq", &Diag::invTexQ},       {"kpadnosync", &Diag::kpadNoSync},
+    {"natnosync", &Diag::natNoSync},
+    {"gxspin", &Diag::gxSpin},
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
 };
 
@@ -362,6 +386,8 @@ void diag_init() {
     // the start. The wrapper reads the switch on every callback, so this only sets the
     // initial state; the menu and the command channel flip it live.
     if (g_diag.axfxNative) spm_axfx_native_set(true);
+    if (g_diag.reverbOff) spm_reverboff_set(true);
+    if (g_diag.godMode) spm_godmode_set(true);
     // A gxdedup=1 in dk_diag.txt arms the runtime's GX setter dedup experiment from the start.
     if (g_diag.gxDedup) spm_gxdedup_set(true);
     // A dstep=1 in dk_diag.txt arms the runtime's double-step mode from the start. The
@@ -372,6 +398,22 @@ void diag_init() {
     // from the start. The witness it reads is kept from the first frame either way, so
     // this only sets the initial switch state; the menu flips it live.
     if (g_diag.dflushCoal) spm_dflushcoal_set(true);
+    // DCFlushRange without waiting is on unless dk_diag.txt says dcnosync=0 (the Diag
+    // default, like cpthread's). DcRangeOp reads the switch on every data-cache op, so this
+    // only sets the initial state; the menu and the command channel flip it live.
+    if (g_diag.dcNoSync) spm_dcnosync_set(true);
+    // Queued texture invalidates are on unless dk_diag.txt says invtexq=0 (the Diag default);
+    // the dispatch layer reads the switch on every call, so the menu flips it live.
+    if (g_diag.invTexQ) spm_invtexq_set(true);
+    // A kpadnosync=1 in dk_diag.txt arms the KPADRead no-wait experiment from the start; the
+    // dispatch layer reads the switch on every call, so the menu flips it live.
+    if (g_diag.kpadNoSync) spm_kpadnosync_set(true);
+    // natnosync is on unless dk_diag.txt says natnosync=0 (the Diag default), so its state is
+    // forwarded either way.
+    spm_natnosync_set(g_diag.natNoSync);
+    // gxspin is on unless dk_diag.txt says gxspin=0 (the Diag default), so its state is
+    // forwarded either way; the worker reads it each time it catches up.
+    spm_gxspin_set(g_diag.gxSpin);
     // A vcache=1 in dk_diag.txt arms Aurora's decoded display-list vertex cache from
     // the start. The cache lives inside Aurora's decode path and reads the switch on
     // every list, so this only sets the initial state; the menu flips it live.
@@ -412,9 +454,16 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "gxskip")) spm_gxskip_set(on);
     else if (!std::strcmp(key, "dlprobe")) spm_dlprobe_set(on);
     else if (!std::strcmp(key, "axfxnative")) spm_axfx_native_set(on);
+    else if (!std::strcmp(key, "reverboff")) spm_reverboff_set(on);
+    else if (!std::strcmp(key, "godmode")) spm_godmode_set(on);
     else if (!std::strcmp(key, "gxdedup")) spm_gxdedup_set(on);
     else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
     else if (!std::strcmp(key, "dflushcoal")) spm_dflushcoal_set(on);
+    else if (!std::strcmp(key, "dcnosync")) spm_dcnosync_set(on);
+    else if (!std::strcmp(key, "invtexq")) spm_invtexq_set(on);
+    else if (!std::strcmp(key, "kpadnosync")) spm_kpadnosync_set(on);
+    else if (!std::strcmp(key, "natnosync")) spm_natnosync_set(on);
+    else if (!std::strcmp(key, "gxspin")) spm_gxspin_set(on);
     else if (!std::strcmp(key, "padrec")) spm_input_record_set(on);
     else if (!std::strcmp(key, "padreplay")) {
         // Arming passes the file padreplay_parse_params took from dk_diag.txt (a live
