@@ -206,6 +206,16 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   whose vertex arrays cannot be watched for changes, and several diagnostic
   modes) are decoded as usual, and with Performance timers on a [vcache] line
   each window counts the hits, the misses and the rejects.
+  Reverb off (`reverboff`, default off) is a measurement: the game's Hi reverb
+  callback (about 10% of the game thread at stock) renders nothing while it is
+  on, so sound is drier. It reaches the callback through the runtime's
+  indirect-call override (`REGISTER_INDIRECT_CALL_OVERRIDE`, abi_bridge.h),
+  which routes function-pointer calls to a wrapper without registering a
+  native, so no fresh translation is needed.
+  God mode (`godmode`, default off) is for test runs: HP stays full from boot,
+  like the Infinite HP cheat, but it lives in dk_diag.txt (`godmode=1`), so it
+  is already on after every boot and scripted runs never drive the Cheats page.
+  It is separate from the cheat, so turning either off leaves the other on.
   Another Performance row is a reserved switch rather than a way to play: AXFX
   Hi reverb native (`axfxnative`) currently does nothing. The game's
   AXFXReverbHiExp reverb callback is reached through a function table, and the
@@ -235,6 +245,44 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   a frame in the November 4 lab run), and with Performance timers on the
   `[gxworker]` block counts the drains skipped, so the same scene with the
   switch off and on prices it.
+  A second experiment on the same wait, DCFlush without waiting (`dcnosync`),
+  goes further: a data-cache op whose range is not a screen copy marks the
+  texture, TLUT and display-list caches over it dirty right away on the game
+  thread and does not drain at all. Only a range over a remembered `GXCopyTex`
+  destination (doors, the 3D flip, character switches) still drains, because
+  that path calls into Aurora, which the worker owns while records are pending.
+  On by default since the November 7 stock A/B (he2_03 +16%, he1_05 +11%,
+  with 3D flips, doors and map changes checked on hardware); `dcnosync=0` in
+  dk_diag.txt turns it off. With Performance timers on the `[gxworker]` block counts the ops
+  that skipped the wait and the ones over screen copies that still drained.
+  A third, queue texture invalidates (`invtexq`), records `GXInvalidateTexAll`
+  for the worker like any other queued setter instead of draining for it: its
+  body is a single command in the FIFO, so the replay keeps it in order. On by
+  default since the November 7 stock A/B (+3.9% in he2_03, +2.7% in he1_05 on
+  top of `dcnosync`); `invtexq=0` turns it off. With
+  Performance timers on, the `[gxworker]` block also reports how many ms a
+  frame the worker spent replaying records, whatever switches are on.
+  A fourth, controller read without waiting (`kpadnosync`, default off), lets
+  `KPADRead`, a non-GX native and the last drain left in a frame once the
+  others are on, run without waiting for the worker; the wait moves to the
+  next real sync point. It covers the per-frame WPAD/WUD status reads too,
+  since with `KPADRead` alone the wait moved to `WPADIsDpdEnabled`.
+  Since the wait only moved each time, a fifth, non-graphics calls without
+  waiting (`natnosync`, on by default), relaxes the whole class: every native
+  outside the GX layer (judged by the file that registers it and by its
+  address being outside the SDK's GX and VI libraries) runs without waiting,
+  so the wait lands on the next GX sync point. With Performance timers on,
+  the `[gxworker]` block counts the natives that skipped a wait. It includes
+  the `kpadnosync` reads. In the November 7 stock A/B it took he2_03 from
+  27.8 to 36.3 fps and he1_05 from 29.0 to 36.7: the worker's replay now
+  overlaps the game's own work, and the only wait left is `GXCopyDisp`
+  (0.4 to 2 ms). On by default since Brandon's play pass the same day;
+  `natnosync=0` turns it off.
+  The GX worker short poll (`gxspin`, on by default) has the caught-up worker
+  poll for about 1 ms, yielding, before it sleeps, so the publishes that
+  arrive while the game draws are not each a kernel wake. The game thread
+  wakes a sleeping worker without taking the mutex; the worker's sleep is a
+  1 ms bounded wait, so a wake that slips past costs at most that.
   One more switch has no row at all, and is a measuring instrument rather than a way
   to play: automatic A/B (`abtoggle=<switch>` in dk_diag.txt, or
   `abtoggle=<switch>:<windows>`) flips the named switch on and off by itself at the

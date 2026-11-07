@@ -40,6 +40,30 @@ void RememberEfbCopyDestination(uint32_t addr, uint32_t size) {
 
 } // namespace
 
+// True when [addr, addr + size) overlaps a remembered GXCopyTex destination: exactly the
+// ranges for which DownloadEfbCopiesForRange or InvalidateEfbCopyDestinationsForRange
+// would call into Aurora (same canonical span, same overlap test). The map is only ever
+// written on the game thread (GXCopyTex runs inline there, and only the data-cache ops
+// erase from it), so a game-thread caller can trust the answer until it next calls one
+// of those. The dcnosync switch (os_cache.cpp) asks this to decide whether a flush still
+// has to wait for the GX worker before it touches Aurora.
+bool EfbCopyDestinationOverlaps(uint32_t addr, uint32_t size) {
+    if (size == 0) {
+        return false;
+    }
+    const uint64_t start = CanonicalizeGxMainRamAddress(addr);
+    const uint64_t end = start + size;
+    std::lock_guard<std::mutex> guard(g_efbCopyDestinationsMutex);
+    const uint64_t earliest = start > g_largestEfbCopyDestination ? start - g_largestEfbCopyDestination : 0;
+    for (auto it = g_efbCopyDestinations.lower_bound(static_cast<uint32_t>(earliest));
+         it != g_efbCopyDestinations.end() && static_cast<uint64_t>(it->first) < end; ++it) {
+        if (static_cast<uint64_t>(it->first) + it->second > start) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // A data-cache op over a GXCopyTex destination is the game about to read the copy with its CPU (SPM's offscreen
 // effects: doors, the 3D flip, character switches copy the screen, then DCFlushRange it and move the pixels into
 // their own buffers). Copies are GPU-only, so download any that are still pending into RAM first.

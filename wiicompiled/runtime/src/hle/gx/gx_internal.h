@@ -401,6 +401,9 @@ void MarkTexObjsDirtyForRange(uint32_t addr, uint32_t size);
 void InvalidateEfbCopyDestinationsForRange(uint32_t addr, uint32_t size);
 // Before a data-cache op on a copy destination: downloads still-pending GPU copies there into RAM.
 void DownloadEfbCopiesForRange(uint32_t addr, uint32_t size);
+// True when the range overlaps a remembered GXCopyTex destination, i.e. when the two calls
+// above would touch Aurora. Game thread only (the thread that writes the map).
+bool EfbCopyDestinationOverlaps(uint32_t addr, uint32_t size);
 GXTlutObj* CreateHostTlutObj(uint32_t addr);
 void MarkHostTlutObjConstructed(uint32_t addr);
 GXTlutObj* GetHostTlutObj(uint32_t addr);

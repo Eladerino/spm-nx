@@ -422,12 +422,16 @@ private:
         if (record == nullptr) {
             record = FindRawByAddressPtrSlow(address);
         }
+        record = ApplyIndirectCallOverride(address, record);
         cached = {true, address, record};
         return record;
     }
 
     static const TranslatedFunctionInfo* FindByAddressPtrSlow(uint32_t address);
     static const RawDispatchRecord* FindRawByAddressPtrSlow(uint32_t address);
+    // The indirect-call overrides (RegisterIndirectCallOverride below): the record a bctrl to
+    // `address` runs instead of `record`, or `record` itself. Memo misses only, never the hot path.
+    static const RawDispatchRecord* ApplyIndirectCallOverride(uint32_t address, const RawDispatchRecord* record);
 
     // Finalize publishes immutable registry, generated-table, and dynamic raw
     // dispatch storage. Header-inlined cache hits are enabled only after that
@@ -840,22 +844,34 @@ public:
 // The registry path into a native override with GX records on (gx_worker.h): true when the call was
 // recorded or ran through its self-deferring body, false when the caller runs it now (after the
 // pending records, for an Inline one).
-template <uint32_t Address, auto Target>
+template <uint32_t Address, auto Target, bool GxLayer>
 inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
     constexpr GxWorker::Kind kind = GxWorker::KindOf<Address>::kKind;
     if constexpr (kind == GxWorker::Kind::Inline) {
-        GxWorker::Drain(Address);
+        GxWorker::NativeSyncPoint<Address, GxLayer>();
         return false;
     } else if constexpr (kind == GxWorker::Kind::NoSync) {
+        return false;
+    } else if constexpr (kind == GxWorker::Kind::NoSyncIfAsked) {
+        if (!GxWorker::NoSyncIfAskedRequested() && !GxWorker::NatNoSyncRequested()) {
+            GxWorker::Drain(Address);
+        }
         return false;
     } else {
         static_assert(!std::is_invocable_v<decltype(Target), CpuContext*>,
                       "only typed overrides can be queued or defer themselves");
+        if constexpr (kind == GxWorker::Kind::QueueIfAsked) {
+            // Inline unless the invtexq experiment is on (gx_worker.h); then the Queue path below.
+            if (!GxWorker::QueueIfAskedRequested()) {
+                GxWorker::Drain(Address);
+                return false;
+            }
+        }
         if (!GxWorker::CanRecord()) {
             GxWorker::Drain(Address);
             return false;
         }
-        if constexpr (kind == GxWorker::Kind::Queue) {
+        if constexpr (kind == GxWorker::Kind::Queue || kind == GxWorker::Kind::QueueIfAsked) {
             using Signature = std::remove_pointer_t<decltype(Target)>;
             static_assert(GxWorker::ReturnsVoid(Target), "only void calls can be queued");
             const bool recorded = std::apply([](auto... args) { return GxWorker::RecordCall<Target>(args...); },
@@ -873,12 +889,13 @@ inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
 }
 
 // The raw invoker of a plain registered native: as AbiRawCpuThunk, with its guest address for the
-// GX worker's drain counts.
-template <uint32_t Address, auto Target>
+// GX worker's drain counts. GxLayer: the registering file touches GX state (GxWorker::IsGxLayerFile),
+// which keeps the drain under the natnosync experiment.
+template <uint32_t Address, auto Target, bool GxLayer>
 struct NativeRawCpuThunk {
     static void Invoke(CpuContext* cpu) {
         if (GxWorker::Engaged()) {
-            GxWorker::Drain(Address);
+            GxWorker::NativeSyncPoint<Address, GxLayer>();
         }
         AbiRawCpuThunk<Target>::InvokeNoSync(cpu);
     }
@@ -886,23 +903,43 @@ struct NativeRawCpuThunk {
 
 // The raw invoker of a counted native override: counts the call, then runs the plain thunk (or
 // records it, with GX records on).
-template <uint32_t Address, auto Target>
+template <uint32_t Address, auto Target, bool GxLayer>
 struct CountedAbiRawCpuThunk {
     static void Invoke(CpuContext* cpu) {
         NativeOverrideCalls<Address>.Hit();
-        if (GxWorker::Engaged() && GxWorkerDispatchCpu<Address, Target>(cpu)) {
+        if (GxWorker::Engaged() && GxWorkerDispatchCpu<Address, Target, GxLayer>(cpu)) {
             return;
         }
         AbiRawCpuThunk<Target>::InvokeNoSync(cpu);
     }
 };
 
+// Indirect-call overrides: a runtime wrapper that indirect calls (bctrl through a function pointer)
+// to a translated function reach instead of its body, without registering a native at that
+// address. Registering a native would need a fresh translation, because the generated indirect
+// dispatch table must name the translated body as the winner (ValidateGeneratedIndirectDispatchLocked).
+// Here the table and the registry stay as generated: Finalize copies the target's generated
+// record with only its entry replaced, and the indirect lookup hands out that copy. Direct calls
+// still reach the translated body. The wrapper owns the decision to serve natively and calls the
+// translated body (still linked, as func_XXXXXXXX) otherwise. The translator does not scan for
+// this macro.
+void RegisterIndirectCallOverride(uint32_t address, void (*entry)(CpuContext*), const char* name);
+
+struct IndirectCallOverrideRegistrar {
+    IndirectCallOverrideRegistrar(uint32_t address, void (*entry)(CpuContext*), const char* name) {
+        RegisterIndirectCallOverride(address, entry, name);
+    }
+};
+
+#define REGISTER_INDIRECT_CALL_OVERRIDE(address, fn) \
+    static IndirectCallOverrideRegistrar MKW_DETAIL_MAKE_UNIQUE(_indirect_call_override_, __COUNTER__)(address, &fn, #fn)
+
 #define REGISTER_NATIVE_FUNCTION(address, fn) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn>::Invoke)
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke)
 
 #define REGISTER_NATIVE_FUNCTION_AS(address, fn, pretty_name) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_named_, __COUNTER__)(address, pretty_name, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn>::Invoke)
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_named_, __COUNTER__)(address, pretty_name, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &NativeRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke)
 
 // REGISTER_NATIVE_FUNCTION for PPC_NATIVE_OVERRIDE: the same entry, with a raw invoker that counts.
 #define REGISTER_COUNTED_NATIVE_FUNCTION(address, fn) \
-    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &CountedAbiRawCpuThunk<address, &fn>::Invoke)
+    static AbiTrampoline<decltype(fn)> MKW_DETAIL_MAKE_UNIQUE(_abi_native_trampoline_, __COUNTER__)(address, #fn, fn, FunctionKind::Native, false, kPpcAllNonvolatileFprMask, 0, 0, &CountedAbiRawCpuThunk<address, &fn, GxWorker::IsGxLayerFile(__FILE__)>::Invoke)

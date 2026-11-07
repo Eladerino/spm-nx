@@ -42,6 +42,8 @@
 
 // aurora (GXAurora.h, which cannot be included next to switch.h: their u32 types differ).
 extern "C" uint32_t AuroraGxDecodeThreadHandle(void);
+// The runtime's GX worker (gx_worker.cpp): 0 until the gxthread worker has started.
+extern "C" uint32_t SpmGxWorkerThreadHandle(void);
 #endif
 
 extern "C" {
@@ -303,6 +305,8 @@ std::mutex g_profileMutex;
 ProfileCapture g_profileGame;    // the main thread, where the guest runs
 ProfileCapture g_profileDecode;  // aurora's GX decode thread, on the ticks it was running
 uint32_t g_profileDecodeAbsent = 0;  // ticks with no decode thread to sample
+ProfileCapture g_profileWorker;  // the runtime's GX worker on core 2 (gxthread), reported raw like decode
+uint32_t g_profileWorkerAbsent = 0;  // ticks with no worker thread to sample
 uintptr_t g_profileBase = 0;  // this module's load base, for nro+ offsets in the report
 std::chrono::steady_clock::time_point g_profileStart{};
 std::chrono::steady_clock::time_point g_profileEnd{};
@@ -422,6 +426,16 @@ void ProfileSamplerMain() {
             std::lock_guard<std::mutex> lock(g_profileMutex);
             ++g_profileDecode.failures;
         }
+        // The GX worker, the same way: it replays the game thread's recorded GX calls, so its
+        // samples are mostly host code (the GX HLE and aurora), reported raw only.
+        const Handle workerThread = static_cast<Handle>(SpmGxWorkerThreadHandle());
+        if (workerThread == INVALID_HANDLE) {
+            std::lock_guard<std::mutex> lock(g_profileMutex);
+            ++g_profileWorkerAbsent;
+        } else if (!ProfileSampleOnce(workerThread, g_profileWorker)) {
+            std::lock_guard<std::mutex> lock(g_profileMutex);
+            ++g_profileWorker.failures;
+        }
         {
             std::lock_guard<std::mutex> lock(g_profileMutex);
             capped = g_profileGame.total >= kProfileMaxSamples;
@@ -454,6 +468,10 @@ void ProfileReport() {
     uint32_t decodeTotal = 0;
     uint32_t decodeFailures = 0;
     uint32_t decodeAbsent = 0;
+    std::vector<std::vector<uintptr_t>> workerStacks;
+    uint32_t workerTotal = 0;
+    uint32_t workerFailures = 0;
+    uint32_t workerAbsent = 0;
     uintptr_t base = 0;
     double seconds = 0;
     {
@@ -466,6 +484,10 @@ void ProfileReport() {
         decodeTotal = g_profileDecode.total;
         decodeFailures = g_profileDecode.failures;
         decodeAbsent = g_profileDecodeAbsent;
+        workerStacks = g_profileWorker.Stacks();
+        workerTotal = g_profileWorker.total;
+        workerFailures = g_profileWorker.failures;
+        workerAbsent = g_profileWorkerAbsent;
         base = g_profileBase;
         const auto end = g_profileEnded ? g_profileEnd : std::chrono::steady_clock::now();
         seconds = std::chrono::duration<double>(end - g_profileStart).count();
@@ -525,6 +547,11 @@ void ProfileReport() {
     for (const auto& line : GuestProfileFormat::RawLines("decode", decodeStacks, base, kProfileRawLeafLines)) {
         RT_LOGF(RT_TAG_RUNTIME, "%s\n", line.c_str());
     }
+    RT_LOGF(RT_TAG_RUNTIME, "[profile] gxworker %u samples, %u ticks with no worker thread, %u failed samples\n",
+            workerTotal, workerAbsent, workerFailures);
+    for (const auto& line : GuestProfileFormat::RawLines("gxworker", workerStacks, base, kProfileRawLeafLines)) {
+        RT_LOGF(RT_TAG_RUNTIME, "%s\n", line.c_str());
+    }
     RT_LOGF(RT_TAG_RUNTIME, "[profile] raw end\n");
     RT_LOGF(RT_TAG_RUNTIME, "[profile] end\n");
     std::fflush(stderr);
@@ -582,6 +609,8 @@ void SetSwitchProfileEnabled(bool enabled) {
             g_profileGame.Clear();
             g_profileDecode.Clear();
             g_profileDecodeAbsent = 0;
+            g_profileWorker.Clear();
+            g_profileWorkerAbsent = 0;
             g_profileBase = 0;
             g_profileEnded = false;
             g_profileStart = std::chrono::steady_clock::now();
@@ -595,7 +624,7 @@ void SetSwitchProfileEnabled(bool enabled) {
             return;
         }
         RT_LOGF(RT_TAG_RUNTIME,
-                "[profile] started: sampling the game thread (and the GX decode thread while it runs) at %d Hz; "
+                "[profile] started: sampling the game thread (and the GX decode thread and GX worker while they run) at %d Hz; "
                 "toggle profile off for the hot list\n",
                 1000 / kProfilePeriodMs);
         std::fflush(stderr);
