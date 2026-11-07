@@ -205,6 +205,14 @@ inline float PpcForceSingleValueInline(double value)
     const __m128d flush = _mm_cmplt_sd(magnitude, _mm_set_sd(g_mkwNiFlushThreshold));
     const __m128d kept = _mm_andnot_pd(_mm_andnot_pd(signMask, flush), v);
     return static_cast<float>(_mm_cvtsd_f64(kept));
+#elif defined(__aarch64__) && defined(MKW_SINGLE_ROUND_HOST_FZ)
+    // The host FP control register carries NI: FPCR.FZ is set exactly while it is on
+    // (MkwApplyHostNiMode), and AArch64 flushes on the unrounded exponent (the Arm ARM's
+    // FPRoundBase), which is NI's pre-round rule. So a bare fcvt already gives the masked
+    // form's bits, without the thread-local threshold load or the mask. Opt-in (the Switch
+    // build's SPM_FCVT_FZ) until the console's own check agrees: the debug server's
+    // fcvtcheck command compares the two forms bit for bit in both FZ states.
+    return static_cast<float>(value);
 #elif defined(__aarch64__)
     const float64x1_t v = vdup_n_f64(value);
     const uint64x1_t signMask = vdup_n_u64(0x8000000000000000ULL);
