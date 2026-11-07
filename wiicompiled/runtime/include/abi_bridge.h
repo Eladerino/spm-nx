@@ -312,12 +312,6 @@ struct KnownTranslatedCpuCall {
 // address and named from the registry when printed. Guest code reaches an override two ways, the
 // typed catalog in native_cpu_calls.inc and the registry's raw invoker, and both hit the same counter.
 // Hit() is a relaxed load and store, not an atomic add: each counter has one writing thread at a time.
-// The counters cost a load and a store on a scattered cache line per call (about 28k calls a
-// frame at stock, measured at ~0.7 ms of the game thread in 3D), so they only count while the
-// "callcounts" switch is on (dk_diag / Diagnostics, default off; spm_callcounts_set). Off, Hit()
-// is one load of this flag, which sits on a line every call shares.
-inline std::atomic<bool> g_countNativeCalls{false};
-
 struct NativeOverrideCounter {
     const char* name = nullptr;  // null for an override: named by address at print time
     uint32_t address = 0;
@@ -326,10 +320,7 @@ struct NativeOverrideCounter {
     NativeOverrideCounter* next = nullptr;
     explicit NativeOverrideCounter(const char* counterName) noexcept;
     explicit NativeOverrideCounter(uint32_t guestAddress) noexcept;
-    void Hit() noexcept {
-        if (!g_countNativeCalls.load(std::memory_order_relaxed)) [[likely]] return;
-        calls.store(calls.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-    }
+    void Hit() noexcept { calls.store(calls.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); }
 };
 
 template <uint32_t Address>
