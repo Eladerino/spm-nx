@@ -3844,78 +3844,126 @@ struct PmsMemoStats {
     uint64_t verified = 0;      // remembered occurrences whose bytes still matched (search skipped)
     uint64_t inPlace = 0;       // remembered occurrences holding the original line again, re-patched in place
     uint64_t verifyFailed = 0;  // lines whose memo check failed and fell back to the full search
-    uint64_t fullSearches = 0;  // full line searches run
+    uint64_t fullSearches = 0;  // full line searches run (lines searched; one sweep covers several)
+    uint64_t sweeps = 0;        // passes over a whole range, each covering every line that needed a search
 };
 
-// One line of a message-string pass over one range, with the address memo. The search
-// loop mirrors PatchMessageStrings exactly; the memo only decides whether it runs.
-// Returns the number of occurrences patched by this call.
-int PmsPatchLine(uint8_t* mem, size_t rangeSize, uint32_t rangeBase, uint32_t rangeBit,
-                 std::vector<PmsMemoEntry>& memo, uint32_t& memoRanges, bool& seen,
-                 const uint8_t* from, size_t len, const char* to, size_t toLen,
-                 PmsMemoStats& stats) {
-    // The span a patch writes: the replacement, the rest of the line padded with spaces.
-    std::string expected(to, toLen);
-    expected.append(len - toLen, ' ');
-    int patched = 0;
-    bool usable = (memoRanges & rangeBit) != 0;
+// One line of a message-string pass over one range: what it patches, and its memo.
+struct PmsLineJob {
+    const uint8_t* from = nullptr;
+    size_t len = 0;
+    const char* to = nullptr;
+    size_t toLen = 0;
+    std::string expected;  // the span a patch writes: the replacement, the rest of the line padded with spaces
+    std::vector<PmsMemoEntry>* memo = nullptr;
+    uint32_t* memoRanges = nullptr;
+    bool* seen = nullptr;
+};
+
+// The memo half of a line: when a full search has covered this range and found the line,
+// verify every remembered occurrence by content (re-patching in place one that holds the
+// original line again). Returns true when the memo covered the line, so no search is
+// needed; false sends the line to the sweep. Adds the occurrences it re-patched to patched.
+bool PmsVerifyLine(uint8_t* mem, size_t rangeSize, uint32_t rangeBase, uint32_t rangeBit, PmsLineJob& job,
+                   int& patched, PmsMemoStats& stats) {
+    const size_t len = job.len;
+    bool usable = (*job.memoRanges & rangeBit) != 0;
     if (usable) {
         usable = false;
-        for (const PmsMemoEntry& e : memo)
+        for (const PmsMemoEntry& e : *job.memo)
             if (e.rangeBase == rangeBase) {
                 usable = true;
                 break;
             }
     }
-    if (usable) {
-        bool ok = true;
-        for (PmsMemoEntry& entry : memo) {
-            if (entry.rangeBase != rangeBase) continue;
-            if (entry.offset + len >= rangeSize) {
-                ok = false;
-                break;
-            }
-            uint8_t* const p = mem + entry.offset;
-            if (std::memcmp(p, entry.written.data(), len) == 0 ||
-                std::memcmp(p, expected.data(), len) == 0) {
-                ++stats.verified;
-                continue;
-            }
+    if (!usable) return false;
+    for (PmsMemoEntry& entry : *job.memo) {
+        if (entry.rangeBase != rangeBase) continue;
+        if (entry.offset + len >= rangeSize) {
+            ++stats.verifyFailed;
+            return false;
+        }
+        uint8_t* const p = mem + entry.offset;
+        if (std::memcmp(p, entry.written.data(), len) == 0 || std::memcmp(p, job.expected.data(), len) == 0) {
+            ++stats.verified;
+            continue;
+        }
+        const uint8_t next = p[len];
+        if (std::memcmp(p, job.from, len) == 0 && (next == '\n' || next == '\r' || next == '\0' || next == '<')) {
+            // The area's file was read into the same buffer again: the original line
+            // is back at the remembered address. Re-apply the patch in place,
+            // exactly what the search would do at this occurrence.
+            std::copy(job.to, job.to + job.toLen, p);
+            std::fill(p + job.toLen, p + len, uint8_t{' '});
+            entry.written = job.expected;
+            ++stats.inPlace;
+            ++patched;
+            continue;
+        }
+        ++stats.verifyFailed;
+        return false;
+    }
+    return true;
+}
+
+// The search half, for every line the memo did not cover, in one pass over the range
+// instead of one std::search per line. The pass is a multi-pattern Horspool over the
+// lines' first m bytes (m the shortest pending line): it looks at the last byte of each
+// m-byte window, compares a line in full only where that byte can end one of the
+// prefixes, and otherwise skips ahead by the shift table, which over MEM1's mostly binary
+// contents is close to m bytes a step. The match rule is the search loop's in
+// PatchMessageStrings: the whole line (followed by a newline, a NUL or a tag), the line
+// ending before the range does, and scanning resumes after a patched span. The lines are
+// distinct and none occurs inside another's replacement, so one interleaved pass patches
+// exactly what the per-line searches would. Returns the occurrences patched.
+int PmsSweep(uint8_t* mem, size_t rangeSize, uint32_t rangeBase, uint32_t rangeBit, PmsLineJob* const* jobs,
+             size_t jobCount, PmsMemoStats& stats) {
+    jobCount = std::min<size_t>(jobCount, 32);  // one bit per line below; the table has 10
+    if (jobCount == 0) return 0;
+    ++stats.sweeps;
+    size_t m = jobs[0]->len;
+    for (size_t i = 0; i < jobCount; ++i) m = std::min(m, jobs[i]->len);
+    if (m == 0) return 0;
+    std::array<uint32_t, 256> lastByte{};  // bit i: jobs[i]'s m-byte prefix ends with this byte
+    std::array<size_t, 256> shift;
+    shift.fill(m);
+    for (size_t i = 0; i < jobCount; ++i) {
+        PmsLineJob& job = *jobs[i];
+        ++stats.fullSearches;
+        job.memo->erase(std::remove_if(job.memo->begin(), job.memo->end(),
+                                       [&](const PmsMemoEntry& e) { return e.rangeBase == rangeBase; }),
+                        job.memo->end());
+        *job.memoRanges |= rangeBit;
+        lastByte[job.from[m - 1]] |= uint32_t{1} << i;
+        for (size_t j = 0; j + 1 < m; ++j) shift[job.from[j]] = std::min(shift[job.from[j]], m - 1 - j);
+    }
+    int patched = 0;
+    size_t pos = m - 1;  // the last byte of the window starting at pos - (m - 1)
+    while (pos < rangeSize) {
+        const uint8_t c = mem[pos];
+        uint32_t candidates = lastByte[c];
+        bool matched = false;
+        while (candidates != 0) {
+            const int i = __builtin_ctz(candidates);
+            candidates &= candidates - 1;
+            PmsLineJob& job = *jobs[i];
+            const size_t len = job.len;
+            uint8_t* const p = mem + (pos - (m - 1));
+            if (static_cast<size_t>(mem + rangeSize - p) <= len) continue;  // a match must end before the range does
+            if (std::memcmp(p, job.from, len) != 0) continue;
             const uint8_t next = p[len];
-            if (std::memcmp(p, from, len) == 0 &&
-                (next == '\n' || next == '\r' || next == '\0' || next == '<')) {
-                // The area's file was read into the same buffer again: the original line
-                // is back at the remembered address. Re-apply the patch in place,
-                // exactly what the search below would do at this occurrence.
-                std::copy(to, to + toLen, p);
-                std::fill(p + toLen, p + len, uint8_t{' '});
-                entry.written = expected;
-                ++stats.inPlace;
-                ++patched;
-                continue;
-            }
-            ok = false;
+            if (next != '\n' && next != '\r' && next != '\0' && next != '<') continue;  // whole lines only
+            std::copy(job.to, job.to + job.toLen, p);
+            std::fill(p + job.toLen, p + len, uint8_t{' '});
+            job.memo->push_back(PmsMemoEntry{rangeBase, static_cast<size_t>(p - mem), job.expected});
+            *job.seen = true;
+            ++patched;
+            pos = static_cast<size_t>(p - mem) + len + (m - 1);  // resume after the patched span
+            matched = true;
             break;
         }
-        if (ok) return patched;
-        ++stats.verifyFailed;
+        if (!matched) pos += shift[c];
     }
-    ++stats.fullSearches;
-    memo.erase(std::remove_if(memo.begin(), memo.end(),
-                              [&](const PmsMemoEntry& e) { return e.rangeBase == rangeBase; }),
-               memo.end());
-    for (uint8_t* p = mem; (p = std::search(p, mem + rangeSize, from, from + len)) != mem + rangeSize; p += len) {
-        if (p + len >= mem + rangeSize) break;
-        // Whole lines only, as in PatchMessageStrings.
-        const uint8_t next = p[len];
-        if (next != '\n' && next != '\r' && next != '\0' && next != '<') continue;
-        std::copy(to, to + toLen, p);
-        std::fill(p + toLen, p + len, uint8_t{' '});
-        memo.push_back(PmsMemoEntry{rangeBase, static_cast<size_t>(p - mem), expected});
-        seen = true;
-        ++patched;
-    }
-    memoRanges |= rangeBit;
     return patched;
 }
 // [pmsmemo-core-end]
@@ -3998,31 +4046,46 @@ void PatchMessageStringsMemoised() {
         const Range range = kRanges[r];
         uint8_t* const mem = Memory::Contains(range.base, range.size) ? Memory::GetPointer(range.base, range.size) : nullptr;
         if (mem == nullptr) continue;
-        for (Line& line : kLines) {
-            const auto* from = reinterpret_cast<const uint8_t*>(line.from);  // bytes, as in PatchBootStrings
-            const size_t len = std::strlen(line.from);
-            std::string composed;
-            const char* to = line.to;
+        const uint32_t rangeBit = uint32_t{1} << r;
+        constexpr size_t kLineCount = std::size(kLines);
+        std::array<std::string, kLineCount> composed;
+        std::array<PmsLineJob, kLineCount> jobs;
+        std::array<PmsLineJob*, kLineCount> pending{};
+        size_t pendingCount = 0;
+        for (size_t i = 0; i < kLineCount; ++i) {
+            Line& line = kLines[i];
+            PmsLineJob& job = jobs[i];
+            job.from = reinterpret_cast<const uint8_t*>(line.from);  // bytes, as in PatchBootStrings
+            job.len = std::strlen(line.from);
+            job.to = line.to;
             if (line.prefix != nullptr && !shakeLabelText.empty()) {
-                composed = std::string(line.prefix) + shakeLabelText + line.suffix;
-                if (composed.size() <= len) to = composed.c_str();
+                composed[i] = std::string(line.prefix) + shakeLabelText + line.suffix;
+                if (composed[i].size() <= job.len) job.to = composed[i].c_str();
             }
-            const size_t toLen = std::strlen(to);
-            if (toLen > len) continue;  // the table is length-checked by hand; never write long
-            patched += PmsPatchLine(mem, range.size, range.base, uint32_t{1} << r, line.memo, line.memoRanges,
-                                    line.seen, from, len, to, toLen, g_pmsStats);
+            job.toLen = std::strlen(job.to);
+            if (job.toLen > job.len) continue;  // the table is length-checked by hand; never write long
+            job.expected.assign(job.to, job.toLen);
+            job.expected.append(job.len - job.toLen, ' ');
+            job.memo = &line.memo;
+            job.memoRanges = &line.memoRanges;
+            job.seen = &line.seen;
+            if (!PmsVerifyLine(mem, range.size, range.base, rangeBit, job, patched, g_pmsStats))
+                pending[pendingCount++] = &job;
         }
+        // Every line the memo did not cover, in one pass over the range.
+        patched += PmsSweep(mem, range.size, range.base, rangeBit, pending.data(), pendingCount, g_pmsStats);
     }
     allSeen = true;
     for (const Line& line : kLines) allSeen = allSeen && line.seen;
     if (patched > 0)
         RT_LOGF(RT_TAG_RUNTIME, "message strings: %d line(s) rewritten for the controller\n", patched);
     RT_LOGF(RT_TAG_RUNTIME,
-            "[pmsmemo] pass %d: %llu verified, %llu re-patched in place, %llu verify failures, %llu full searches (cumulative)\n",
+            "[pmsmemo] pass %d: %llu verified, %llu re-patched in place, %llu verify failures, %llu full searches in %llu sweeps (cumulative)\n",
             passes, static_cast<unsigned long long>(g_pmsStats.verified),
             static_cast<unsigned long long>(g_pmsStats.inPlace),
             static_cast<unsigned long long>(g_pmsStats.verifyFailed),
-            static_cast<unsigned long long>(g_pmsStats.fullSearches));
+            static_cast<unsigned long long>(g_pmsStats.fullSearches),
+            static_cast<unsigned long long>(g_pmsStats.sweeps));
     if (!allSeen && !gaveUp && passes >= 40) {
         gaveUp = true;
         int missing = 0;
