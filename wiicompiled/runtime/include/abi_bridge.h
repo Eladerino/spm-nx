@@ -849,7 +849,7 @@ inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
     } else if constexpr (kind == GxWorker::Kind::NoSync) {
         return false;
     } else if constexpr (kind == GxWorker::Kind::NoSyncIfAsked) {
-        if (!GxWorker::NoSyncIfAskedRequested()) {
+        if (!GxWorker::NoSyncIfAskedRequested() && !GxWorker::NatNoSyncRequested()) {
             GxWorker::Drain(Address);
         }
         return false;

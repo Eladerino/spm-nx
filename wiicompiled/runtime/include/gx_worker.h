@@ -231,7 +231,9 @@ void NoteDcNoSync(bool drained) noexcept;
 // time only moved it (KPADRead, then WPADIsDpdEnabled, then OSDisableInterrupts: round 5). This
 // switch relaxes the whole class at once: an unlisted native runs without draining when it is
 // outside the GX layer, so the wait lands on the next real sync point (a GX getter or wait,
-// GXDrawDone, GXCopyDisp, or the frame boundary).
+// GXDrawDone, GXCopyDisp, or the frame boundary). It covers the kpadnosync natives too (Kind::
+// NoSyncIfAsked): round 6 found that natnosync alone left the whole wait on KPADRead, and the two
+// together took he2_03 from 27.8 to 36.3 fps at stock.
 //
 // "Outside the GX layer" is two independent checks, both required:
 //   - the file that registered it is not one that touches GX or Aurora state (IsGxLayerFile:
@@ -416,7 +418,7 @@ inline bool DispatchCall(A... args) {
     } else if constexpr (kind == Kind::NoSync) {
         return false;
     } else if constexpr (kind == Kind::NoSyncIfAsked) {
-        if (!NoSyncIfAskedRequested()) {
+        if (!NoSyncIfAskedRequested() && !NatNoSyncRequested()) {
             Drain(Address);
         }
         return false;
