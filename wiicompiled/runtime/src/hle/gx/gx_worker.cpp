@@ -34,6 +34,9 @@
 extern "C" uint32_t svcSetThreadCoreMask(uint32_t handle, int32_t coreId, uint32_t affinityMask);
 extern "C" uint32_t threadGetCurHandle(void);  // libnx (switch.h is not included here)
 extern "C" void svcSleepThread(int64_t nanoseconds);
+// Horizon's address arbiter (libnx svc.h), the futex the gxfutex hand-off sleeps on.
+extern "C" uint32_t svcWaitForAddress(void* address, uint32_t arbType, int32_t value, int64_t timeout);
+extern "C" uint32_t svcSignalToAddress(void* address, uint32_t signalType, int32_t value, int32_t count);
 #endif
 
 namespace GxWorker {
@@ -140,6 +143,10 @@ constexpr bool kNatNoSyncClassifies = IsGxLayerFile(__FILE__);
 // gxspin (on by default; dk_diag gxspin=0 turns it off): the caught-up worker polls briefly
 // before sleeping (WorkerMain). Forwarded through spm_gxspin_set.
 std::atomic<bool> g_gxSpinRequested{true};
+// gxfutex (off by default; dk_diag gxfutex=1): the caught-up worker sleeps on Horizon's address
+// arbiter (Worker::wakeSeq) instead of workCv, so Publish's wake cannot be lost. Switch only;
+// elsewhere the switch changes nothing. Forwarded through spm_gxfutex_set.
+std::atomic<bool> g_gxFutexRequested{false};
 
 namespace {
 
@@ -190,6 +197,11 @@ struct Worker {
     std::atomic<uint64_t> ends{0};   // published << 32 | consumed, both byte offsets into the ring
     std::atomic<bool> workerAsleep{false};  // the worker is (about to be) waiting on workCv
     std::atomic<bool> ownerAsleep{false};   // the game thread is (about to be) waiting on idleCv
+    // gxfutex: the worker sleeps on this word with Horizon's address arbiter instead of workCv.
+    // Publish bumps it before signalling, and the kernel only sleeps the worker while the word
+    // still holds the value it read before its last check, so a publish can never slip between
+    // that check and the sleep (workCv's unlocked notify can, at a cost of up to 1 ms).
+    alignas(4) std::atomic<int32_t> wakeSeq{0};
     bool started = false;
     std::thread thread;
 };
@@ -224,6 +236,10 @@ Stat g_unsafeDrains;     // Threaded: a drain reached while one was already wait
 // the worker is saturated (busy close to the frame) or idles while the game thread runs ahead.
 Stat g_workerBusyMicros;
 Stat g_workerYields;
+// The worker's sleeps that ended on the 1 ms timeout with work already published: a wake that
+// was lost (workCv's unlocked notify) or never sent. Each one is up to a millisecond the frame
+// waited for nothing. gxfutex should hold this at zero.
+Stat g_workerLateWakes;
 
 // The dflushcoal witness (gx_worker.h): owner-thread state, kept whether or not the
 // switch is on (it records facts, so a mid-frame flip reads a current witness) and read
@@ -453,12 +469,39 @@ void WorkerMain() {
             if (g_gxSpinRequested.load(std::memory_order_relaxed) && SpinForWork(w)) {
                 continue;
             }
+#if defined(__SWITCH__)
+            if (g_gxFutexRequested.load(std::memory_order_relaxed)) {
+                // Read the word first, then announce the sleep, then check once more: a Publish
+                // after that check bumps the word, and the kernel refuses to sleep on a changed
+                // word (it returns at once), so no wake is lost.
+                const int32_t seq = w.wakeSeq.load(std::memory_order_seq_cst);
+                w.workerAsleep.store(true, std::memory_order_seq_cst);
+                if (CaughtUp(w.ends.load(std::memory_order_seq_cst))) {
+                    constexpr uint32_t kArbitrationWaitIfEqual = 2;  // ArbitrationType_WaitIfEqual
+                    // Still bounded (a 1 ms backstop, as the condition variable has), and counted
+                    // when the timeout finds work waiting.
+                    const auto sleepStart = std::chrono::steady_clock::now();
+                    svcWaitForAddress(&w.wakeSeq, kArbitrationWaitIfEqual, seq, 1000000);
+                    if (!CaughtUp(w.ends.load(std::memory_order_seq_cst)) &&
+                        w.wakeSeq.load(std::memory_order_seq_cst) == seq &&
+                        std::chrono::steady_clock::now() - sleepStart >= std::chrono::microseconds(900)) {
+                        g_workerLateWakes.Add();
+                    }
+                }
+                w.workerAsleep.store(false, std::memory_order_seq_cst);
+                lastBlocked = std::chrono::steady_clock::now();
+                continue;
+            }
+#endif
             std::unique_lock lock(w.mutex);
             w.workerAsleep.store(true, std::memory_order_seq_cst);
             // Bounded, as the backstop for Publish's unlocked notify: re-checks at least once a
-            // millisecond while asleep.
-            while (!w.workCv.wait_for(lock, std::chrono::milliseconds(1),
-                                      [&w] { return !CaughtUp(w.ends.load(std::memory_order_seq_cst)); })) {
+            // millisecond while asleep. A timeout that finds work waiting is a lost wake: counted.
+            while (CaughtUp(w.ends.load(std::memory_order_seq_cst))) {
+                if (w.workCv.wait_for(lock, std::chrono::milliseconds(1)) == std::cv_status::timeout &&
+                    !CaughtUp(w.ends.load(std::memory_order_seq_cst))) {
+                    g_workerLateWakes.Add();
+                }
             }
             w.workerAsleep.store(false, std::memory_order_relaxed);
             lastBlocked = std::chrono::steady_clock::now();
@@ -517,6 +560,14 @@ void Publish() {
         // game thread in mutexLock under Publish). The price is a wake that can land between
         // the worker's last check and its wait; its wait is a 1 ms wait_for, so that costs at
         // most a millisecond, never a hang.
+#if defined(__SWITCH__)
+        if (g_gxFutexRequested.load(std::memory_order_relaxed)) {
+            constexpr uint32_t kSignalTypeSignal = 0;  // SignalType_Signal
+            w.wakeSeq.fetch_add(1, std::memory_order_seq_cst);
+            svcSignalToAddress(&w.wakeSeq, kSignalTypeSignal, 0, 1);
+            return;
+        }
+#endif
         w.workCv.notify_one();
     }
 }
@@ -854,6 +905,7 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t unsafeDrains = g_unsafeDrains.TakeDelta();
     const uint64_t workerBusyMicros = g_workerBusyMicros.TakeDelta();
     const uint64_t workerYields = g_workerYields.TakeDelta();
+    const uint64_t workerLateWakes = g_workerLateWakes.TakeDelta();
     const uint64_t coalesced = g_dflushCoalesced.TakeDelta();
     const uint64_t dcFree = g_dcNoSyncFree.TakeDelta();
     const uint64_t dcCopyDrains = g_dcNoSyncCopyDrains.TakeDelta();
@@ -883,9 +935,12 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
         // Measurement only: the worker's own replay time (wall clock inside ReplayRange, so a
         // preemption by core 2's other threads counts as busy) and its voluntary yields.
         std::fprintf(stderr,
-                     "[gxworker] frames %llu-%llu: worker replayed records %.2f ms a frame, %.1f yields a frame\n",
+                     "[gxworker] frames %llu-%llu: worker replayed records %.2f ms a frame, %.1f yields a frame, "
+                     "%.2f late wakes a frame (gxfutex %d)\n",
                      static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
-                     static_cast<double>(workerBusyMicros) / 1000.0 / frames, static_cast<double>(workerYields) / frames);
+                     static_cast<double>(workerBusyMicros) / 1000.0 / frames, static_cast<double>(workerYields) / frames,
+                     static_cast<double>(workerLateWakes) / frames,
+                     g_gxFutexRequested.load(std::memory_order_relaxed) ? 1 : 0);
     }
     if (natSkips != 0) {
         // natnosync's scoreboard: non-GX natives reached with records pending that ran without
@@ -1046,6 +1101,10 @@ extern "C" void spm_dcnosync_set(bool enabled) {
 }
 
 // The gxspin switch's hook, the same pattern: the worker reads it each time it catches up.
+extern "C" void spm_gxfutex_set(bool enabled) {
+    GxWorker::g_gxFutexRequested.store(enabled, std::memory_order_relaxed);
+}
+
 extern "C" void spm_gxspin_set(bool enabled) {
     GxWorker::g_gxSpinRequested.store(enabled, std::memory_order_relaxed);
 }
