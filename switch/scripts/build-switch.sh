@@ -98,11 +98,12 @@ if [[ -n $variant ]]; then
         hotcold-o3) extra+=(-DSPM_HOTCOLD=ON -DSPM_O3_SHARDS=ON) ;;
         pgo) extra+=(-DSPM_PGO_INSTRUMENT=ON -DSPM_PGO_ALL=ON) ;;
         pgo-use) extra+=(-DSPM_PGO_USE=ON -DSPM_PGO_PROFILE=/work/pgo/spm.profdata) ;;
-        *) echo "unknown variant $variant (hotcold|o3|hotcold-o3|pgo|pgo-use)" >&2; exit 1 ;;
+        pgo-use-fcvt) extra+=(-DSPM_PGO_USE=ON -DSPM_PGO_PROFILE=/work/pgo/spm.profdata -DSPM_FCVT_FZ=ON) ;;
+        *) echo "unknown variant $variant (hotcold|o3|hotcold-o3|pgo|pgo-use|pgo-use-fcvt)" >&2; exit 1 ;;
     esac
 fi
 
-if [[ $variant == pgo-use ]]; then
+if [[ $variant == pgo-use* ]]; then
     # Provenance first, while failing is still cheap. The manifest the capture build wrote
     # sits in $root/pgo beside where the session's raw profiles were copied; the hard stops
     # here (no manifest, no profiles, wrong region, wrong clang major) are the ones no fit
@@ -145,7 +146,7 @@ if [[ $variant == pgo-use ]]; then
     "
 fi
 
-if [[ $variant == pgo-use ]]; then
+if [[ $variant == pgo-use* ]]; then
     # The build's output is kept whole: the fit check below reads clang's profile warnings
     # out of it. pipefail (set above) keeps a failed build a failed script through the tee.
     "$engine" run --rm -v "$work:/work" -w /work "$image" bash -c "
@@ -165,7 +166,7 @@ else
     "
 fi
 
-if [[ $variant == pgo-use ]]; then
+if [[ $variant == pgo-use* ]]; then
     if ! python3 "$root/switch/scripts/pgo-fit-check.py" \
             --log "$work/pgo-use-build.log" --show "$work/pgo/profdata-show.txt" \
             --max-stale-pct "${SPM_PGO_FIT_MAX_STALE_PCT:-25}"; then
