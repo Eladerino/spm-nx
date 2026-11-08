@@ -23,6 +23,7 @@
 //   - a render pass ends with a fragments barrier and an invalidated texture cache (the next pass
 //     samples what this one drew);
 //   - a compute pass ends with a full barrier.
+#include <deque>
 #include "spm_worker_blocked.h"
 #include "wgpu_objects.hpp"
 
@@ -209,6 +210,78 @@ struct Stats {
     uint64_t submits = 0, passes = 0, draws = 0, skippedDraws = 0, dispatches = 0, copies = 0, writes = 0,
              writeBytes = 0, biasedBinds = 0;
 };
+// ---- GPU timestamps (dk_diag gpuperf; measurement only, under queue_mutex())
+// A mark is a timestamp report in the command stream; the time to the next mark belongs to the
+// mark's piece. Marks are read back once their submit's fence has signalled. kGpuGap runs from the
+// end of one submit to the start of the next, so it is the GPU idle or waiting in the queue
+// (a present's image wait lands here).
+enum GpuPiece : uint8_t {
+    kGpuOther = 0,
+    kGpuScene,      // render passes with a depth target
+    kGpuOffscreen,  // render passes without one
+    kGpuUpload,     // buffer to buffer, buffer to texture
+    kGpuTexCopy,    // texture to texture
+    kGpuReadback,   // texture to buffer
+    kGpuCompute,
+    kGpuPresent,    // the present's blit
+    kGpuGap,
+    kGpuPieceCount,
+};
+struct GpuMark {
+    uint64_t serial;
+    uint32_t slot;
+    GpuPiece piece;
+};
+constexpr uint32_t kGpuSlots = 1u << 14;
+DkMemBlock g_gpuBlock = nullptr;
+const volatile uint64_t* g_gpuCpu = nullptr;
+DkGpuAddr g_gpuAddr = 0;
+uint32_t g_gpuNext = 0;
+std::deque<GpuMark> g_gpuMarks;
+std::atomic<uint64_t> g_gpuNs[kGpuPieceCount]{};
+std::atomic<uint64_t> g_gpuScenePasses{0}, g_gpuOffscreenPasses{0};
+std::atomic<uint32_t> g_gpuMaxSceneW{0}, g_gpuMaxSceneH{0};
+
+void gpu_mark(GpuPiece piece) {
+    if (!g_diag.gpuPerf.load(std::memory_order_relaxed)) return;
+    if (!g_gpuBlock) {
+        DkMemBlockMaker m;
+        dkMemBlockMakerDefaults(&m, R.device, kGpuSlots * 16);
+        m.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+        g_gpuBlock = dkMemBlockCreate(&m);
+        g_gpuCpu = static_cast<const volatile uint64_t*>(dkMemBlockGetCpuAddr(g_gpuBlock));
+        g_gpuAddr = dkMemBlockGetGpuAddr(g_gpuBlock);
+    }
+    const uint32_t slot = g_gpuNext++ & (kGpuSlots - 1);
+    dkCmdBufReportCounter(R.cmd, DkCounter_Timestamp, g_gpuAddr + slot * 16);
+    g_gpuMarks.push_back({recording_serial(), slot, piece});
+}
+
+void gpu_collect() {
+    if (g_gpuMarks.empty()) return;
+    if (g_gpuMarks.size() > kGpuSlots - 1024) {  // never read for this long: the slots are being reused
+        g_gpuMarks.clear();
+        return;
+    }
+    const uint64_t done = completed_serial();
+    while (g_gpuMarks.size() >= 2 && g_gpuMarks[1].serial <= done) {
+        const GpuMark& a = g_gpuMarks[0];
+        const GpuMark& b = g_gpuMarks[1];
+        const uint64_t t0 = g_gpuCpu[a.slot * 2 + 1], t1 = g_gpuCpu[b.slot * 2 + 1];  // {value, timestamp}
+        if (t1 > t0) g_gpuNs[a.piece].fetch_add((t1 - t0) * 625 / 384, std::memory_order_relaxed);
+        g_gpuMarks.pop_front();
+    }
+}
+
+void gpu_note_pass(bool scene, uint32_t w, uint32_t h) {
+    if (!g_diag.gpuPerf.load(std::memory_order_relaxed)) return;
+    (scene ? g_gpuScenePasses : g_gpuOffscreenPasses).fetch_add(1, std::memory_order_relaxed);
+    if (scene && w * h > g_gpuMaxSceneW.load(std::memory_order_relaxed) * g_gpuMaxSceneH.load(std::memory_order_relaxed)) {
+        g_gpuMaxSceneW.store(w, std::memory_order_relaxed);
+        g_gpuMaxSceneH.store(h, std::memory_order_relaxed);
+    }
+}
+
 // queue_mutex(), with the time the GX worker waits for it counted (spm_worker_blocked.h).
 std::unique_lock<std::mutex> lock_queue_timed() {
     SpmWorkerBlockedScope blocked(kSpmBlockedQueueLock);
@@ -266,9 +339,19 @@ private:
 
     void step(const Op& op) {
         switch (op.type) {
-        case OpType::BeginRender: begin_render(m_enc->passes[op.n]); break;
-        case OpType::EndRender: end_render(m_enc->passes[op.n]); break;
+        case OpType::BeginRender: {
+            const PassDesc& p = m_enc->passes[op.n];
+            gpu_mark(p.depth ? kGpuScene : kGpuOffscreen);
+            begin_render(p);
+            gpu_note_pass(p.depth != nullptr, m_width, m_height);
+            break;
+        }
+        case OpType::EndRender:
+            end_render(m_enc->passes[op.n]);
+            gpu_mark(kGpuOther);
+            break;
         case OpType::BeginCompute:
+            gpu_mark(kGpuCompute);
             work_begin();
             reset_pass_state();
             m_computePass = true;
@@ -276,6 +359,7 @@ private:
         case OpType::EndCompute:
             m_computePass = false;
             dkCmdBufBarrier(R.cmd, DkBarrier_Full, DkInvalidateFlags_Image | DkInvalidateFlags_Shader);
+            gpu_mark(kGpuOther);
             break;
         case OpType::SetRenderPipeline:
         case OpType::SetComputePipeline:
@@ -346,7 +430,15 @@ private:
             dispatch(op.u[0], op.u[1], op.u[2]);
             note_sampled_textures();
             break;
-        case OpType::Copy: copy(m_enc->copies[op.n]); break;
+        case OpType::Copy: {
+            const CopyDesc& c = m_enc->copies[op.n];
+            gpu_mark(c.kind == CopyDesc::TextureToTexture ? kGpuTexCopy
+                     : c.kind == CopyDesc::TextureToBuffer ? kGpuReadback
+                                                           : kGpuUpload);
+            copy(c);
+            gpu_mark(kGpuOther);
+            break;
+        }
         }
     }
 
@@ -1208,6 +1300,32 @@ void __wrap_wgpuComputePassEncoderRelease(WGPUComputePassEncoder pass) {
     __real_wgpuComputePassEncoderRelease(pass);
 }
 
+extern "C" void aurora_switch_gpu_print(uint64_t firstFrame, uint64_t lastFrame) {
+    if (!g_diag.gpuPerf.load(std::memory_order_relaxed)) return;
+    static uint64_t s_prev[kGpuPieceCount]{}, s_prevScene = 0, s_prevOff = 0;
+    const double frames = double(lastFrame - firstFrame + 1);
+    double ms[kGpuPieceCount];
+    double busy = 0;
+    for (uint32_t i = 0; i < kGpuPieceCount; i++) {
+        const uint64_t now = g_gpuNs[i].load(std::memory_order_relaxed);
+        ms[i] = double(now - s_prev[i]) / 1e6 / frames;
+        s_prev[i] = now;
+        if (i != kGpuGap) busy += ms[i];
+    }
+    const uint64_t scene = g_gpuScenePasses.load(std::memory_order_relaxed);
+    const uint64_t off = g_gpuOffscreenPasses.load(std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "[gpu] frames %llu-%llu: ms a frame: busy %.2f, gap %.2f, span %.2f; scene %.2f, offscreen %.2f, upload "
+                 "%.2f, texcopy %.2f, readback %.2f, compute %.2f, present %.2f, other %.2f; passes scene %.1f, "
+                 "offscreen %.1f; largest scene pass %ux%u\n",
+                 (unsigned long long)firstFrame, (unsigned long long)lastFrame, busy, ms[kGpuGap], busy + ms[kGpuGap],
+                 ms[kGpuScene], ms[kGpuOffscreen], ms[kGpuUpload], ms[kGpuTexCopy], ms[kGpuReadback], ms[kGpuCompute],
+                 ms[kGpuPresent], ms[kGpuOther], double(scene - s_prevScene) / frames, double(off - s_prevOff) / frames,
+                 g_gpuMaxSceneW.load(std::memory_order_relaxed), g_gpuMaxSceneH.load(std::memory_order_relaxed));
+    s_prevScene = scene;
+    s_prevOff = off;
+}
+
 // ---- the queue
 void __wrap_wgpuQueueSubmit(WGPUQueue queue, size_t commandCount, WGPUCommandBuffer const* commands) {
     std::vector<std::shared_ptr<Encoder>> encoders;
@@ -1220,6 +1338,7 @@ void __wrap_wgpuQueueSubmit(WGPUQueue queue, size_t commandCount, WGPUCommandBuf
         std::unique_lock<std::mutex> lock = lock_queue_timed();
         const uint64_t r0 = now_ns();
         g_cpu.lockWaitNs.fetch_add(r0 - l0, std::memory_order_relaxed);
+        gpu_mark(kGpuOther);
         const uint64_t serial = recording_serial();
         for (auto& e : encoders) {
             if (e->submitted) continue;  // (Dawn refuses a second submit)
@@ -1241,6 +1360,7 @@ void __wrap_wgpuQueueSubmit(WGPUQueue queue, size_t commandCount, WGPUCommandBuf
             std::vector<uint32_t>().swap(e->words);
         }
         g_stats.submits++;
+        gpu_mark(kGpuGap);
         flush();
         g_cpu.replayNs.fetch_add(now_ns() - r0, std::memory_order_relaxed);
         if (g_stats.submits == 1 || g_stats.submits % 3600 == 0) {
@@ -1405,6 +1525,7 @@ bool aurora_switch_dk_present(void* texture) {
     const uint64_t acquireNs = now_ns() - a0;
     std::unique_lock<std::mutex> lock(queue_mutex());
     if (!cpuImageWait) swapchain_wait(&imageFence);
+    gpu_mark(kGpuPresent);
     const DkImage& target = swapchain_image(slot);
     DkImageView dst;
     dkImageViewDefaults(&dst, &target);
@@ -1440,7 +1561,9 @@ bool aurora_switch_dk_present(void* texture) {
     dkCmdBufBlitImage(R.cmd, &src, &sr, &dst, &dr, DkBlitFlag_FilterLinear, 0);
     g_copyRun = true;  // the next draw into Aurora's picture waits for the blit
     keep_until_done(std::static_pointer_cast<void>(t));
+    gpu_mark(kGpuGap);
     flush();
+    gpu_collect();
     if (g_diag.bufDump) buf_dump_maybe(presentCall);
     if (g_diag.texDump) tex_dump_maybe(presentCall);
     swapchain_present(slot);

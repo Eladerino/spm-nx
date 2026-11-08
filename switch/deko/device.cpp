@@ -136,7 +136,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"invtexq", &Diag::invTexQ},       {"kpadnosync", &Diag::kpadNoSync},
     {"natnosync", &Diag::natNoSync},
     {"gxspin", &Diag::gxSpin},       {"gxfutex", &Diag::gxFutex},     {"gxsvclate", &Diag::gxSvcLate},
-    {"presentcpuwait", &Diag::presentCpuWait},
+    {"presentcpuwait", &Diag::presentCpuWait}, {"gpuperf", &Diag::gpuPerf},
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
 };
 
