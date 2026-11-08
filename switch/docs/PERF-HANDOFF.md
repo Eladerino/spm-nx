@@ -38,7 +38,7 @@ Some boots run heavy 2D at ~32 fps instead of ~40 for the whole session. In B3 (
 
 ## Reading the section 7 run
 
-Logs are in `live/perf-s7-*` (one folder per boot).
+Logs are in the section 7 folders under `live/` (one per boot; the runbook names them).
 
 1. **2D lock rate with gxsvclate on:** for each boot's he1_05 2D and he2_03 2D, check the `[vi]` retraces per frame. Normal is about 1.5; the lock is about 1.95-2.0 with high guest idle. If it locks in 2 or more of 4 boots, gxsvclate needs a fix before it goes default (see below).
 2. **3D smoothness:** use the retrace and frame-interval histogram line, together with Muse's eye report. 36 fps means a mix of 1-retrace and 2-retrace frames. If it feels worse than a steady 30, don't default it.
