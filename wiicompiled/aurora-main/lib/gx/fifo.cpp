@@ -1,3 +1,9 @@
+#if defined(__SWITCH__)
+#include "spm_worker_blocked.h"
+#define SPM_WORKER_BLOCKED(site) SpmWorkerBlockedScope spmWorkerBlocked(site)
+#else
+#define SPM_WORKER_BLOCKED(site) ((void)0)
+#endif
 #include "fifo.hpp"
 #include "command_processor.hpp"
 #include "../gfx/common.hpp"
@@ -426,6 +432,7 @@ void wait_for_decoder(std::unique_lock<std::mutex>& lock, AuroraGxWaitSite site,
     return;
   }
   ZoneScopedN("GX decode thread wait");
+  SPM_WORKER_BLOCKED(site == AURORA_GX_WAIT_QUEUE ? kSpmBlockedDecodeQueue : kSpmBlockedDecodeSync);
   auto& d = decoder();
   const bool timed = gfx::stage_timers_enabled();
   const auto start = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};

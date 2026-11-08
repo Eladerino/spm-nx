@@ -11,6 +11,7 @@
 //   - objects the recorded commands use are kept alive (shared_ptr) until their serial is done;
 //   - the image heap (64 MiB chunks, first fit), blocks of their own (buffers), the shader code block
 //     and the descriptor block.
+#include "spm_worker_blocked.h"
 #include "dk.h"
 
 #include <algorithm>
@@ -206,6 +207,7 @@ void flush() {
     FenceSlot& slot = g_fences[serial % kFenceRing];
     if (slot.serial != 0 && slot.serial > g_completed.load(std::memory_order_acquire)) {
         // the ring is full of unfinished work: the oldest submit has to finish first
+        SpmWorkerBlockedScope blocked(kSpmBlockedGpuFence);
         DkFence copy;
         {
             std::lock_guard<std::mutex> lock(g_fenceMutex);
@@ -262,6 +264,7 @@ bool wait_serial(uint64_t serial) {
             slotSerial = slot.serial;
         }
         if (slotSerial != serial) return true;  // overwritten: only after it was finished
+        SpmWorkerBlockedScope blocked(kSpmBlockedGpuFence);
         if (dkFenceWait(&copy, 2'000'000'000ll) == DkResult_Success) {
             note_completed(serial);
             return true;

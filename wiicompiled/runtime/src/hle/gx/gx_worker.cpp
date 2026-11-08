@@ -41,6 +41,11 @@ extern "C" uint32_t svcSignalToAddress(void* address, uint32_t signalType, int32
 extern "C" uint32_t svcGetInfo(uint64_t* out, uint32_t id0, uint32_t handle, uint64_t id1);
 #endif
 
+#if defined(__SWITCH__)
+#include "spm_worker_blocked.h"
+#endif
+extern "C" uint64_t spm_vi_retrace_total();  // vi.cpp
+
 namespace GxWorker {
 
 std::atomic<uint8_t> g_engaged{0};
@@ -260,6 +265,18 @@ Stat g_ownerNotifyWakes;
 Stat g_ownerTimeoutWakes;
 Stat g_ownerServiceMicros;   // time the waiting owner spent in the guest timing service
 Stat g_ownerServiceCalls;
+// Measurement only. The worker's time blocked inside replay on the renderer, by site
+// (spm_worker_blocked.h, Switch only): the rest of wall - CPU is the worker being off core 2.
+constexpr size_t kWorkerBlockedSites = 7;
+#if defined(__SWITCH__)
+static_assert(kWorkerBlockedSites == kSpmBlockedSiteCount);
+#endif
+Stat g_workerBlockedMicros[kWorkerBlockedSites];
+// Per presented frame: guest retraces since the last frame (0, 1, 2, 3 or more) and the wall
+// interval since it (under 20 ms, 20-30, 30-40, 40 or more), so an average of 1.68 retraces can be
+// told apart from a steady cadence.
+Stat g_framesByRetraces[4];
+Stat g_framesByInterval[4];
 Stat g_ownerServiceSkips;    // gxsvclate: timeouts that skipped the service (waited under the threshold)
 
 // The calling thread's CPU time in microseconds (Horizon's per-thread tick count, 19.2 MHz),
@@ -785,6 +802,18 @@ void FrameBoundary() {
     if (!t_owner || g_draining) {
         return;
     }
+    {
+        static uint64_t s_lastRetraces = spm_vi_retrace_total();
+        static auto s_lastBoundary = std::chrono::steady_clock::now();
+        const uint64_t retraces = spm_vi_retrace_total();
+        const auto boundary = std::chrono::steady_clock::now();
+        const auto intervalMicros =
+            std::chrono::duration_cast<std::chrono::microseconds>(boundary - s_lastBoundary).count();
+        g_framesByRetraces[std::min<uint64_t>(retraces - s_lastRetraces, 3)].Add();
+        g_framesByInterval[intervalMicros < 20000 ? 0 : intervalMicros < 30000 ? 1 : intervalMicros < 40000 ? 2 : 3].Add();
+        s_lastRetraces = retraces;
+        s_lastBoundary = boundary;
+    }
     // The production interval that starts now gets the next frame number: the
     // dflushcoal witness only speaks for the interval its drain completed in. This is
     // the presented-frame boundary every [gxworker] window is counted in — the same
@@ -970,6 +999,15 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t ownerServiceMicros = g_ownerServiceMicros.TakeDelta();
     const uint64_t ownerServiceCalls = g_ownerServiceCalls.TakeDelta();
     const uint64_t ownerServiceSkips = g_ownerServiceSkips.TakeDelta();
+    uint64_t workerBlocked[kWorkerBlockedSites];
+    for (size_t i = 0; i < kWorkerBlockedSites; ++i) {
+        workerBlocked[i] = g_workerBlockedMicros[i].TakeDelta();
+    }
+    uint64_t byRetraces[4], byInterval[4];
+    for (size_t i = 0; i < 4; ++i) {
+        byRetraces[i] = g_framesByRetraces[i].TakeDelta();
+        byInterval[i] = g_framesByInterval[i].TakeDelta();
+    }
     const uint64_t coalesced = g_dflushCoalesced.TakeDelta();
     const uint64_t dcFree = g_dcNoSyncFree.TakeDelta();
     const uint64_t dcCopyDrains = g_dcNoSyncCopyDrains.TakeDelta();
@@ -1023,6 +1061,22 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                      static_cast<double>(ownerServiceMicros) / 1000.0 / frames,
                      static_cast<double>(ownerServiceSkips) / frames,
                      g_gxSvcLateRequested.load(std::memory_order_relaxed) ? 1 : 0);
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: worker blocked in replay, ms a frame: decode queue %.2f, decode sync "
+                     "%.2f, frame worker %.2f, staging map %.2f, queue lock %.2f, GPU fence %.2f, shader %.2f\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(workerBlocked[0]) / 1000.0 / frames, static_cast<double>(workerBlocked[1]) / 1000.0 / frames,
+                     static_cast<double>(workerBlocked[2]) / 1000.0 / frames, static_cast<double>(workerBlocked[3]) / 1000.0 / frames,
+                     static_cast<double>(workerBlocked[4]) / 1000.0 / frames, static_cast<double>(workerBlocked[5]) / 1000.0 / frames,
+                     static_cast<double>(workerBlocked[6]) / 1000.0 / frames);
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: frames by retraces 0:%llu 1:%llu 2:%llu 3+:%llu, by interval <20ms:%llu "
+                     "20-30ms:%llu 30-40ms:%llu 40ms+:%llu\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<unsigned long long>(byRetraces[0]), static_cast<unsigned long long>(byRetraces[1]),
+                     static_cast<unsigned long long>(byRetraces[2]), static_cast<unsigned long long>(byRetraces[3]),
+                     static_cast<unsigned long long>(byInterval[0]), static_cast<unsigned long long>(byInterval[1]),
+                     static_cast<unsigned long long>(byInterval[2]), static_cast<unsigned long long>(byInterval[3]));
     }
     if (natSkips != 0) {
         // natnosync's scoreboard: non-GX natives reached with records pending that ran without
@@ -1183,6 +1237,13 @@ extern "C" void spm_dcnosync_set(bool enabled) {
 }
 
 // The gxspin switch's hook, the same pattern: the worker reads it each time it catches up.
+extern "C" bool spm_gxworker_is_current_thread() noexcept { return GxWorker::OnWorkerThread(); }
+extern "C" void spm_gxworker_note_blocked(uint32_t site, uint64_t micros) noexcept {
+    if (site < GxWorker::kWorkerBlockedSites) {
+        GxWorker::g_workerBlockedMicros[site].Add(micros);
+    }
+}
+
 extern "C" void spm_gxsvclate_set(bool enabled) {
     GxWorker::g_gxSvcLateRequested.store(enabled, std::memory_order_relaxed);
 }
