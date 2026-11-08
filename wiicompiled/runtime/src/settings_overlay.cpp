@@ -96,6 +96,7 @@ void SetMixWorkerEnabled(bool enabled);
 namespace swdk {
 bool diag_set(const char* key, bool on);
 bool diag_get(const char* key);
+void diag_reset_defaults();
 void diag_flush_all(const char* reason);
 uint64_t diag_present_count();
 void log_flush();
@@ -371,6 +372,8 @@ bool g_optOpen = false;
 int g_optTab = 0, g_optRow = 0;
 bool g_optQuitPrompt = false;
 int g_optQuitChoice = 1;          // 0 Quit, 1 Cancel
+bool g_optResetPrompt = false;
+int g_optResetChoice = 1;         // 0 Reset, 1 Cancel
 uint32_t g_optPrevHold = 0, g_optSuppress = 0;
 Clock::time_point g_optLastToggle{}, g_optOpenedAt{};
 std::array<Clock::time_point, 4> g_optRepeatAt{};
@@ -394,6 +397,7 @@ bool g_fasterMenus = RuntimeConfigFile::FasterMenus(true);
 bool g_saveAnywhere = RuntimeConfigFile::SaveAnywhere(true);
 // Options > Cheats (this session only) and Options > Controls captures.
 bool g_cheatHp = false, g_cheatCoins = false;
+bool g_cheatFlip = false, g_cheatTokens = false;
 int g_warpGroup = 0, g_warpRoom = 0;
 int g_optPadCapture = -1;            // controller row waiting for a button, or -1
 std::atomic<bool> g_ffKeyHeld{false}, g_ffPadHeld{false}, g_ffToggled{false};
@@ -4185,6 +4189,7 @@ void SetOptionsOpen(bool open) {
     g_optOpen = open;
     g_optLastToggle = Clock::now();
     g_optQuitPrompt = false;
+    g_optResetPrompt = false;
 #if defined(__SWITCH__)
     if (!open && g_clearCacheState == 1) g_clearCacheState = 0;  // closing cancels a pending clear
 #endif
@@ -4480,6 +4485,101 @@ void SetGxWorkerMode(int mode) {
 }
 #endif
 
+// Reset all settings (the Game page's row, behind its confirm prompt): every setting this
+// menu owns goes back to the value a fresh install boots with, through the same setters
+// and helpers the rows themselves use, so live state and Config.toml agree afterwards.
+// Game, display, sound, the session cheats, controller bindings for every style, and (on
+// Switch) the Developer page's values and the Diagnostics switches, whose defaults are
+// the Diag field initialisers; WriteDiagFileBack then persists them like any page flip.
+// Saves, mods and the shader cache are not settings and are not touched. Some display
+// values (aspect, texture replacements) only take effect at the next launch, exactly as
+// when their own rows change them.
+void ResetAllSettings() {
+    // Game.
+    g_ffSpeed = 3;
+    RuntimeConfigFile::SetFastForwardSpeed(g_ffSpeed);
+    g_ffToggleMode = false;
+    RuntimeConfigFile::SetFastForwardToggle(false);
+    g_fasterMenus = true;
+    RuntimeConfigFile::SetFasterMenus(true);
+    g_saveAnywhere = true;
+    RuntimeConfigFile::SetSaveAnywhere(true);
+#if SPM_REGION_PAL
+    RuntimeConfigFile::SetLanguage("en");
+#endif
+    // Display. The resolution default is the one g_resolutionScale initialises with.
+#if defined(__SWITCH__)
+    SetResolutionScale(1.5f);
+#else
+    SetResolutionScale(1.0f);
+#endif
+    SetAspectMode(DisplaySettings::kAspectFill);
+    SetShowFps(false);
+#if defined(__SWITCH__)
+    RuntimeConfigFile::Mutable().textureReplacements = true;
+    RuntimeConfigFile::WriteSetting("video", "texture_replacements", "true");
+#else
+    SetFrameInterpolationMode(0);
+    SetVSync(true);
+#endif
+    // Sound.
+    g_audioVolumePercent = 100;
+    AudioBackend::Instance().SetMasterVolume(1.0f);
+    RuntimeConfigFile::SetAudioVolume(1.0f);
+    g_musicVolumePercent = 100;
+    MusicAttenuation::SetMusicVolume(1.0f);
+    RuntimeConfigFile::SetMusicVolume(1.0f);
+    g_soundEffectsVolumePercent = 100;
+    MusicAttenuation::SetSoundEffectsVolume(1.0f);
+    RuntimeConfigFile::SetSoundEffectsVolume(1.0f);
+    g_voicesVolumePercent = 100;
+    MusicAttenuation::SetVoicesVolume(1.0f);
+    RuntimeConfigFile::SetVoicesVolume(1.0f);
+    MusicAttenuation::SetUiVolume(1.0f);
+    RuntimeConfigFile::SetUiVolume(1.0f);
+    g_audioMuted = false;
+    AudioBackend::Instance().SetMuted(false);
+    RuntimeConfigFile::SetAudioMuted(false);
+    g_attenuateMusicWhenMediaPlays = false;
+    RuntimeConfigFile::SetAttenuateMusicWhenMediaPlays(false);
+    // Cheats: session-only, so off is both the default and the whole reset.
+    if (g_cheatHp) SpmMapSweep::SetInfiniteHp(g_cheatHp = false);
+    if (g_cheatCoins) SpmMapSweep::SetMaxCoins(g_cheatCoins = false);
+    if (g_cheatFlip) SpmMapSweep::SetInfiniteFlip(g_cheatFlip = false);
+    if (g_cheatTokens) SpmMapSweep::SetMaxArcadeTokens(g_cheatTokens = false);
+    // Controls: vibration, the keyboard table, and every gamepad style's bindings
+    // (kPadStyleCount in virtual_remote.cpp: Xbox, PlayStation, Nintendo).
+    g_rumbleEnabled = true;
+    RuntimeConfigFile::SetRumbleEnabled(true);
+    Keybinds::ResetDefaults();
+    for (int style = 0; style < 3; ++style) ResetGamepadBindings(style);
+#if defined(__SWITCH__)
+    // The Developer page's values.
+    g_disabledPostProcessingPaths = 0;
+    RuntimeGameGraphicsOptions::SetDisabledPostProcessingPaths(0);
+    RuntimeConfigFile::SetDisabledPostProcessingPaths(0);
+    g_disableCopyFilter = true;
+    aurora_set_disable_copy_filter(true);
+    RuntimeConfigFile::SetDisableCopyFilter(true);
+    g_skipUnreadyPipelines = true;
+    aurora_set_skip_unready_pipelines(true);
+    RuntimeConfigFile::SetSkipUnreadyPipelines(true);
+    SetFrameGraph(false);
+    g_audioMixWorker = true;
+    AxDspHle::SetMixWorkerEnabled(true);
+    RuntimeConfigFile::SetAudioMixWorker(true);
+    SetSpinningCoins(true);
+    RuntimeConfigFile::Mutable().textureDumps = false;
+    RuntimeConfigFile::WriteSetting("video", "texture_dumps", "false");
+    // Diagnostics: the switches, then the file, persisted the page's own way.
+    swdk::diag_reset_defaults();
+    std::fprintf(stderr, "[diag] reset all switches to defaults at present %llu\n",
+                 static_cast<unsigned long long>(swdk::diag_present_count()));
+    swdk::log_flush();
+    WriteDiagFileBack();
+#endif
+}
+
 std::vector<OptRow> OptionsRows(int tab) {
     std::vector<OptRow> rows;
     if (tab == 0) {
@@ -4604,6 +4704,16 @@ std::vector<OptRow> OptionsRows(int tab) {
             SpmMapSweep::ReturnToTitle();
             SetOptionsOpen(false);
         }, "Leave the game without saving and go back to the title screen."});
+#if defined(__SWITCH__)
+        const char* resetHelp = "Put every setting in this menu back to how it ships: game, display, sound, cheats, controls, and the Developer and Diagnostics pages. Your saves are not touched. Some display changes apply after a restart.";
+#else
+        const char* resetHelp = "Put every setting in this menu back to how it ships: game, display, sound, cheats and controls. Your saves are not touched. Some display changes apply after a restart.";
+#endif
+        rows.push_back({"Reset all settings", "", [](int d) {
+            if (d != 0) return;
+            g_optResetPrompt = true;
+            g_optResetChoice = 1;
+        }, resetHelp});
 #if !defined(__SWITCH__)
         rows.push_back({"Developer tools", "", [](int d) {
             if (d != 0) return;
@@ -4751,10 +4861,9 @@ std::vector<OptRow> OptionsRows(int tab) {
                 SpmMapSweep::SwitchCharacter(Cycle(current, d == 0 ? 1 : d, 4));
             }, "Left / right switches character right away, anywhere."});
         }
-        static bool s_flip = false, s_tokens = false;
-        rows.push_back({"Infinite 3D time", OnOff(s_flip), [](int) { SpmMapSweep::SetInfiniteFlip(s_flip = !s_flip); },
+        rows.push_back({"Infinite 3D time", OnOff(g_cheatFlip), [](int) { SpmMapSweep::SetInfiniteFlip(g_cheatFlip = !g_cheatFlip); },
                         "Mario can stay flipped into 3D as long as he likes."});
-        rows.push_back({"9999 arcade tokens", OnOff(s_tokens), [](int) { SpmMapSweep::SetMaxArcadeTokens(s_tokens = !s_tokens); },
+        rows.push_back({"9999 arcade tokens", OnOff(g_cheatTokens), [](int) { SpmMapSweep::SetMaxArcadeTokens(g_cheatTokens = !g_cheatTokens); },
                         "For Mr. Game Guy's arcade in Flipside."});
 #if defined(__SWITCH__)
         rows.push_back(SectionHeading("Stats and items"));
@@ -5421,6 +5530,15 @@ void HandleOptionsInput() {
         }
         return;
     }
+    if (g_optResetPrompt) {
+        if (ev & (kOptLeft | kOptRight | kOptUp | kOptDown)) g_optResetChoice ^= 1;
+        if (ev & kOptBack) g_optResetPrompt = false;
+        if (ev & kOptConfirm) {
+            if (g_optResetChoice == 0) ResetAllSettings();
+            g_optResetPrompt = false;
+        }
+        return;
+    }
     if (ev & kOptBack) {
         SetOptionsOpen(false);
         return;
@@ -5709,6 +5827,18 @@ void DrawOptionsMenu() {
             Box(cx - 70, -12, cx + 70, -52, sel ? IM_COL32(254, 230, 133, 255) : IM_COL32(236, 228, 210, 255), 12.0f,
                 sel ? 5.0f : 3.0f, sel ? IM_COL32(220, 60, 40, 255) : IM_COL32(24, 18, 12, 255));
             Txt(i == 0 ? "Quit" : "Cancel", cx, -32, 22.0f, 0x18120CFFu, 1);
+        }
+    }
+
+    if (g_optResetPrompt) {
+        Box(-200, 70, 200, -70, IM_COL32(255, 252, 240, 255), 16.0f, 6.0f);
+        Txt("Reset all settings?", 0, 32, 28.0f, 0x18120CFFu, 1);
+        for (int i = 0; i < 2; ++i) {
+            const float cx = i == 0 ? -90.0f : 90.0f;
+            const bool sel = g_optResetChoice == i;
+            Box(cx - 70, -12, cx + 70, -52, sel ? IM_COL32(254, 230, 133, 255) : IM_COL32(236, 228, 210, 255), 12.0f,
+                sel ? 5.0f : 3.0f, sel ? IM_COL32(220, 60, 40, 255) : IM_COL32(24, 18, 12, 255));
+            Txt(i == 0 ? "Reset" : "Cancel", cx, -32, 22.0f, 0x18120CFFu, 1);
         }
     }
 }

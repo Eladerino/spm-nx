@@ -500,6 +500,15 @@ void diag_enumerate(void (*visit)(const char* name, bool on, void* user), void* 
     for (const DiagKey& key : kDiagKeys) visit(key.name, (g_diag.*(key.field)).load(), user);
 }
 
+// diag_reset_defaults (dk.h): a fresh Diag carries the defaults; pushing each one through
+// diag_set runs that switch's forwarding, so the runtime lands in the same state a boot
+// with no dk_diag.txt would arm. Table order ends on gxthread, so apply_gx_worker_mode's
+// last word is the default mode.
+void diag_reset_defaults() {
+    const Diag defaults;
+    for (const DiagKey& key : kDiagKeys) diag_set(key.name, (defaults.*(key.field)).load());
+}
+
 // diag_present_count (dk.h): R.presents for "[diag]" log markers written
 // outside this file (the menu's set/mark lines use diag_cmd_poll's format).
 uint64_t diag_present_count() { return R.presents; }
