@@ -1400,9 +1400,11 @@ bool aurora_switch_dk_present(void* texture) {
     DkFence imageFence{};
     const uint64_t a0 = now_ns();
     const int slot = swapchain_acquire(&imageFence);
+    const bool cpuImageWait = g_diag.presentCpuWait.load(std::memory_order_relaxed);
+    if (cpuImageWait) swapchain_wait_cpu(&imageFence);
     const uint64_t acquireNs = now_ns() - a0;
     std::unique_lock<std::mutex> lock(queue_mutex());
-    swapchain_wait(&imageFence);
+    if (!cpuImageWait) swapchain_wait(&imageFence);
     const DkImage& target = swapchain_image(slot);
     DkImageView dst;
     dkImageViewDefaults(&dst, &target);

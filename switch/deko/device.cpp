@@ -136,6 +136,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"invtexq", &Diag::invTexQ},       {"kpadnosync", &Diag::kpadNoSync},
     {"natnosync", &Diag::natNoSync},
     {"gxspin", &Diag::gxSpin},       {"gxfutex", &Diag::gxFutex},     {"gxsvclate", &Diag::gxSvcLate},
+    {"presentcpuwait", &Diag::presentCpuWait},
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
 };
 
@@ -200,7 +201,7 @@ void padreplay_parse_params(const char* value) {
 }
 
 // dk_diag stagingslots=3|4: how many staging buffers Aurora rotates through (gfx/common.cpp).
-uint32_t g_stagingSlots = 4;
+uint32_t g_stagingSlots = 3;
 
 // dk_diag.txt: one switch per line as "key=1" or "key=0". A "#" starts a comment, blank lines and
 // spaces around the "=" are fine, a bare "key" means on, and "0", "off" or "false" mean off. A key
@@ -666,6 +667,10 @@ int swapchain_acquire(DkFence* fence) {
 void swapchain_wait(DkFence* fence) {
     check_queue("acquiring a swapchain image");
     dkQueueWaitFence(R.queue, fence);
+}
+
+void swapchain_wait_cpu(DkFence* fence) {
+    if (dkFenceWait(fence, 10'000'000'000ll) != DkResult_Success) dklog("a swapchain image was not free after 10 s");
 }
 
 const DkImage& swapchain_image(int slot) { return g_swapImages[slot]; }
