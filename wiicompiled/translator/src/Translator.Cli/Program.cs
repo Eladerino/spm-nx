@@ -138,7 +138,8 @@ TranslationOptions WithProjectFrontEndPolicy(
         // Splicing a body whose runtime winner is a native registration, a
         // dropped translation or a Kamek overlay would silently keep executing
         // the original bytes.
-        LeafInliningBlockedTargets = leafInliningBlockedTargets.Value
+        LeafInliningBlockedTargets = leafInliningBlockedTargets.Value,
+        GuestIntrinsics = GuestIntrinsicTable.Value
     };
 string? translateModInputCacheDirectory = null;
 string? translateModPublishedOutputDirectory = null;
@@ -3989,7 +3990,23 @@ static TranslationOptions WithProjectCodegenPolicy(
         // leaf, so a partial mod chunk that only carries one half of an ABI
         // prologue is rejected rather than mis-transformed.
         EnableLeafAbiSpillElision = true,
+        GuestIntrinsics = GuestIntrinsicTable.Value,
     };
+
+partial class Program
+{
+    /// <summary>
+    /// Call-site intrinsic substitution, off unless RECOMP_GUEST_INTRINSICS names a table file
+    /// ("ADDR kind" lines, see Translator.Core.Translation.GuestIntrinsicSubstitution).
+    /// </summary>
+    internal static readonly Lazy<IReadOnlyDictionary<uint, string>?> GuestIntrinsicTable = new(() =>
+    {
+        var path = Environment.GetEnvironmentVariable("RECOMP_GUEST_INTRINSICS");
+        return string.IsNullOrWhiteSpace(path)
+            ? null
+            : Translator.Core.Translation.GuestIntrinsicSubstitution.LoadTable(path);
+    });
+}
 
 /// <summary>
 /// One option carried by one command. <paramref name="Value"/> is the metavariable

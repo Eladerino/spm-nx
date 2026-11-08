@@ -1,0 +1,4 @@
+# Call-site intrinsic substitution for SPM USA (R8PE01 rev 0), used when RECOMP_GUEST_INTRINSICS names this file.
+# "ADDR kind": a direct call to ADDR becomes the named intrinsic in the caller. Bit-exact substitutions only.
+80261E08 sqrt   # sqrt wrapper: calls only __ieee754_sqrt, no errno write
+80261BBC sqrt   # __ieee754_sqrt (fdlibm e_sqrt, correctly rounded; bit-exact vs host sqrt per sqrtverify)

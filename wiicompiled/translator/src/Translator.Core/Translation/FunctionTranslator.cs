@@ -70,7 +70,12 @@ public sealed record TranslationOptions(
     /// acyclic and every exit is a plain return. Emergency opt-out; the
     /// straight-line shape keeps working with this off.
     /// </summary>
-    bool LeafInliningAllowMultiBlockCallees = true)
+    bool LeafInliningAllowMultiBlockCallees = true,
+    /// <summary>
+    /// Call-site intrinsic substitution table (guest entry point -> intrinsic kind, see
+    /// <see cref="GuestIntrinsicSubstitution"/>). Null or empty leaves every call as it is.
+    /// </summary>
+    IReadOnlyDictionary<uint, string>? GuestIntrinsics = null)
 {
     public static TranslationOptions Default { get; } = new();
 }
@@ -193,6 +198,9 @@ public sealed class FunctionTranslator
         // non-null here.
         var irFunction = BuildLinearIr(
             disassembler, entryPoint, options, metrics, out var instructions, out var basicBlocks)!;
+        // Before leaf inlining, so a tiny intrinsic wrapper is replaced instead of spliced in.
+        if (options.GuestIntrinsics is { Count: > 0 } intrinsics)
+            irFunction = GuestIntrinsicSubstitution.Apply(irFunction, intrinsics, out _);
         irFunction = ApplyLeafInlining(disassembler, entryPoint, irFunction, options, metrics);
         metrics.IrInstructionCount = irFunction.Blocks.Sum(static b => b.Instructions.Count);
         metrics.IrBlockCount = irFunction.Blocks.Count;
