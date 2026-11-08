@@ -516,6 +516,8 @@ uint32_t ExtractTvFormat(uint32_t tvMode) {
 // frame is only late. Reads only, nothing the guest sees changes.
 static std::atomic<uint64_t> s_viRetraces{0};
 static std::atomic<uint64_t> s_viSleeperWakes{0};
+static std::atomic<uint64_t> s_viRetracesTotal{0};  // never reset: the per-frame retrace mix (gx_worker.cpp)
+extern "C" uint64_t spm_vi_retrace_total() { return s_viRetracesTotal.load(std::memory_order_relaxed); }
 extern "C" void spm_vi_retrace_stats(uint64_t* retraces, uint64_t* sleeperWakes, uint64_t* idleNanos) {
     *retraces = s_viRetraces.exchange(0, std::memory_order_relaxed);
     *sleeperWakes = s_viSleeperWakes.exchange(0, std::memory_order_relaxed);
@@ -727,6 +729,7 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
         uint32_t queueHead = 0;
         Memory::TryRead32(kViRetraceQueueAddr, queueHead);
         s_viRetraces.fetch_add(1, std::memory_order_relaxed);
+        s_viRetracesTotal.fetch_add(1, std::memory_order_relaxed);
         if (queueHead != 0) s_viSleeperWakes.fetch_add(1, std::memory_order_relaxed);
         ctx->gpr[3] = kViRetraceQueueAddr;
         OSWakeupThread_HLE_801aaaa4(ctx);

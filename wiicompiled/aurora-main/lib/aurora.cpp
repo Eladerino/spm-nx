@@ -1,3 +1,9 @@
+#if defined(__SWITCH__)
+#include "spm_worker_blocked.h"
+#define SPM_WORKER_BLOCKED(site) SpmWorkerBlockedScope spmWorkerBlocked(site)
+#else
+#define SPM_WORKER_BLOCKED(site) ((void)0)
+#endif
 #include <aurora/aurora.h>
 #include <aurora/external.h>
 
@@ -404,6 +410,7 @@ bool wait_for_frame_worker_private_for(FrameWorkerPhase phase, std::chrono::micr
     return frame_worker_phase_reached(phase);
   }
 
+  SPM_WORKER_BLOCKED(kSpmBlockedFrameWorker);
   const bool reached =
       g_frameWorker.cv.wait_for(lock, timeout, [phase] { return frame_worker_phase_reached(phase); });
   if (reached) {
