@@ -131,6 +131,33 @@ void fw_print_window(uint64_t firstFrame, uint64_t lastFrame) noexcept {
                static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
                static_cast<unsigned long long>(n), per(8), per(9), per(1), per(2), per(3), per(4), per(5), per(6),
                per(7), static_cast<double>(maxSpan) / 1e6, static_cast<unsigned long long>(cur[10] - prev[10]));
+  {
+    static uint64_t sealPrev[gfx::kFrameSealStageCount]{};
+    uint64_t sealCur[gfx::kFrameSealStageCount];
+    gfx::frame_seal_read(sealCur);
+    double seal[gfx::kFrameSealStageCount];
+    for (uint32_t i = 0; i < gfx::kFrameSealStageCount; ++i) {
+      seal[i] = static_cast<double>(sealCur[i] - sealPrev[i]) / 1e6 / static_cast<double>(n);
+      sealPrev[i] = sealCur[i];
+    }
+    double blocked[3]{};
+#if defined(__SWITCH__)
+    static uint64_t blockedPrev[3]{};
+    const uint32_t blockedSite[3] = {kSpmBlockedQueueLock, kSpmBlockedGpuFence, kSpmBlockedShader};
+    for (int i = 0; i < 3; ++i) {
+      const uint64_t now = g_spmFrameWorkerBlockedMicros[blockedSite[i]].load(std::memory_order_relaxed);
+      blocked[i] = static_cast<double>(now - blockedPrev[i]) / 1e3 / static_cast<double>(n);
+      blockedPrev[i] = now;
+    }
+#endif
+    std::fprintf(stderr,
+                 "[fseal] frames %llu-%llu: per cycle ms: encoder %.2f, async lock %.2f, async %.2f, interp %.2f, unmap "
+                 "%.2f, copies %.2f, map %.2f, pipeline %.2f, imgui %.2f, efb cancel %.2f, seal_frame %.2f, expire "
+                 "%.2f; frame worker blocked: queue lock %.2f, GPU fence %.2f, shader %.2f\n",
+                 static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame), seal[0],
+                 seal[1], seal[2], seal[3], seal[4], seal[5], seal[6], seal[7], seal[8], seal[9], seal[10], seal[11],
+                 blocked[0], blocked[1], blocked[2]);
+  }
   for (int i = 0; i < 12; ++i) prev[i] = cur[i];
 }
 // Presentation schedule for the frame being sealed, set by the producer. Jobs carry absolute
@@ -376,6 +403,9 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept;
 
 void frame_worker_main() noexcept {
   t_onFrameWorker = true;
+#if defined(__SWITCH__)
+  t_spmFrameWorkerThread = true;
+#endif
 #if defined(__SWITCH__)
   // Pin the worker to core 2, off the game thread's default core: the encode/submit/present cycle
   // stays on one core and keeps its caches warm instead of floating over all three application
@@ -1721,7 +1751,10 @@ void seal_frame_locked(gfx::SealedFrame& sealedFrame, SealedFrameContext& ctx) {
   const auto encoderDescriptor = wgpu::CommandEncoderDescriptor{
       .label = "Redraw encoder",
   };
-  ctx.encoder = g_device.CreateCommandEncoder(&encoderDescriptor);
+  {
+    gfx::FrameSealScope sealScope(gfx::kFrameSealEncoder);
+    ctx.encoder = g_device.CreateCommandEncoder(&encoderDescriptor);
+  }
   // Probe-sized CPU-consumed copies read back asynchronously. Their downscale blits push uniforms,
   // so prepare them while the producer's staging buffers are still mapped.
   gfx::efb_ram::seal_async_downloads();
@@ -1745,14 +1778,26 @@ void seal_frame_locked(gfx::SealedFrame& sealedFrame, SealedFrameContext& ctx) {
   ctx.presentSource = webgpu::current_present_source();
   // ImGui draw lists are built once per frame and replayed by each slot's ImGui pass, which is why
   // the next ImGui frame cannot start until the encode phase is done.
-  if (!g_config.externalPresentation) imgui::render_frame_data();
+  {
+    gfx::FrameSealScope sealScope(gfx::kFrameSealImgui);
+    if (!g_config.externalPresentation) imgui::render_frame_data();
+  }
   // Drop the sealed frame's lazy RAM-readback requests while the producer is still excluded; it
   // starts registering the next frame's as soon as SEALED is published.
-  gfx::efb_ram::cancel();
+  {
+    gfx::FrameSealScope sealScope(gfx::kFrameSealEfbCancel);
+    gfx::efb_ram::cancel();
+  }
   // Detach the recorded passes. From here the producer's list is empty and the
   // encode phase reads only worker-private state.
-  gfx::seal_frame(sealedFrame);
-  gfx::expire_bind_group_cache();
+  {
+    gfx::FrameSealScope sealScope(gfx::kFrameSealSealFrame);
+    gfx::seal_frame(sealedFrame);
+  }
+  {
+    gfx::FrameSealScope sealScope(gfx::kFrameSealExpire);
+    gfx::expire_bind_group_cache();
+  }
 }
 
 // Phase 2: encode every presentation slot. Reads only `ctx` and the sealed passes, so it runs

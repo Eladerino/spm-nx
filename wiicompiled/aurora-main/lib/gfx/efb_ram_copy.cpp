@@ -1,4 +1,5 @@
 #include "efb_ram_copy.hpp"
+#include "common.hpp"
 
 #include "efb_ram_encoder.hpp"
 #include "tex_copy_conv.hpp"
@@ -395,7 +396,12 @@ void cancel() noexcept {
 
 void seal_async_downloads() noexcept {
   {
-    std::lock_guard lock{g_asyncMutex};
+    std::unique_lock lock{g_asyncMutex, std::defer_lock};
+    {
+      FrameSealScope sealScope(kFrameSealAsyncLock);
+      lock.lock();
+    }
+    FrameSealScope sealScope(kFrameSealAsyncRest);
     for (auto& pending : g_asyncPending) {
       const auto it = g_asyncSlots.find(pending.dest);
       ensure_native_texture(pending, it != g_asyncSlots.end() ? &it->second.nativeTexture : nullptr);

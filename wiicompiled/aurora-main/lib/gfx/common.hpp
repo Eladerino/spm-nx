@@ -327,6 +327,49 @@ void seal_frame(SealedFrame& out) noexcept;
 // frames. All the functions are cheap no-ops while the toggle is off: callers gate
 // their clock reads on stage_timers_enabled().
 bool stage_timers_enabled() noexcept;
+
+// Measurement only, the [fseal] line: the steps of the frame worker's seal, in order.
+enum FrameSealStage : uint32_t {
+  kFrameSealEncoder = 0,       // CreateCommandEncoder
+  kFrameSealAsyncLock,         // efb_ram::seal_async_downloads, acquiring g_asyncMutex
+  kFrameSealAsyncRest,         // efb_ram::seal_async_downloads, under it
+  kFrameSealInterpolation,     // gx::finalize_frame_interpolation
+  kFrameSealUnmap,             // the staging buffer's Unmap
+  kFrameSealCopies,            // CopyBufferToBuffer and CopyBufferToTexture
+  kFrameSealMap,               // map_staging_buffer
+  kFrameSealPipelineFrame,     // end_pipeline_frame
+  kFrameSealImgui,             // imgui::render_frame_data
+  kFrameSealEfbCancel,         // efb_ram::cancel
+  kFrameSealSealFrame,         // gfx::seal_frame
+  kFrameSealExpire,            // expire_bind_group_cache
+  kFrameSealStageCount,
+};
+void frame_seal_add(FrameSealStage stage, std::chrono::nanoseconds duration) noexcept;
+void frame_seal_read(uint64_t* nanos) noexcept;  // kFrameSealStageCount running totals
+
+class FrameSealScope {
+public:
+  explicit FrameSealScope(FrameSealStage stage, bool on = true) noexcept
+  : m_stage(stage), m_on(on && stage_timers_enabled()) {
+    if (m_on) {
+      m_start = std::chrono::steady_clock::now();
+    }
+  }
+  ~FrameSealScope() { stop(); }
+  FrameSealScope(const FrameSealScope&) = delete;
+  FrameSealScope& operator=(const FrameSealScope&) = delete;
+  void stop() noexcept {
+    if (m_on) {
+      frame_seal_add(m_stage, std::chrono::steady_clock::now() - m_start);
+      m_on = false;
+    }
+  }
+
+private:
+  FrameSealStage m_stage;
+  bool m_on;
+  std::chrono::steady_clock::time_point m_start{};
+};
 // The runtime setter for the same toggle: the flag still initialises from
 // NSMBW_STAGE_TIMERS on first use; this is what changes it afterwards.
 void stage_timers_set_enabled(bool on) noexcept;
