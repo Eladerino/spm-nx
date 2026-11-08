@@ -1,66 +1,57 @@
-# Stock-clock performance: handoff (Nov 8 2026)
+# Performance: state, method and findings (Nov 8 2026)
 
 Goal: 60 fps at stock clocks (1020/384/1331), meaning a game-thread frame under 16.7 ms. Handheld only.
 
-## Where things stand
+Threads: the game thread on core 0, Aurora's GX decode thread on core 1, and the GX worker plus Aurora's frame worker sharing core 2. Frames quantize to the retrace grid: a frame that misses its retrace waits a whole one, so own work plus waits have to fit under 16.7 ms nearly every frame, not on average.
 
-| Area | fps now | Bound by |
+## Where things stand (stock clocks, 1.5x render scale unless noted)
+
+| Area | fps | Bound by |
 |---|---|---|
 | Light 2D and 3D | 60 | nothing |
-| Heavy 2D (he2_03, he1_05) | ~40 | GX worker replay ~15 ms, plus the end-of-frame hand-off |
-| Heavy 3D (he1_05, he2_03) | ~36 with `gxsvclate` (default on since Nov 8; 30 with it off) | game thread: ~18.5-19 ms of its own work, plus a 2-3 ms CopyDisp wait |
+| Heavy 2D (he2_03, he1_05) | ~40 | the game-side chain: GX worker replay ~14 ms plus decode, and the end-of-frame waits |
+| Heavy 3D (he1_05, he2_03) | ~35-36 with `gxsvclate` on (30 with it off) | game thread: ~18.5 ms of its own work, plus the CopyDisp wait |
 
-Threads: game thread on core 0, Aurora's GX decode thread on core 1, and the GX worker plus Aurora's frame worker sharing core 2.
+Lowering the render scale helps heavy 2D only until the game chain binds (at 0.75x, heavy 2D sits at ~47 fps with gxsvclate on): fill is not the whole story anywhere heavy.
 
-## Branches and PRs
+## What shipped, and what it measured
 
-- `main`: the release line (v0.2.0 = 7b9c6a28 on the card).
-- PR #26, `claude/project-thread-4csxi6`: all switches are default off, and everything is measurement or opt-in:
-  - `gxfutex`: lossless worker wake. It works (late wakes go to 0) but gives no measurable speedup. Keeping it is harmless.
-  - `gxsvclate`: a drain waiting on the worker runs the guest timing service only after 4 ms. **This gave heavy 3D 30 to 36 fps on 2 of 2 boots, with clean audio.** One of its two boots showed a 2D lock at 2 retraces (~30 fps). Section 7 (4 boots) confirmed ~35.8 fps 3D, no 2D lock on boots 2-4, and Brandon judged it smoother with no audio issues, so it is now default on.
-  - Counters: worker CPU vs wall in replay, KB unreplayed at drains, owner wake causes, timing-service ms, renderer waits inside replay, and a retrace / frame-interval histogram.
-- `claude/intrinsics`: native sqrt pasted into callers by the translator. It's bit-exact but gave no reliable gain, so it's parked.
+- **Door hitch** (v0.2.0): the message-string patcher swept all of MEM1 for every patched line on every area change (~600 ms per door). `pmsmemo` (default on) memoizes the patched addresses; the sweep now runs only for lines whose check fails.
+- **Drain avoidance** (v0.2.0): `natnosync`, `dcnosync` and `invtexq` (all default on) removed the GX worker drains that most guest calls used to pay; in the Nov 7 stock A/B they took he2_03 from 27.8 to 36.3 fps and he1_05 from 29.0 to 36.7. What is left is the end-of-frame wait at CopyDisp.
+- **`gxsvclate`** (default on, PR #26): a drain waiting on the worker runs the guest timing service only after 4 ms instead of at every 1 ms timeout. Heavy 3D rose from ~30 to ~36 fps at stock, judged smoother in play, audio clean. `gxsvclate=0` turns it off.
+- **`gxfutex`** (default off, PR #26): the worker sleeps on Horizon's address arbiter instead of a condition variable. Lost wakes go to zero; frame time measures neutral, so it stays an opt-in switch.
+- **Save-load hitch** (fixed in v0.3.0): every boot on every build had one frame of ~6.5 s in the load window, a second or two after the player got control. The hunt is the method section below; the culprit was the VI stall watchdog, a bring-up diagnostic that dumped the guest thread table unconditionally 30 s after startup. The dump holds the fiber table mutex while it walks every fiber's guest stack, and at load time that walk took ~6.5 s, so every guest thread switch queued behind it. Two-part fix: the watchdog only dumps when nothing has been presented or the picture is black, and the dump now walks a snapshot taken under the lock instead of holding the lock for the walk. Proof: three boots, load-window longest frame 6,483-7,257 ms before, 234-259 ms after, zero dumps.
 
-## What was tried and ruled out (don't redo)
+## Method
 
-- Small translator tweaks: compare-branch fusion, sqrt intrinsic, and the CR, call-guard and callcount gates. All are below noise. The game thread's own work barely moves.
-- Bare-fcvt single rounding: fcvtcheck said DIFFERENT, so the masked form stays.
-- Lost worker wakes as the cause of the CopyDisp wait: wrong. They were real but tiny.
-- Reverb off, native reverb: no gain, because it runs in retrace idle. Native reverb is also blocked by copyright.
+- **Stock-clock gate.** A run only counts at stock clocks. There is no clock readback in the debug server, so stock is proven by the run's own segment rates (heavy 2D ~36-42 fps, heavy 3D ~30 off / ~36 on gxsvclate); a segment sitting at a flat ~60 presents/s means the clocks were boosted and the run is void.
+- **One variable per A/B.** Flips go through dk_diag.txt on one build wherever the change allows it (the same boot can re-test a flip), and builds are identified by SHA-256 everywhere. ON/OFF/ON across separate boots for anything that ships on a measurement.
+- **Instrument before theorizing.** The counters that settled questions here: the [vi] pacing windows (longest frame per 600 presents), the [gxworker] wait-by-cause lines, and targeted one-off instrumentation (lock-site tracking in the fiber manager) added for a single hunt and removed after. Several confident theories died to a single instrumented run; the ruled-out list below is mostly those.
+- **The ear is a metric.** Any change that touches wait or service cadence gets a play pass for audio before it counts as done.
+- Console work follows the claim protocol (`/agent-claim.txt` on the card, plus a screenshot of the foreground before the first input), and the card is restored to the release build and the pre-run dk_diag bytes after every run.
 
-## The slow-boot state (random, about 1 boot in 4-6)
+## Ruled out (don't redo)
 
-Some boots run heavy 2D at ~32 fps instead of ~40 for the whole session. In B3 (svclate run):
-- GX worker replay wall is 20.3 ms vs 15.3 ms, but its CPU time is unchanged (13.9 vs 14.3). The worker is blocked, not doing more work.
-- The worker waits on Aurora's decode queue being full: 6.4 ms vs 0.9 ms. The decode thread itself waits on the frame worker's seal: 3.25 ms vs 0.19 ms.
-- So the chain is: the frame worker (core 2) runs late, the decode thread stalls on the seal, the 8-batch decode queue fills, and the GX worker blocks.
-- Open question: what makes the frame worker late in those boots. Look at `[frametime]` encode / frametotal in a slow boot. Suspects: core-2 contention between the frame worker and the GX worker (the GX worker yields every 1 ms), or the frame worker's GPU fence waits.
+- Small translator tweaks: compare-branch fusion, the CR / call-guard / callcount gates, the EABI exit-flag liveness batch, and the call-site sqrt intrinsic (bit-exact, no reliable gain). The game thread's own work barely moves for any of them.
+- Bare-fcvt single rounding: `fcvtcheck` says DIFFERENT (the saturation and flush edges), so the masked form stays. A guarded variant (bare fcvt only above the NI flush threshold, where the mask cannot fire) is built and waits on its own console proof (`fcvtguard`, criterion zero differences in every FZ and rounding state) before any A/B.
+- Lost worker wakes as the cause of the CopyDisp wait: real but tiny; gxfutex above is the whole story.
+- Retrace starvation theories for the save-load hitch: polling retraces from the scheduler, from fiber switches, and from a wall-clock thread (unsafe: it crashed in the audio deferred path) all left the stall standing, because the executor was blocked on the fiber mutex, not short of polls.
+- Depth pre-pass and culling as 2D costs: exonerated by direct measurement. Pass merging: there is one main scene pass; nothing to merge.
+- Reverb off / native reverb: no gain (it runs in retrace idle), and a hand native is blocked anyway because the callback is table-called.
 
-## Reading the section 7 run
+## The slow boot (open, roughly 1 boot in 4)
 
-Logs are in the section 7 folders under `live/` (one per boot; the runbook names them).
+Some boots run the whole session slower (heavy 2D ~32 instead of ~40) with no code difference. The chain is measured: on a slow boot the GX worker's replay wall time grows (~20 ms vs ~15) while its CPU time is unchanged, because it blocks on Aurora's decode queue, which stalls on the frame worker's seal, whose staging-buffer map waits on a GPU fence. GPU timestamps then reverse the apparent causality: on slow boots the GPU runs the same scene work about 25% slower (the ratio matches one clock step, 384 to 307.2 MHz), so the fence is late because the GPU is slow, not the other way round. Leading hypothesis: the GPU (or EMC) starts one clock step down on those boots. The decisive test is a census build that reads the GPU and EMC clocks via clkrst at startup across a dozen boots and pairs them with the [gpu] lines; if every slow boot is exactly one step down, the fix is to pin the clock at startup.
 
-1. **2D lock rate with gxsvclate on:** for each boot's he1_05 2D and he2_03 2D, check the `[vi]` retraces per frame. Normal is about 1.5; the lock is about 1.95-2.0 with high guest idle. If it locks in 2 or more of 4 boots, gxsvclate needs a fix before it goes default (see below).
-2. **3D smoothness:** use the retrace and frame-interval histogram line, together with Muse's eye report. 36 fps means a mix of 1-retrace and 2-retrace frames. If it feels worse than a steady 30, don't default it.
-3. **Slow boots:** if any boot shows worker replay of about 20 ms, read the new renderer-wait line (decode queue, decode sync, frame worker phase, staging map, deko queue lock, GPU fence, shader) to see which wait grew.
+## Next levers
 
-Decision rule: if 3D holds 33+ fps, 2D doesn't lock more often than with it off, and it feels fine, make `gxsvclate` default on. That's a one-line change in `switch/deko/dk.h` (`gxSvcLate = true`), then `spm_gxsvclate_set(g_diag.gxSvcLate)` is already called at boot. Then merge PR #26.
-
-## Likely fix if gxsvclate causes the 2D lock
-
-Why it helps 3D (inferred): when the timing service runs during the CopyDisp wait, it processes a retrace that has just passed. The game's VIWaitForRetrace then waits for the next one, which forces 2 retraces per frame. Deferring the service lets the frame catch the retrace it's about to reach. The 2D lock may be the reverse case. Options:
-- Lower `kServiceAfter` (`gx_worker.cpp`, 4 ms) to 2 ms, or make it relative to the next retrace time (service only if a retrace is due within the wait).
-- Look at what VIWaitForRetrace does when a retrace was serviced mid-drain (`hle/vi.cpp`).
-
-## Next big levers (after gxsvclate)
-
-1. **Slow-boot fix:** stop the frame worker and the GX worker fighting over core 2. Try moving the GX worker's 1 ms yield, or giving the frame worker priority, after the renderer-wait line confirms the cause. Worth up to ~8 fps in 2D on affected boots.
-2. **Overlap the frame** (design scoped, not built): make the CopyDisp drain non-blocking, with CopyDisp as an in-order present record, and drop the per-frame ring rewind (use a two-sided ring). The game then starts the next frame while the worker finishes. Estimate: 2-4 ms off the 3D game thread, at the cost of up to 1 frame of extra latency. Sync points that must stay: DrawDone/SetDrawSync tokens, bbox/peek, and CPU-read EFB copies.
-3. **2D floor:** worker replay is ~15 ms, so 2D tops out around 50-60 fps even with perfect overlap. Profile the worker's replay (CallDisplayList cost) next.
+1. **Frame overlap.** Make the frame-end chain overlap the next frame's guest work: a two-sided GX ring (no per-drain rewind) as the precondition, then defer the frame worker join. The prize is the 2.8-4.7 ms end-of-frame wait. Step 0 is a per-call-type split of the worker's replay (which record types own its ~14 ms), because the wait has three creditors (worker replay, Aurora decode, frame worker) and the split says which one is worth attacking. One constraint from Aurora's source: the display copy reads the live EFB at encode time, so the copy itself cannot move after the next frame's draws; any deferral has to hold two frame contexts in Aurora's frame worker.
+2. **fcvt guarded variant** (see Ruled out): worth an estimated 1.0-1.3 ms in 3D if its proof passes.
+3. **Slow-boot census**, above.
 
 ## Rules (from Brandon)
 
 - Measure at stock clocks only. Use godmode=1 and perftimer=1 for runs. Identify NROs by SHA-256.
-- Follow the console claim protocol (`/agent-claim.txt`), and screenshot-check that SPM is the first tile before launching.
+- Follow the console claim protocol, and screenshot-check the foreground before launching or sending input.
 - Commits go out as Brandon.
 - Restore the card to the release build and the dk_diag to its pre-run bytes after every run.

@@ -576,7 +576,7 @@ function(spm_switch_configure_products)
     # The version's single source: the NACP string (display-only) and the baked version
     # the self-updater compares against both come from this one variable, so they cannot
     # drift (DESIGN.md §2). The definition is a bare token; the glue stringizes it.
-    set(SPM_VERSION "0.2.0")
+    set(SPM_VERSION "0.3.0")
     target_compile_definitions(WiiCompiled PRIVATE SPM_BAKED_VERSION=${SPM_VERSION})
     # The runtime sources (updater_horizon.cpp included) compile into mkw_runtime_common,
     # whose objects WiiCompiled only pulls in -- a definition on WiiCompiled alone would
