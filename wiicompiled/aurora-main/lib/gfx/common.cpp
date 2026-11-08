@@ -667,6 +667,16 @@ void stage_time_add_frametotal(std::chrono::nanoseconds duration) noexcept {
   g_stageFrameTotalNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
 }
 
+static std::atomic<uint64_t> g_frameSealNs[kFrameSealStageCount]{};
+void frame_seal_add(FrameSealStage stage, std::chrono::nanoseconds duration) noexcept {
+  g_frameSealNs[stage].fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
+}
+void frame_seal_read(uint64_t* nanos) noexcept {
+  for (uint32_t i = 0; i < kFrameSealStageCount; ++i) {
+    nanos[i] = g_frameSealNs[i].load(std::memory_order_relaxed);
+  }
+}
+
 void stage_time_add_encode(std::chrono::nanoseconds duration) noexcept {
   g_stageEncodeNs.fetch_add(static_cast<uint64_t>(duration.count()), std::memory_order_relaxed);
   const uint64_t frame = g_stageFrameCount.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1596,6 +1606,7 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
   ZoneScoped;
   ASSERT(!advanceFrame || !g_inOffscreen, "end_frame called while offscreen rendering is active");
   if (advanceFrame) {
+    FrameSealScope sealScope(kFrameSealInterpolation);
     gx::finalize_frame_interpolation();
   } else {
     // Mid-frame batch split: the staging buffer is about to be unmapped and rotated, so pending
@@ -1615,7 +1626,11 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
     bufferOffset += size;
     return writeSize;
   };
-  g_stagingBuffers[currentStagingBuffer].Unmap();
+  {
+    FrameSealScope sealScope(kFrameSealUnmap, advanceFrame);
+    g_stagingBuffers[currentStagingBuffer].Unmap();
+  }
+  FrameSealScope copiesScope(kFrameSealCopies, advanceFrame);
   s_mappingState.reset();
   g_stats.drawCallCount = g_drawCallCount;
   g_stats.mergedDrawCallCount = g_mergedDrawCallCount;
@@ -1643,14 +1658,21 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
       g_textureUpload.release();
     }
   }
+  copiesScope.stop();
   currentStagingBuffer = (currentStagingBuffer + 1) % g_stagingBuffers.size();
-  map_staging_buffer();
+  {
+    FrameSealScope sealScope(kFrameSealMap, advanceFrame);
+    map_staging_buffer();
+  }
   g_currentRenderPass = UINT32_MAX;
   ++gx::g_arrayUploadEpoch;  // staging rotated: earlier array uploads are gone
   for (auto& array : gx::g_gxState.arrays) {
     array.cachedRange = {};
   }
-  end_pipeline_frame();
+  {
+    FrameSealScope sealScope(kFrameSealPipelineFrame, advanceFrame);
+    end_pipeline_frame();
+  }
   if (advanceFrame) {
     ++g_frameIndex;
   }

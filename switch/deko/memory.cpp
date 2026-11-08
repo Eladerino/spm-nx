@@ -250,7 +250,11 @@ uint64_t completed_serial() { return poll_completed(); }
 bool wait_serial(uint64_t serial) {
     if (serial == 0 || serial <= g_completed.load(std::memory_order_acquire)) return true;
     if (serial > g_submitted.load(std::memory_order_acquire)) {
-        std::lock_guard<std::mutex> lock(g_queueMutex);
+        std::unique_lock<std::mutex> lock(g_queueMutex, std::defer_lock);
+        {
+            SpmWorkerBlockedScope blocked(kSpmBlockedQueueLock);
+            lock.lock();
+        }
         if (serial >= g_recording) flush();
     }
     for (int waited = 0; waited < 5; waited++) {
