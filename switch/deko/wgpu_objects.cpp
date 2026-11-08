@@ -709,6 +709,15 @@ WGPUFuture __wrap_wgpuBufferMapAsync(WGPUBuffer buffer, WGPUMapMode mode, size_t
             const uint64_t ns = now_ns() - t0;
             g_mapWaits.fetch_add(1, std::memory_order_relaxed);
             g_mapWaitNs.fetch_add(ns, std::memory_order_relaxed);
+            {
+                // Measurement: how many submits behind the recording one a waited-for buffer was.
+                static std::atomic<uint64_t> s_behindSum{0}, s_behindCount{0};
+                s_behindSum.fetch_add(recording_serial() - serial, std::memory_order_relaxed);
+                if (s_behindCount.fetch_add(1, std::memory_order_relaxed) % 600 == 599) {
+                    dklog("buffers: the last 600 map waits were %.1f submits behind the recording one",
+                          double(s_behindSum.exchange(0, std::memory_order_relaxed)) / 600.0);
+                }
+            }
             uint64_t prev = g_mapWaitMaxNs.load(std::memory_order_relaxed);
             while (ns > prev && !g_mapWaitMaxNs.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {
             }

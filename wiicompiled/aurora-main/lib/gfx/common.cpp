@@ -141,8 +141,9 @@ wgpu::Buffer g_uniformBuffer;
 wgpu::Buffer g_indexBuffer;
 wgpu::Buffer g_storageBuffer;
 #if defined(__SWITCH__)
-// One more than upstream: mapping the next staging buffer waits for the GPU to finish the submit that
-// last used it, and with 3 slots that wait was 3.3 ms a frame in heavy rooms and 10 ms on a slow boot.
+// Room for one more than upstream, used only with dk_diag stagingslots=4. Mapping the next staging
+// buffer waits for the GPU to finish the submit that last used it; a fourth slot did not shorten that
+// wait on a slow boot (9.85 ms against 10.09), so the default stays 3.
 constexpr size_t FrameSlotCount = 4;
 extern "C" uint32_t aurora_switch_staging_slots() __attribute__((weak));  // dk_diag stagingslots=3|4
 #else
