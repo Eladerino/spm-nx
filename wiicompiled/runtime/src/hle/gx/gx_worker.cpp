@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <mutex>
@@ -37,6 +38,7 @@ extern "C" void svcSleepThread(int64_t nanoseconds);
 // Horizon's address arbiter (libnx svc.h), the futex the gxfutex hand-off sleeps on.
 extern "C" uint32_t svcWaitForAddress(void* address, uint32_t arbType, int64_t value, int64_t timeout);
 extern "C" uint32_t svcSignalToAddress(void* address, uint32_t signalType, int32_t value, int32_t count);
+extern "C" uint32_t svcGetInfo(uint64_t* out, uint32_t id0, uint32_t handle, uint64_t id1);
 #endif
 
 namespace GxWorker {
@@ -240,6 +242,31 @@ Stat g_workerYields;
 // was lost (workCv's unlocked notify) or never sent. Each one is up to a millisecond the frame
 // waited for nothing. gxfutex should hold this at zero.
 Stat g_workerLateWakes;
+// Measurement for the slow-boot state (Nov 8: some boots replay the same records ~35% slower for
+// the whole session). The worker's own CPU ticks over its replays, against their wall time: equal
+// means the replay itself got slower (memory, cache, the work), a gap means core 2's other
+// threads held the worker off the core. The owner's drain arrivals: unreplayed bytes at arrival,
+// and how its waits ended (woken by the worker, or by its own 1 ms timeout).
+Stat g_workerCpuMicros;
+Stat g_drainPendingBytes;
+Stat g_ownerNotifyWakes;
+Stat g_ownerTimeoutWakes;
+
+// The calling thread's CPU time in microseconds (Horizon's per-thread tick count, 19.2 MHz),
+// or 0 where it is not available.
+uint64_t ThreadCpuMicros() noexcept {
+#if defined(__SWITCH__)
+    constexpr uint32_t kInfoTypeThreadTickCount = 0xF0000002u;  // InfoType_ThreadTickCount
+    constexpr uint32_t kCurrentThreadHandle = 0xFFFF8000u;      // CUR_THREAD_HANDLE
+    uint64_t ticks = 0;
+    if (svcGetInfo(&ticks, kInfoTypeThreadTickCount, kCurrentThreadHandle, UINT64_MAX) != 0) {
+        return 0;
+    }
+    return ticks * 10 / 192;  // 19.2 MHz ticks to microseconds
+#else
+    return 0;
+#endif
+}
 
 // The dflushcoal witness (gx_worker.h): owner-thread state, kept whether or not the
 // switch is on (it records facts, so a mid-frame flip reads a current witness) and read
@@ -517,7 +544,9 @@ void WorkerMain() {
         }
 #endif
         const auto replayStart = std::chrono::steady_clock::now();
+        const uint64_t cpuStart = ThreadCpuMicros();
         ReplayRange(from, to, false);
+        g_workerCpuMicros.Add(ThreadCpuMicros() - cpuStart);
         g_workerBusyMicros.Add(static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - replayStart).count()));
         // Only the worker adds to the low half, and it never passes the high half, so no carry.
@@ -588,8 +617,10 @@ uint64_t WaitForWorker() {
         while (!caughtUp()) {
             // The 1 ms timeout is also the backstop: a wake that went astray costs a millisecond.
             if (w.idleCv.wait_for(lock, std::chrono::milliseconds(1), caughtUp)) {
+                g_ownerNotifyWakes.Add();
                 break;
             }
+            g_ownerTimeoutWakes.Add();
             if (g_waitService != nullptr) {
                 lock.unlock();
                 g_waitService();
@@ -658,6 +689,10 @@ void Drain(uint32_t cause) {
     } done;
     if (Threaded()) {
         Publish();
+        {
+            const uint64_t ends = g_worker->ends.load(std::memory_order_seq_cst);
+            g_drainPendingBytes.Add(PublishedEnd(ends) - ConsumedEnd(ends));
+        }
         const uint64_t waitedMicros = WaitForWorker();
         if (causeSlot != nullptr && waitedMicros != 0) {
             causeSlot->AddWait(waitedMicros);
@@ -906,6 +941,10 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t workerBusyMicros = g_workerBusyMicros.TakeDelta();
     const uint64_t workerYields = g_workerYields.TakeDelta();
     const uint64_t workerLateWakes = g_workerLateWakes.TakeDelta();
+    const uint64_t workerCpuMicros = g_workerCpuMicros.TakeDelta();
+    const uint64_t drainPendingBytes = g_drainPendingBytes.TakeDelta();
+    const uint64_t ownerNotifyWakes = g_ownerNotifyWakes.TakeDelta();
+    const uint64_t ownerTimeoutWakes = g_ownerTimeoutWakes.TakeDelta();
     const uint64_t coalesced = g_dflushCoalesced.TakeDelta();
     const uint64_t dcFree = g_dcNoSyncFree.TakeDelta();
     const uint64_t dcCopyDrains = g_dcNoSyncCopyDrains.TakeDelta();
@@ -941,6 +980,16 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                      static_cast<double>(workerBusyMicros) / 1000.0 / frames, static_cast<double>(workerYields) / frames,
                      static_cast<double>(workerLateWakes) / frames,
                      g_gxFutexRequested.load(std::memory_order_relaxed) ? 1 : 0);
+        // The slow-boot split: the worker's CPU time inside those replays (0 where the
+        // platform has no per-thread tick count), the bytes still unreplayed when the game
+        // thread reached a drain, and how its waits there ended.
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: worker cpu in replay %.2f ms a frame, %.1f KB unreplayed at drains a "
+                     "frame, owner woken %.2f by the worker and %.2f by timeout a frame\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(workerCpuMicros) / 1000.0 / frames,
+                     static_cast<double>(drainPendingBytes) / 1024.0 / frames,
+                     static_cast<double>(ownerNotifyWakes) / frames, static_cast<double>(ownerTimeoutWakes) / frames);
     }
     if (natSkips != 0) {
         // natnosync's scoreboard: non-GX natives reached with records pending that ran without
