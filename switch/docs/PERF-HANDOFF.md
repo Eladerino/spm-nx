@@ -8,7 +8,7 @@ Goal: 60 fps at stock clocks (1020/384/1331), meaning a game-thread frame under 
 |---|---|---|
 | Light 2D and 3D | 60 | nothing |
 | Heavy 2D (he2_03, he1_05) | ~40 | GX worker replay ~15 ms, plus the end-of-frame hand-off |
-| Heavy 3D (he1_05, he2_03) | 30 (36 with `gxsvclate=1`) | game thread: ~18.5-19 ms of its own work, plus a 2-3 ms CopyDisp wait |
+| Heavy 3D (he1_05, he2_03) | ~36 with `gxsvclate` (default on since Nov 8; 30 with it off) | game thread: ~18.5-19 ms of its own work, plus a 2-3 ms CopyDisp wait |
 
 Threads: game thread on core 0, Aurora's GX decode thread on core 1, and the GX worker plus Aurora's frame worker sharing core 2.
 
@@ -17,7 +17,7 @@ Threads: game thread on core 0, Aurora's GX decode thread on core 1, and the GX 
 - `main`: the release line (v0.2.0 = 7b9c6a28 on the card).
 - PR #26, `claude/project-thread-4csxi6`: all switches are default off, and everything is measurement or opt-in:
   - `gxfutex`: lossless worker wake. It works (late wakes go to 0) but gives no measurable speedup. Keeping it is harmless.
-  - `gxsvclate`: a drain waiting on the worker runs the guest timing service only after 4 ms. **This gave heavy 3D 30 to 36 fps on 2 of 2 boots, with clean audio.** One of its two boots showed a 2D lock at 2 retraces (~30 fps). Section 7 decides it.
+  - `gxsvclate`: a drain waiting on the worker runs the guest timing service only after 4 ms. **This gave heavy 3D 30 to 36 fps on 2 of 2 boots, with clean audio.** One of its two boots showed a 2D lock at 2 retraces (~30 fps). Section 7 (4 boots) confirmed ~35.8 fps 3D, no 2D lock on boots 2-4, and Brandon judged it smoother with no audio issues, so it is now default on.
   - Counters: worker CPU vs wall in replay, KB unreplayed at drains, owner wake causes, timing-service ms, renderer waits inside replay, and a retrace / frame-interval histogram.
 - `claude/intrinsics`: native sqrt pasted into callers by the translator. It's bit-exact but gave no reliable gain, so it's parked.
 
