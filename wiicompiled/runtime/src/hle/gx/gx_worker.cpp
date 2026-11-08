@@ -256,10 +256,12 @@ Stat g_ownerTimeoutWakes;
 // or 0 where it is not available.
 uint64_t ThreadCpuMicros() noexcept {
 #if defined(__SWITCH__)
-    constexpr uint32_t kInfoTypeThreadTickCount = 0xF0000002u;  // InfoType_ThreadTickCount
-    constexpr uint32_t kCurrentThreadHandle = 0xFFFF8000u;      // CUR_THREAD_HANDLE
+    constexpr uint32_t kInfoTypeThreadTickCount = 25u;                     // InfoType_ThreadTickCount (13.0.0+)
+    constexpr uint32_t kInfoTypeThreadTickCountDeprecated = 0xF0000002u;  // 1.0.0-12.1.0
+    constexpr uint32_t kCurrentThreadHandle = 0xFFFF8000u;                // CUR_THREAD_HANDLE
     uint64_t ticks = 0;
-    if (svcGetInfo(&ticks, kInfoTypeThreadTickCount, kCurrentThreadHandle, UINT64_MAX) != 0) {
+    if (svcGetInfo(&ticks, kInfoTypeThreadTickCount, kCurrentThreadHandle, UINT64_MAX) != 0 &&
+        svcGetInfo(&ticks, kInfoTypeThreadTickCountDeprecated, kCurrentThreadHandle, UINT64_MAX) != 0) {
         return 0;
     }
     return ticks * 10 / 192;  // 19.2 MHz ticks to microseconds
