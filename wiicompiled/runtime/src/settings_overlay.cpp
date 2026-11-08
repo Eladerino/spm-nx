@@ -5558,18 +5558,21 @@ void DrawOptionsMenu() {
     // The selected row's help, wrapped at its full size before the rows are
     // placed, because the rows give up whatever room the wrapped block takes.
     // Help used to be drawn as one line with the font shrunk until the whole
-    // string fit the card, so a long help (the 30 fps cap's is the longest of
-    // the Diagnostics rows) rendered far too small to read. Wrapped at the
-    // full 15 the longest helps take up to four lines; the block stacks
-    // upward from the one-line position, so a short help sits exactly where
-    // it always did. If a help ever needs more than four lines the whole
-    // block steps down a point at a time first, and only a help that still
-    // overflows at 8 falls back to the old shrunk one-liner.
+    // string fit the card, so a long help rendered far too small to read.
+    // Wrapped at the full 15 most helps take up to four lines; the block
+    // stacks upward from the one-line position, so a short help sits exactly
+    // where it always did. If a help needs more than six lines the whole
+    // block steps down a point at a time, to a floor of 9. The Diagnostics
+    // helps run to a thousand characters, and they still needed more lines
+    // than that at the floor, so the old code fell back to the shrunk
+    // one-liner and they rendered at a few points (Brandon, Nov 7). There
+    // is no shrunk fallback any more: past six lines the block simply takes
+    // the lines it needs at the floor size, and the rows give up the room.
     const char* help = g_optRow >= 0 && g_optRow < int(rows.size()) ? rows[static_cast<size_t>(g_optRow)].help
                                                                      : "Left and right pick a page.";
     constexpr float kHelpSize = 15.0f, kHelpLineStep = 20.0f;
     const float kHelpMaxW = 2 * hw - 40.0f;  // not constexpr: hw is a runtime value
-    constexpr int kHelpMaxLines = 4;
+    constexpr int kHelpMaxLines = 6;
     auto helpWidth = [&](const std::string& s, float size) {
         // Measured the way Txt will draw it: the game font's own measure, or
         // the fallback's CalcTextSizeA at the pixel size Txt asks for, back
@@ -5580,12 +5583,11 @@ void DrawOptionsMenu() {
     float helpSize = kHelpSize;
     std::vector<std::string> helpLines =
         WrapTextLines(help, kHelpMaxW, [&](const std::string& s) { return helpWidth(s, helpSize); });
-    while (int(helpLines.size()) > kHelpMaxLines && helpSize > 8.0f) {
+    while (int(helpLines.size()) > kHelpMaxLines && helpSize > 9.0f) {
         helpSize -= 1.0f;
         helpLines = WrapTextLines(help, kHelpMaxW, [&](const std::string& s) { return helpWidth(s, helpSize); });
     }
-    const bool helpOneLine = int(helpLines.size()) > kHelpMaxLines;  // still overflowing: the old behaviour
-    const int helpBlockLines = helpOneLine ? 1 : int(helpLines.size());
+    const int helpBlockLines = int(helpLines.size());
     const float helpRise = (helpBlockLines - 1) * kHelpLineStep;
     float rowsBottom = bottom + 76.0f + helpRise;
 #if defined(__SWITCH__)
@@ -5683,13 +5685,9 @@ void DrawOptionsMenu() {
     // What the selected row does, and the buttons. The help lines stack
     // upward from the one-line position (bottom + 50) by the rise the rows
     // already gave up, so the bottom line never moves.
-    if (helpOneLine) {
-        Txt(help, 0, bottom + 50.0f, Fit(help, kHelpSize, kHelpMaxW), 0x5A4A38FFu, 1);
-    } else {
-        for (int i = 0; i < helpBlockLines; ++i)
-            Txt(helpLines[static_cast<size_t>(i)], 0, bottom + 50.0f + helpRise - i * kHelpLineStep, helpSize,
-                0x5A4A38FFu, 1);
-    }
+    for (int i = 0; i < helpBlockLines; ++i)
+        Txt(helpLines[static_cast<size_t>(i)], 0, bottom + 50.0f + helpRise - i * kHelpLineStep, helpSize,
+            0x5A4A38FFu, 1);
 #if defined(__SWITCH__)
     if (g_optTab == 3) {
         // The Controls page's own footer, always on the page rather than
