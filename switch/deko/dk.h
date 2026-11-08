@@ -236,6 +236,10 @@ bool diag_get(const char* key);
 // (the debug server's "diag" command, which has to answer for keys it does not know by
 // name in advance). The callback gets the file spelling and the current value.
 void diag_enumerate(void (*visit)(const char* name, bool on, void* user), void* user);
+// Every switch back to its Diag default (the field initialisers above), through diag_set,
+// so each switch's runtime forwarding runs the same way a hand flip's does. For the
+// settings menu's Reset all settings; the caller writes dk_diag.txt back afterwards.
+void diag_reset_defaults();
 // R.presents, for "[diag]" log markers written outside device.cpp.
 uint64_t diag_present_count();
 // Pushes every buffered diagnostic line to UserData/Logs/stderr.log now: Aurora's mtxlog
