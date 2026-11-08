@@ -76,6 +76,63 @@ uint32_t g_sdlCustomEventsStart;
 char g_gameName[4];
 std::atomic<AuroraFrameWorkerWaitCallback> g_frameWorkerWaitCallback{nullptr};
 thread_local bool t_skipFrameWorkerWaitCallback = false;
+
+// [fworker] perftimer line: where the frame worker's SEALED phase goes. The decode thread and the
+// producer's drains wait for SEALED, so on a slow boot (sealedwait 2.8 vs 0.1 ms a frame) one of
+// these grows. All sums are nanoseconds over the perftimer window; only written while stage timers
+// are on.
+thread_local bool t_onFrameWorker = false;
+std::atomic<int64_t> g_fwNotifyNs{0};  // steady_clock time end_frame posted the job
+struct FrameWorkerTimes {
+  std::atomic<uint64_t> cycles{0};
+  std::atomic<uint64_t> wakeNs{0};      // job posted -> worker running
+  std::atomic<uint64_t> sealLockNs{0};  // waiting for the renderer GPU mutex before the seal
+  std::atomic<uint64_t> sealNs{0};      // seal_frame_locked
+  std::atomic<uint64_t> publishNs{0};   // inline encode + publish (only when not overlapped)
+  std::atomic<uint64_t> prepWaitNs{0};  // waiting for the producer's begin_frame (prepareAllowed)
+  std::atomic<uint64_t> prepLockNs{0};  // waiting for the renderer GPU mutex inside prepare
+  std::atomic<uint64_t> prepareNs{0};   // begin_frame_impl, including prepLock and staging map waits
+  std::atomic<uint64_t> spanNs{0};      // job posted -> SEALED published
+  std::atomic<uint64_t> cpuNs{0};       // worker thread CPU time over the same span (Switch only)
+  std::atomic<uint64_t> maxSpanNs{0};
+  std::atomic<uint64_t> lateCycles{0};  // span over 4 ms
+};
+FrameWorkerTimes g_fwTimes;
+uint64_t fw_thread_cpu_ns() noexcept {
+#if defined(__SWITCH__)
+  u64 ticks = 0;
+  // InfoType 25 = ThreadTickCount; -1 = this thread's total across cores. 19.2 MHz ticks.
+  if (R_SUCCEEDED(svcGetInfo(&ticks, 25, CUR_THREAD_HANDLE, UINT64_MAX))) {
+    return ticks * 625 / 12;
+  }
+#endif
+  return 0;
+}
+int64_t fw_now_ns() noexcept {
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+void fw_print_window(uint64_t firstFrame, uint64_t lastFrame) noexcept {
+  static uint64_t prev[12]{};
+  const uint64_t cur[12] = {
+      g_fwTimes.cycles.load(),     g_fwTimes.wakeNs.load(),    g_fwTimes.sealLockNs.load(),
+      g_fwTimes.sealNs.load(),     g_fwTimes.publishNs.load(), g_fwTimes.prepWaitNs.load(),
+      g_fwTimes.prepLockNs.load(), g_fwTimes.prepareNs.load(), g_fwTimes.spanNs.load(),
+      g_fwTimes.cpuNs.load(),      g_fwTimes.lateCycles.load(), 0};
+  const uint64_t n = cur[0] - prev[0];
+  if (n == 0) {
+    return;
+  }
+  const auto per = [&](int i) { return static_cast<double>(cur[i] - prev[i]) / 1e6 / static_cast<double>(n); };
+  const uint64_t maxSpan = g_fwTimes.maxSpanNs.exchange(0);
+  std::fprintf(stderr,
+               "[fworker] frames %llu-%llu: %llu cycles, per cycle ms: span %.2f (cpu %.2f), wake %.2f, seallock %.2f, "
+               "seal %.2f, publish %.2f, prepwait %.2f, preplock %.2f, prepare %.2f; max span %.1f ms, %llu over 4 ms\n",
+               static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+               static_cast<unsigned long long>(n), per(8), per(9), per(1), per(2), per(3), per(4), per(5), per(6),
+               per(7), static_cast<double>(maxSpan) / 1e6, static_cast<unsigned long long>(cur[10] - prev[10]));
+  for (int i = 0; i < 12; ++i) prev[i] = cur[i];
+}
 // Presentation schedule for the frame being sealed, set by the producer. Jobs carry absolute
 // deadlines derived from it, so the presenter cannot drift. Zero means present when ready.
 std::atomic<uint64_t> g_presentScheduleBaseNanos{0};
@@ -318,6 +375,7 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept;
 #endif
 
 void frame_worker_main() noexcept {
+  t_onFrameWorker = true;
 #if defined(__SWITCH__)
   // Pin the worker to core 2, off the game thread's default core: the encode/submit/present cycle
   // stays on one core and keeps its caches warm instead of floating over all three application
@@ -379,6 +437,7 @@ void ensure_frame_worker_started() noexcept {
   g_frameWorker.prepareAllowed = false;
   g_frameWorker.started = true;
   g_frameWorker.thread = std::thread(frame_worker_main);
+  gfx::stage_time_set_window_hook(fw_print_window);
   Log.info("Enabled bounded asynchronous frame submission worker");
 }
 
@@ -1609,7 +1668,16 @@ bool begin_frame_impl(bool pumpEvents, ImGuiFramePolicy imguiPolicy, bool* imgui
 
 bool begin_frame_render_state_impl(ImGuiFramePolicy imguiPolicy, bool* imguiNewFrameOwed) noexcept {
 #ifdef AURORA_ENABLE_GX
+  const bool fwLockTime = t_onFrameWorker && gfx::stage_timers_enabled();
+  const auto lockStart = fwLockTime ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   std::lock_guard gpuLock(g_rendererGpuMutex);
+  if (fwLockTime) {
+    g_fwTimes.prepLockNs.fetch_add(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now() - lockStart)
+                                  .count()),
+        std::memory_order_relaxed);
+  }
   // Note the debt before gfx::begin_frame() can fail: the synchronous path always started the
   // ImGui frame here, and the runtime's retry loop depends on that pairing.
   if (g_config.externalPresentation) {
@@ -1941,9 +2009,12 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
   // Stage times of a cycle, logged when it runs long (the producer waits on it in GXDrawDone).
   using WorkerClock = std::chrono::steady_clock;
   const auto cycleStart = WorkerClock::now();
-  WorkerClock::time_point sealed{}, encoded{};
+  const bool fwTime = gfx::stage_timers_enabled();
+  const uint64_t fwCpuStart = fwTime ? fw_thread_cpu_ns() : 0;
+  WorkerClock::time_point sealed{}, encoded{}, sealLocked{};
   {
     std::lock_guard gpuLock(g_rendererGpuMutex);
+    sealLocked = WorkerClock::now();
     seal_frame_locked(sealedFrame, ctx);
     sealed = WorkerClock::now();
     overlapEncode = ctx.interpolationActive || kOverlapEncodeEveryFrame;
@@ -1991,6 +2062,35 @@ bool run_frame_worker_cycle(gfx::SealedFrame& sealedFrame) noexcept {
                "{} pipelines queued)",
                busy, msOf(sealed - cycleStart), msOf(encoded - sealed), msOf(published - encoded),
                msOf(prepareEnd - prepareStart), gfx::g_stats.queuedPipelines);
+    }
+  }
+
+  if (fwTime) {
+    const auto nsOf = [](WorkerClock::duration d) {
+      return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count());
+    };
+    const int64_t notifyNs = g_fwNotifyNs.load(std::memory_order_relaxed);
+    const int64_t startNs =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(cycleStart.time_since_epoch()).count();
+    const int64_t endNs = fw_now_ns();
+    const uint64_t wake = notifyNs != 0 && startNs > notifyNs ? static_cast<uint64_t>(startNs - notifyNs) : 0;
+    const uint64_t span = wake + static_cast<uint64_t>(endNs - startNs);
+    g_fwTimes.cycles.fetch_add(1, std::memory_order_relaxed);
+    g_fwTimes.wakeNs.fetch_add(wake, std::memory_order_relaxed);
+    g_fwTimes.sealLockNs.fetch_add(nsOf(sealLocked - cycleStart), std::memory_order_relaxed);
+    g_fwTimes.sealNs.fetch_add(nsOf(sealed - sealLocked), std::memory_order_relaxed);
+    g_fwTimes.publishNs.fetch_add(nsOf(published - sealed), std::memory_order_relaxed);
+    g_fwTimes.prepWaitNs.fetch_add(nsOf(prepareStart - published), std::memory_order_relaxed);
+    g_fwTimes.prepareNs.fetch_add(static_cast<uint64_t>(endNs) -
+                                      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                prepareStart.time_since_epoch())
+                                                                .count()),
+                                  std::memory_order_relaxed);
+    g_fwTimes.spanNs.fetch_add(span, std::memory_order_relaxed);
+    g_fwTimes.cpuNs.fetch_add(fw_thread_cpu_ns() - fwCpuStart, std::memory_order_relaxed);
+    if (span > 4'000'000) g_fwTimes.lateCycles.fetch_add(1, std::memory_order_relaxed);
+    uint64_t prevMax = g_fwTimes.maxSpanNs.load(std::memory_order_relaxed);
+    while (span > prevMax && !g_fwTimes.maxSpanNs.compare_exchange_weak(prevMax, span)) {
     }
   }
 
@@ -2179,6 +2279,7 @@ void end_frame() {
     g_frameWorker.ready.store(false, std::memory_order_release);
     g_frameWorker.jobPending = true;
     g_frameWorker.prepareAllowed = false;
+    g_fwNotifyNs.store(gfx::stage_timers_enabled() ? fw_now_ns() : 0, std::memory_order_relaxed);
   }
   g_frameWorker.cv.notify_one();
   note_stage_frame_end();

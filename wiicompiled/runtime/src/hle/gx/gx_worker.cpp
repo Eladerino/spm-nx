@@ -154,7 +154,7 @@ std::atomic<bool> g_gxSpinRequested{true};
 // arbiter (Worker::wakeSeq) instead of workCv, so Publish's wake cannot be lost. Switch only;
 // elsewhere the switch changes nothing. Forwarded through spm_gxfutex_set.
 std::atomic<bool> g_gxFutexRequested{false};
-// gxsvclate (on by default on Switch, from Diag in dk.h; dk_diag gxsvclate=0 turns it off): a drain waiting on the worker runs the guest
+// gxsvclate (off by default; dk_diag gxsvclate=1): a drain waiting on the worker runs the guest
 // timing service (VI, alarms, audio) only once it has waited kServiceAfter, instead of after
 // every 1 ms timeout. Retraces are 16.7 ms apart, so a few milliseconds late is still on time,
 // and the owner spends the wait watching for the worker instead. Forwarded through
