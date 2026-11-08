@@ -1,6 +1,7 @@
 #if defined(__SWITCH__)
 #include "spm_worker_blocked.h"
 #define SPM_WORKER_BLOCKED(site) SpmWorkerBlockedScope spmWorkerBlocked(site)
+extern "C" void aurora_switch_gpu_print(uint64_t firstFrame, uint64_t lastFrame) __attribute__((weak));
 #else
 #define SPM_WORKER_BLOCKED(site) ((void)0)
 #endif
@@ -158,6 +159,9 @@ void fw_print_window(uint64_t firstFrame, uint64_t lastFrame) noexcept {
                  seal[1], seal[2], seal[3], seal[4], seal[5], seal[6], seal[7], seal[8], seal[9], seal[10], seal[11],
                  blocked[0], blocked[1], blocked[2]);
   }
+#if defined(__SWITCH__)
+  if (aurora_switch_gpu_print != nullptr) aurora_switch_gpu_print(firstFrame, lastFrame);
+#endif
   for (int i = 0; i < 12; ++i) prev[i] = cur[i];
 }
 // Presentation schedule for the frame being sealed, set by the producer. Jobs carry absolute
