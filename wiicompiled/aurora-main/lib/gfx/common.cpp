@@ -1,4 +1,10 @@
 ﻿#include "common.hpp"
+#if defined(__SWITCH__)
+#include "spm_worker_blocked.h"
+#define SPM_WORKER_BLOCKED(site) SpmWorkerBlockedScope spmWorkerBlocked(site)
+#else
+#define SPM_WORKER_BLOCKED(site) ((void)0)
+#endif
 #include "staging_map.hpp"
 #include "../gx/shader_info.hpp"
 
@@ -1473,6 +1479,7 @@ static bool begin_frame_impl(bool clearEfb, bool capacityResume = false) {
     const auto mapWaitStart =
         timeMapWait ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     map_staging_buffer();
+    SPM_WORKER_BLOCKED(kSpmBlockedStagingMap);
     while (true) {
       const auto mappingState = s_mappingState.state();
       if (mappingState == BufferMapState::Mapped) {

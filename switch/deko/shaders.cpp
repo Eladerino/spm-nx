@@ -18,6 +18,7 @@
 //                bindingCount x {u8 kind, u8 slot, u8 group, u8 binding, u16 samplerGroup,
 //                                u8 samplerBinding, u8 0},
 //                DKSH bytes (the rest)}
+#include "spm_worker_blocked.h"
 #include "dk.h"
 
 #include <pthread.h>
@@ -150,6 +151,7 @@ uam::Result run_uam(ShaderStage stage, const std::string& glsl) {
     }
     g_jobCv.notify_one();
     std::unique_lock<std::mutex> lock(g_jobMutex);
+    SpmWorkerBlockedScope blocked(kSpmBlockedShader);
     g_jobDoneCv.wait(lock, [&] { return job.done; });
     return std::move(job.result);
 }
@@ -330,6 +332,7 @@ const CompiledStage* compile_stage(const std::string& wgsl, const std::string& e
         auto it = g_entries.find(key);
         if (it != g_entries.end()) {
             e = it->second.get();
+            SpmWorkerBlockedScope blocked(kSpmBlockedShader);
             g_cv.wait(lock, [e] { return e->state != Entry::Pending; });
             return e->state == Entry::Ready ? &e->stage : nullptr;
         }

@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <mutex>
@@ -34,7 +35,16 @@
 extern "C" uint32_t svcSetThreadCoreMask(uint32_t handle, int32_t coreId, uint32_t affinityMask);
 extern "C" uint32_t threadGetCurHandle(void);  // libnx (switch.h is not included here)
 extern "C" void svcSleepThread(int64_t nanoseconds);
+// Horizon's address arbiter (libnx svc.h), the futex the gxfutex hand-off sleeps on.
+extern "C" uint32_t svcWaitForAddress(void* address, uint32_t arbType, int64_t value, int64_t timeout);
+extern "C" uint32_t svcSignalToAddress(void* address, uint32_t signalType, int32_t value, int32_t count);
+extern "C" uint32_t svcGetInfo(uint64_t* out, uint32_t id0, uint32_t handle, uint64_t id1);
 #endif
+
+#if defined(__SWITCH__)
+#include "spm_worker_blocked.h"
+#endif
+extern "C" uint64_t spm_vi_retrace_total();  // vi.cpp
 
 namespace GxWorker {
 
@@ -140,6 +150,17 @@ constexpr bool kNatNoSyncClassifies = IsGxLayerFile(__FILE__);
 // gxspin (on by default; dk_diag gxspin=0 turns it off): the caught-up worker polls briefly
 // before sleeping (WorkerMain). Forwarded through spm_gxspin_set.
 std::atomic<bool> g_gxSpinRequested{true};
+// gxfutex (off by default; dk_diag gxfutex=1): the caught-up worker sleeps on Horizon's address
+// arbiter (Worker::wakeSeq) instead of workCv, so Publish's wake cannot be lost. Switch only;
+// elsewhere the switch changes nothing. Forwarded through spm_gxfutex_set.
+std::atomic<bool> g_gxFutexRequested{false};
+// gxsvclate (off by default; dk_diag gxsvclate=1): a drain waiting on the worker runs the guest
+// timing service (VI, alarms, audio) only once it has waited kServiceAfter, instead of after
+// every 1 ms timeout. Retraces are 16.7 ms apart, so a few milliseconds late is still on time,
+// and the owner spends the wait watching for the worker instead. Forwarded through
+// spm_gxsvclate_set.
+std::atomic<bool> g_gxSvcLateRequested{false};
+constexpr auto kServiceAfter = std::chrono::milliseconds(4);
 
 namespace {
 
@@ -190,6 +211,11 @@ struct Worker {
     std::atomic<uint64_t> ends{0};   // published << 32 | consumed, both byte offsets into the ring
     std::atomic<bool> workerAsleep{false};  // the worker is (about to be) waiting on workCv
     std::atomic<bool> ownerAsleep{false};   // the game thread is (about to be) waiting on idleCv
+    // gxfutex: the worker sleeps on this word with Horizon's address arbiter instead of workCv.
+    // Publish bumps it before signalling, and the kernel only sleeps the worker while the word
+    // still holds the value it read before its last check, so a publish can never slip between
+    // that check and the sleep (workCv's unlocked notify can, at a cost of up to 1 ms).
+    alignas(4) std::atomic<int32_t> wakeSeq{0};
     bool started = false;
     std::thread thread;
 };
@@ -224,6 +250,52 @@ Stat g_unsafeDrains;     // Threaded: a drain reached while one was already wait
 // the worker is saturated (busy close to the frame) or idles while the game thread runs ahead.
 Stat g_workerBusyMicros;
 Stat g_workerYields;
+// The worker's sleeps that ended on the 1 ms timeout with work already published: a wake that
+// was lost (workCv's unlocked notify) or never sent. Each one is up to a millisecond the frame
+// waited for nothing. gxfutex should hold this at zero.
+Stat g_workerLateWakes;
+// Measurement for the slow-boot state (Nov 8: some boots replay the same records ~35% slower for
+// the whole session). The worker's own CPU ticks over its replays, against their wall time: equal
+// means the replay itself got slower (memory, cache, the work), a gap means core 2's other
+// threads held the worker off the core. The owner's drain arrivals: unreplayed bytes at arrival,
+// and how its waits ended (woken by the worker, or by its own 1 ms timeout).
+Stat g_workerCpuMicros;
+Stat g_drainPendingBytes;
+Stat g_ownerNotifyWakes;
+Stat g_ownerTimeoutWakes;
+Stat g_ownerServiceMicros;   // time the waiting owner spent in the guest timing service
+Stat g_ownerServiceCalls;
+// Measurement only. The worker's time blocked inside replay on the renderer, by site
+// (spm_worker_blocked.h, Switch only): the rest of wall - CPU is the worker being off core 2.
+constexpr size_t kWorkerBlockedSites = 7;
+#if defined(__SWITCH__)
+static_assert(kWorkerBlockedSites == kSpmBlockedSiteCount);
+#endif
+Stat g_workerBlockedMicros[kWorkerBlockedSites];
+// Per presented frame: guest retraces since the last frame (0, 1, 2, 3 or more) and the wall
+// interval since it (under 20 ms, 20-30, 30-40, 40 or more), so an average of 1.68 retraces can be
+// told apart from a steady cadence.
+Stat g_framesByRetraces[4];
+Stat g_framesByInterval[4];
+Stat g_ownerServiceSkips;    // gxsvclate: timeouts that skipped the service (waited under the threshold)
+
+// The calling thread's CPU time in microseconds (Horizon's per-thread tick count, 19.2 MHz),
+// or 0 where it is not available.
+uint64_t ThreadCpuMicros() noexcept {
+#if defined(__SWITCH__)
+    constexpr uint32_t kInfoTypeThreadTickCount = 25u;                     // InfoType_ThreadTickCount (13.0.0+)
+    constexpr uint32_t kInfoTypeThreadTickCountDeprecated = 0xF0000002u;  // 1.0.0-12.1.0
+    constexpr uint32_t kCurrentThreadHandle = 0xFFFF8000u;                // CUR_THREAD_HANDLE
+    uint64_t ticks = 0;
+    if (svcGetInfo(&ticks, kInfoTypeThreadTickCount, kCurrentThreadHandle, UINT64_MAX) != 0 &&
+        svcGetInfo(&ticks, kInfoTypeThreadTickCountDeprecated, kCurrentThreadHandle, UINT64_MAX) != 0) {
+        return 0;
+    }
+    return ticks * 10 / 192;  // 19.2 MHz ticks to microseconds
+#else
+    return 0;
+#endif
+}
 
 // The dflushcoal witness (gx_worker.h): owner-thread state, kept whether or not the
 // switch is on (it records facts, so a mid-frame flip reads a current witness) and read
@@ -453,12 +525,39 @@ void WorkerMain() {
             if (g_gxSpinRequested.load(std::memory_order_relaxed) && SpinForWork(w)) {
                 continue;
             }
+#if defined(__SWITCH__)
+            if (g_gxFutexRequested.load(std::memory_order_relaxed)) {
+                // Read the word first, then announce the sleep, then check once more: a Publish
+                // after that check bumps the word, and the kernel refuses to sleep on a changed
+                // word (it returns at once), so no wake is lost.
+                const int32_t seq = w.wakeSeq.load(std::memory_order_seq_cst);
+                w.workerAsleep.store(true, std::memory_order_seq_cst);
+                if (CaughtUp(w.ends.load(std::memory_order_seq_cst))) {
+                    constexpr uint32_t kArbitrationWaitIfEqual = 2;  // ArbitrationType_WaitIfEqual
+                    // Still bounded (a 1 ms backstop, as the condition variable has), and counted
+                    // when the timeout finds work waiting.
+                    const auto sleepStart = std::chrono::steady_clock::now();
+                    svcWaitForAddress(&w.wakeSeq, kArbitrationWaitIfEqual, static_cast<int64_t>(seq), 1000000);
+                    if (!CaughtUp(w.ends.load(std::memory_order_seq_cst)) &&
+                        w.wakeSeq.load(std::memory_order_seq_cst) == seq &&
+                        std::chrono::steady_clock::now() - sleepStart >= std::chrono::microseconds(900)) {
+                        g_workerLateWakes.Add();
+                    }
+                }
+                w.workerAsleep.store(false, std::memory_order_seq_cst);
+                lastBlocked = std::chrono::steady_clock::now();
+                continue;
+            }
+#endif
             std::unique_lock lock(w.mutex);
             w.workerAsleep.store(true, std::memory_order_seq_cst);
             // Bounded, as the backstop for Publish's unlocked notify: re-checks at least once a
-            // millisecond while asleep.
-            while (!w.workCv.wait_for(lock, std::chrono::milliseconds(1),
-                                      [&w] { return !CaughtUp(w.ends.load(std::memory_order_seq_cst)); })) {
+            // millisecond while asleep. A timeout that finds work waiting is a lost wake: counted.
+            while (CaughtUp(w.ends.load(std::memory_order_seq_cst))) {
+                if (w.workCv.wait_for(lock, std::chrono::milliseconds(1)) == std::cv_status::timeout &&
+                    !CaughtUp(w.ends.load(std::memory_order_seq_cst))) {
+                    g_workerLateWakes.Add();
+                }
             }
             w.workerAsleep.store(false, std::memory_order_relaxed);
             lastBlocked = std::chrono::steady_clock::now();
@@ -474,7 +573,9 @@ void WorkerMain() {
         }
 #endif
         const auto replayStart = std::chrono::steady_clock::now();
+        const uint64_t cpuStart = ThreadCpuMicros();
         ReplayRange(from, to, false);
+        g_workerCpuMicros.Add(ThreadCpuMicros() - cpuStart);
         g_workerBusyMicros.Add(static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - replayStart).count()));
         // Only the worker adds to the low half, and it never passes the high half, so no carry.
@@ -517,6 +618,14 @@ void Publish() {
         // game thread in mutexLock under Publish). The price is a wake that can land between
         // the worker's last check and its wait; its wait is a 1 ms wait_for, so that costs at
         // most a millisecond, never a hang.
+#if defined(__SWITCH__)
+        if (g_gxFutexRequested.load(std::memory_order_relaxed)) {
+            constexpr uint32_t kSignalTypeSignal = 0;  // SignalType_Signal
+            w.wakeSeq.fetch_add(1, std::memory_order_seq_cst);
+            svcSignalToAddress(&w.wakeSeq, kSignalTypeSignal, 0, 1);
+            return;
+        }
+#endif
         w.workCv.notify_one();
     }
 }
@@ -537,11 +646,23 @@ uint64_t WaitForWorker() {
         while (!caughtUp()) {
             // The 1 ms timeout is also the backstop: a wake that went astray costs a millisecond.
             if (w.idleCv.wait_for(lock, std::chrono::milliseconds(1), caughtUp)) {
+                g_ownerNotifyWakes.Add();
                 break;
             }
+            g_ownerTimeoutWakes.Add();
             if (g_waitService != nullptr) {
+                if (g_gxSvcLateRequested.load(std::memory_order_relaxed) &&
+                    std::chrono::steady_clock::now() - start < kServiceAfter) {
+                    g_ownerServiceSkips.Add();
+                    continue;
+                }
                 lock.unlock();
+                const auto serviceStart = std::chrono::steady_clock::now();
                 g_waitService();
+                g_ownerServiceMicros.Add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                                   std::chrono::steady_clock::now() - serviceStart)
+                                                                   .count()));
+                g_ownerServiceCalls.Add();
                 lock.lock();
             }
         }
@@ -607,6 +728,10 @@ void Drain(uint32_t cause) {
     } done;
     if (Threaded()) {
         Publish();
+        {
+            const uint64_t ends = g_worker->ends.load(std::memory_order_seq_cst);
+            g_drainPendingBytes.Add(PublishedEnd(ends) - ConsumedEnd(ends));
+        }
         const uint64_t waitedMicros = WaitForWorker();
         if (causeSlot != nullptr && waitedMicros != 0) {
             causeSlot->AddWait(waitedMicros);
@@ -676,6 +801,18 @@ void FrameBoundary() {
     }
     if (!t_owner || g_draining) {
         return;
+    }
+    {
+        static uint64_t s_lastRetraces = spm_vi_retrace_total();
+        static auto s_lastBoundary = std::chrono::steady_clock::now();
+        const uint64_t retraces = spm_vi_retrace_total();
+        const auto boundary = std::chrono::steady_clock::now();
+        const auto intervalMicros =
+            std::chrono::duration_cast<std::chrono::microseconds>(boundary - s_lastBoundary).count();
+        g_framesByRetraces[std::min<uint64_t>(retraces - s_lastRetraces, 3)].Add();
+        g_framesByInterval[intervalMicros < 20000 ? 0 : intervalMicros < 30000 ? 1 : intervalMicros < 40000 ? 2 : 3].Add();
+        s_lastRetraces = retraces;
+        s_lastBoundary = boundary;
     }
     // The production interval that starts now gets the next frame number: the
     // dflushcoal witness only speaks for the interval its drain completed in. This is
@@ -854,6 +991,23 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t unsafeDrains = g_unsafeDrains.TakeDelta();
     const uint64_t workerBusyMicros = g_workerBusyMicros.TakeDelta();
     const uint64_t workerYields = g_workerYields.TakeDelta();
+    const uint64_t workerLateWakes = g_workerLateWakes.TakeDelta();
+    const uint64_t workerCpuMicros = g_workerCpuMicros.TakeDelta();
+    const uint64_t drainPendingBytes = g_drainPendingBytes.TakeDelta();
+    const uint64_t ownerNotifyWakes = g_ownerNotifyWakes.TakeDelta();
+    const uint64_t ownerTimeoutWakes = g_ownerTimeoutWakes.TakeDelta();
+    const uint64_t ownerServiceMicros = g_ownerServiceMicros.TakeDelta();
+    const uint64_t ownerServiceCalls = g_ownerServiceCalls.TakeDelta();
+    const uint64_t ownerServiceSkips = g_ownerServiceSkips.TakeDelta();
+    uint64_t workerBlocked[kWorkerBlockedSites];
+    for (size_t i = 0; i < kWorkerBlockedSites; ++i) {
+        workerBlocked[i] = g_workerBlockedMicros[i].TakeDelta();
+    }
+    uint64_t byRetraces[4], byInterval[4];
+    for (size_t i = 0; i < 4; ++i) {
+        byRetraces[i] = g_framesByRetraces[i].TakeDelta();
+        byInterval[i] = g_framesByInterval[i].TakeDelta();
+    }
     const uint64_t coalesced = g_dflushCoalesced.TakeDelta();
     const uint64_t dcFree = g_dcNoSyncFree.TakeDelta();
     const uint64_t dcCopyDrains = g_dcNoSyncCopyDrains.TakeDelta();
@@ -883,9 +1037,46 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
         // Measurement only: the worker's own replay time (wall clock inside ReplayRange, so a
         // preemption by core 2's other threads counts as busy) and its voluntary yields.
         std::fprintf(stderr,
-                     "[gxworker] frames %llu-%llu: worker replayed records %.2f ms a frame, %.1f yields a frame\n",
+                     "[gxworker] frames %llu-%llu: worker replayed records %.2f ms a frame, %.1f yields a frame, "
+                     "%.2f late wakes a frame (gxfutex %d)\n",
                      static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
-                     static_cast<double>(workerBusyMicros) / 1000.0 / frames, static_cast<double>(workerYields) / frames);
+                     static_cast<double>(workerBusyMicros) / 1000.0 / frames, static_cast<double>(workerYields) / frames,
+                     static_cast<double>(workerLateWakes) / frames,
+                     g_gxFutexRequested.load(std::memory_order_relaxed) ? 1 : 0);
+        // The slow-boot split: the worker's CPU time inside those replays (0 where the
+        // platform has no per-thread tick count), the bytes still unreplayed when the game
+        // thread reached a drain, and how its waits there ended.
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: worker cpu in replay %.2f ms a frame, %.1f KB unreplayed at drains a "
+                     "frame, owner woken %.2f by the worker and %.2f by timeout a frame\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(workerCpuMicros) / 1000.0 / frames,
+                     static_cast<double>(drainPendingBytes) / 1024.0 / frames,
+                     static_cast<double>(ownerNotifyWakes) / frames, static_cast<double>(ownerTimeoutWakes) / frames);
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: owner ran the timing service %.2f times (%.2f ms) a frame while "
+                     "waiting, skipped it %.2f times (gxsvclate %d)\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(ownerServiceCalls) / frames,
+                     static_cast<double>(ownerServiceMicros) / 1000.0 / frames,
+                     static_cast<double>(ownerServiceSkips) / frames,
+                     g_gxSvcLateRequested.load(std::memory_order_relaxed) ? 1 : 0);
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: worker blocked in replay, ms a frame: decode queue %.2f, decode sync "
+                     "%.2f, frame worker %.2f, staging map %.2f, queue lock %.2f, GPU fence %.2f, shader %.2f\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(workerBlocked[0]) / 1000.0 / frames, static_cast<double>(workerBlocked[1]) / 1000.0 / frames,
+                     static_cast<double>(workerBlocked[2]) / 1000.0 / frames, static_cast<double>(workerBlocked[3]) / 1000.0 / frames,
+                     static_cast<double>(workerBlocked[4]) / 1000.0 / frames, static_cast<double>(workerBlocked[5]) / 1000.0 / frames,
+                     static_cast<double>(workerBlocked[6]) / 1000.0 / frames);
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: frames by retraces 0:%llu 1:%llu 2:%llu 3+:%llu, by interval <20ms:%llu "
+                     "20-30ms:%llu 30-40ms:%llu 40ms+:%llu\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<unsigned long long>(byRetraces[0]), static_cast<unsigned long long>(byRetraces[1]),
+                     static_cast<unsigned long long>(byRetraces[2]), static_cast<unsigned long long>(byRetraces[3]),
+                     static_cast<unsigned long long>(byInterval[0]), static_cast<unsigned long long>(byInterval[1]),
+                     static_cast<unsigned long long>(byInterval[2]), static_cast<unsigned long long>(byInterval[3]));
     }
     if (natSkips != 0) {
         // natnosync's scoreboard: non-GX natives reached with records pending that ran without
@@ -1046,6 +1237,21 @@ extern "C" void spm_dcnosync_set(bool enabled) {
 }
 
 // The gxspin switch's hook, the same pattern: the worker reads it each time it catches up.
+extern "C" bool spm_gxworker_is_current_thread() noexcept { return GxWorker::OnWorkerThread(); }
+extern "C" void spm_gxworker_note_blocked(uint32_t site, uint64_t micros) noexcept {
+    if (site < GxWorker::kWorkerBlockedSites) {
+        GxWorker::g_workerBlockedMicros[site].Add(micros);
+    }
+}
+
+extern "C" void spm_gxsvclate_set(bool enabled) {
+    GxWorker::g_gxSvcLateRequested.store(enabled, std::memory_order_relaxed);
+}
+
+extern "C" void spm_gxfutex_set(bool enabled) {
+    GxWorker::g_gxFutexRequested.store(enabled, std::memory_order_relaxed);
+}
+
 extern "C" void spm_gxspin_set(bool enabled) {
     GxWorker::g_gxSpinRequested.store(enabled, std::memory_order_relaxed);
 }

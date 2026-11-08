@@ -23,6 +23,7 @@
 //   - a render pass ends with a fragments barrier and an invalidated texture cache (the next pass
 //     samples what this one drew);
 //   - a compute pass ends with a full barrier.
+#include "spm_worker_blocked.h"
 #include "wgpu_objects.hpp"
 
 #include "dk_aurora.h"
@@ -208,6 +209,12 @@ struct Stats {
     uint64_t submits = 0, passes = 0, draws = 0, skippedDraws = 0, dispatches = 0, copies = 0, writes = 0,
              writeBytes = 0, biasedBinds = 0;
 };
+// queue_mutex(), with the time the GX worker waits for it counted (spm_worker_blocked.h).
+std::unique_lock<std::mutex> lock_queue_timed() {
+    SpmWorkerBlockedScope blocked(kSpmBlockedQueueLock);
+    return std::unique_lock<std::mutex>(queue_mutex());
+}
+
 Stats g_stats;  // under queue_mutex()
 // Whether the last pipeline bind on this queue carried a depth bias: the zcull invalidate at
 // the bind fires on the rising edge into a run of biased binds only (wgpu_encode draw path).
@@ -1210,7 +1217,7 @@ void __wrap_wgpuQueueSubmit(WGPUQueue queue, size_t commandCount, WGPUCommandBuf
     }
     if (!encoders.empty()) {
         const uint64_t l0 = now_ns();
-        std::lock_guard<std::mutex> lock(queue_mutex());
+        std::unique_lock<std::mutex> lock = lock_queue_timed();
         const uint64_t r0 = now_ns();
         g_cpu.lockWaitNs.fetch_add(r0 - l0, std::memory_order_relaxed);
         const uint64_t serial = recording_serial();
@@ -1258,7 +1265,7 @@ void __wrap_wgpuQueueWriteBuffer(WGPUQueue queue, WGPUBuffer buffer, uint64_t bu
     auto b = g_buffers.get(buffer);
     if (!b || size == 0 || bufferOffset >= b->size) return;
     size = size_t(std::min<uint64_t>(size, b->size - bufferOffset));
-    std::lock_guard<std::mutex> lock(queue_mutex());
+    std::unique_lock<std::mutex> lock = lock_queue_timed();
     g_stats.writes++;
     g_stats.writeBytes += size;
     if (b->lastSerial.load(std::memory_order_acquire) <= completed_serial()) {
@@ -1311,7 +1318,7 @@ void __wrap_wgpuQueueWriteTexture(WGPUQueue queue, WGPUTexelCopyTextureInfo cons
     const uint32_t pitch = align_up(rowBytes, 256);
     const uint64_t total = uint64_t(pitch) * blocksH * layers;
     if (total > 0xFFFF0000ull) return;
-    std::lock_guard<std::mutex> lock(queue_mutex());
+    std::unique_lock<std::mutex> lock = lock_queue_timed();
     g_stats.writes++;
     g_stats.writeBytes += total;
     const UploadAlloc u = upload_alloc(uint32_t(total), 256);

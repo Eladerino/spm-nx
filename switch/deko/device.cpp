@@ -79,6 +79,8 @@ extern "C" void spm_natnosync_set(bool enabled);
 // The GX worker's poll-before-sleep (gx_worker.cpp), declared here the same way: diag_init
 // and diag_set forward the "gxspin" switch to it.
 extern "C" void spm_gxspin_set(bool enabled);
+extern "C" void spm_gxfutex_set(bool enabled);
+extern "C" void spm_gxsvclate_set(bool enabled);
 
 // The debug server (source/spm_debug_server.cpp), declared here the same way: diag_init
 // hands it the dkserver switch once the file has been read.
@@ -133,7 +135,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"abtoggle", &Diag::abToggle},    {"wiisuppress", &Diag::wiiSuppress}, {"dcnosync", &Diag::dcNoSync},
     {"invtexq", &Diag::invTexQ},       {"kpadnosync", &Diag::kpadNoSync},
     {"natnosync", &Diag::natNoSync},
-    {"gxspin", &Diag::gxSpin},
+    {"gxspin", &Diag::gxSpin},       {"gxfutex", &Diag::gxFutex},     {"gxsvclate", &Diag::gxSvcLate},
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
 };
 
@@ -416,6 +418,8 @@ void diag_init() {
     // gxspin is on unless dk_diag.txt says gxspin=0 (the Diag default), so its state is
     // forwarded either way; the worker reads it each time it catches up.
     spm_gxspin_set(g_diag.gxSpin);
+    spm_gxfutex_set(g_diag.gxFutex);
+    spm_gxsvclate_set(g_diag.gxSvcLate);
     // A vcache=1 in dk_diag.txt arms Aurora's decoded display-list vertex cache from
     // the start. The cache lives inside Aurora's decode path and reads the switch on
     // every list, so this only sets the initial state; the menu flips it live.
@@ -466,6 +470,8 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "kpadnosync")) spm_kpadnosync_set(on);
     else if (!std::strcmp(key, "natnosync")) spm_natnosync_set(on);
     else if (!std::strcmp(key, "gxspin")) spm_gxspin_set(on);
+    else if (!std::strcmp(key, "gxfutex")) spm_gxfutex_set(on);
+    else if (!std::strcmp(key, "gxsvclate")) spm_gxsvclate_set(on);
     else if (!std::strcmp(key, "padrec")) spm_input_record_set(on);
     else if (!std::strcmp(key, "padreplay")) {
         // Arming passes the file padreplay_parse_params took from dk_diag.txt (a live
