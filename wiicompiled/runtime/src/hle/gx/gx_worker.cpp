@@ -35,7 +35,7 @@ extern "C" uint32_t svcSetThreadCoreMask(uint32_t handle, int32_t coreId, uint32
 extern "C" uint32_t threadGetCurHandle(void);  // libnx (switch.h is not included here)
 extern "C" void svcSleepThread(int64_t nanoseconds);
 // Horizon's address arbiter (libnx svc.h), the futex the gxfutex hand-off sleeps on.
-extern "C" uint32_t svcWaitForAddress(void* address, uint32_t arbType, int32_t value, int64_t timeout);
+extern "C" uint32_t svcWaitForAddress(void* address, uint32_t arbType, int64_t value, int64_t timeout);
 extern "C" uint32_t svcSignalToAddress(void* address, uint32_t signalType, int32_t value, int32_t count);
 #endif
 
@@ -481,7 +481,7 @@ void WorkerMain() {
                     // Still bounded (a 1 ms backstop, as the condition variable has), and counted
                     // when the timeout finds work waiting.
                     const auto sleepStart = std::chrono::steady_clock::now();
-                    svcWaitForAddress(&w.wakeSeq, kArbitrationWaitIfEqual, seq, 1000000);
+                    svcWaitForAddress(&w.wakeSeq, kArbitrationWaitIfEqual, static_cast<int64_t>(seq), 1000000);
                     if (!CaughtUp(w.ends.load(std::memory_order_seq_cst)) &&
                         w.wakeSeq.load(std::memory_order_seq_cst) == seq &&
                         std::chrono::steady_clock::now() - sleepStart >= std::chrono::microseconds(900)) {
