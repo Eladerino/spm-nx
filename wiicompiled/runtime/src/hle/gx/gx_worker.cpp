@@ -149,6 +149,13 @@ std::atomic<bool> g_gxSpinRequested{true};
 // arbiter (Worker::wakeSeq) instead of workCv, so Publish's wake cannot be lost. Switch only;
 // elsewhere the switch changes nothing. Forwarded through spm_gxfutex_set.
 std::atomic<bool> g_gxFutexRequested{false};
+// gxsvclate (off by default; dk_diag gxsvclate=1): a drain waiting on the worker runs the guest
+// timing service (VI, alarms, audio) only once it has waited kServiceAfter, instead of after
+// every 1 ms timeout. Retraces are 16.7 ms apart, so a few milliseconds late is still on time,
+// and the owner spends the wait watching for the worker instead. Forwarded through
+// spm_gxsvclate_set.
+std::atomic<bool> g_gxSvcLateRequested{false};
+constexpr auto kServiceAfter = std::chrono::milliseconds(4);
 
 namespace {
 
@@ -251,6 +258,9 @@ Stat g_workerCpuMicros;
 Stat g_drainPendingBytes;
 Stat g_ownerNotifyWakes;
 Stat g_ownerTimeoutWakes;
+Stat g_ownerServiceMicros;   // time the waiting owner spent in the guest timing service
+Stat g_ownerServiceCalls;
+Stat g_ownerServiceSkips;    // gxsvclate: timeouts that skipped the service (waited under the threshold)
 
 // The calling thread's CPU time in microseconds (Horizon's per-thread tick count, 19.2 MHz),
 // or 0 where it is not available.
@@ -624,8 +634,18 @@ uint64_t WaitForWorker() {
             }
             g_ownerTimeoutWakes.Add();
             if (g_waitService != nullptr) {
+                if (g_gxSvcLateRequested.load(std::memory_order_relaxed) &&
+                    std::chrono::steady_clock::now() - start < kServiceAfter) {
+                    g_ownerServiceSkips.Add();
+                    continue;
+                }
                 lock.unlock();
+                const auto serviceStart = std::chrono::steady_clock::now();
                 g_waitService();
+                g_ownerServiceMicros.Add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                                   std::chrono::steady_clock::now() - serviceStart)
+                                                                   .count()));
+                g_ownerServiceCalls.Add();
                 lock.lock();
             }
         }
@@ -947,6 +967,9 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t drainPendingBytes = g_drainPendingBytes.TakeDelta();
     const uint64_t ownerNotifyWakes = g_ownerNotifyWakes.TakeDelta();
     const uint64_t ownerTimeoutWakes = g_ownerTimeoutWakes.TakeDelta();
+    const uint64_t ownerServiceMicros = g_ownerServiceMicros.TakeDelta();
+    const uint64_t ownerServiceCalls = g_ownerServiceCalls.TakeDelta();
+    const uint64_t ownerServiceSkips = g_ownerServiceSkips.TakeDelta();
     const uint64_t coalesced = g_dflushCoalesced.TakeDelta();
     const uint64_t dcFree = g_dcNoSyncFree.TakeDelta();
     const uint64_t dcCopyDrains = g_dcNoSyncCopyDrains.TakeDelta();
@@ -992,6 +1015,14 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                      static_cast<double>(workerCpuMicros) / 1000.0 / frames,
                      static_cast<double>(drainPendingBytes) / 1024.0 / frames,
                      static_cast<double>(ownerNotifyWakes) / frames, static_cast<double>(ownerTimeoutWakes) / frames);
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: owner ran the timing service %.2f times (%.2f ms) a frame while "
+                     "waiting, skipped it %.2f times (gxsvclate %d)\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(ownerServiceCalls) / frames,
+                     static_cast<double>(ownerServiceMicros) / 1000.0 / frames,
+                     static_cast<double>(ownerServiceSkips) / frames,
+                     g_gxSvcLateRequested.load(std::memory_order_relaxed) ? 1 : 0);
     }
     if (natSkips != 0) {
         // natnosync's scoreboard: non-GX natives reached with records pending that ran without
@@ -1152,6 +1183,10 @@ extern "C" void spm_dcnosync_set(bool enabled) {
 }
 
 // The gxspin switch's hook, the same pattern: the worker reads it each time it catches up.
+extern "C" void spm_gxsvclate_set(bool enabled) {
+    GxWorker::g_gxSvcLateRequested.store(enabled, std::memory_order_relaxed);
+}
+
 extern "C" void spm_gxfutex_set(bool enabled) {
     GxWorker::g_gxFutexRequested.store(enabled, std::memory_order_relaxed);
 }
