@@ -199,6 +199,9 @@ void padreplay_parse_params(const char* value) {
     std::memcpy(g_padReplayFile, value, length + 1);
 }
 
+// dk_diag stagingslots=3|4: how many staging buffers Aurora rotates through (gfx/common.cpp).
+uint32_t g_stagingSlots = 4;
+
 // dk_diag.txt: one switch per line as "key=1" or "key=0". A "#" starts a comment, blank lines and
 // spaces around the "=" are fine, a bare "key" means on, and "0", "off" or "false" mean off. A key
 // the file does not name keeps its default (dk.h); an unknown one is logged and skipped.
@@ -228,6 +231,12 @@ void diag_read_file(FILE* f) {
         if (!std::strcmp(key, "abtoggle")) ab_parse_params(value);
         // padreplay's value carries its file the same way (padreplay_parse_params, above).
         if (!std::strcmp(key, "padreplay")) padreplay_parse_params(value);
+        // stagingslots takes a count, not on/off.
+        if (!std::strcmp(key, "stagingslots")) {
+            g_stagingSlots = std::strtol(value, nullptr, 10) == 3 ? 3 : 4;
+            dklog("diag: stagingslots=%u", g_stagingSlots);
+            continue;
+        }
         if (const DiagKey* entry = find_diag_key(key)) {
             g_diag.*(entry->field) = !off;
         } else {
@@ -662,6 +671,11 @@ void swapchain_wait(DkFence* fence) {
 const DkImage& swapchain_image(int slot) { return g_swapImages[slot]; }
 
 void swapchain_present(int slot) {
+    // Measurement: heap headroom through the session, about every 20 s of play.
+    static uint64_t s_heapLogPresents = 0;
+    if (++s_heapLogPresents % 1200 == 0) {
+        dklog("heap never used %zu MiB at present %llu", heap_never_used_mib(), (unsigned long long)s_heapLogPresents);
+    }
     check_queue("the present");
     dkQueuePresentImage(R.queue, g_swapchain, slot);
     R.presents++;
@@ -705,6 +719,8 @@ void check_queue(const char* before) {
 }  // namespace swdk
 
 using namespace swdk;
+
+extern "C" uint32_t aurora_switch_staging_slots() { return g_stagingSlots; }
 
 extern "C" void aurora_switch_dk_init(void) {
     if (R.device) return;

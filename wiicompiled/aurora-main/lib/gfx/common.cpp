@@ -140,7 +140,15 @@ wgpu::Buffer g_vertexBuffer;
 wgpu::Buffer g_uniformBuffer;
 wgpu::Buffer g_indexBuffer;
 wgpu::Buffer g_storageBuffer;
+#if defined(__SWITCH__)
+// One more than upstream: mapping the next staging buffer waits for the GPU to finish the submit that
+// last used it, and with 3 slots that wait was 3.3 ms a frame in heavy rooms and 10 ms on a slow boot.
+constexpr size_t FrameSlotCount = 4;
+extern "C" uint32_t aurora_switch_staging_slots() __attribute__((weak));  // dk_diag stagingslots=3|4
+#else
 constexpr size_t FrameSlotCount = 3;
+#endif
+static size_t g_stagingSlotCount = FrameSlotCount;  // the slots in use: at most FrameSlotCount
 static std::array<wgpu::Buffer, FrameSlotCount> g_stagingBuffers;
 static size_t currentStagingBuffer = 0;
 static StagingMapState s_mappingState;
@@ -1326,7 +1334,12 @@ void initialize() {
                "Shared Index Buffer");
   createBuffer(g_storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, StorageBufferSize,
                "Shared Storage Buffer");
-  for (int i = 0; i < g_stagingBuffers.size(); ++i) {
+#if defined(__SWITCH__)
+  if (aurora_switch_staging_slots != nullptr) {
+    g_stagingSlotCount = (std::min)(static_cast<size_t>(aurora_switch_staging_slots()), FrameSlotCount);
+  }
+#endif
+  for (size_t i = 0; i < g_stagingSlotCount; ++i) {
     const auto label = fmt::format("Staging Buffer {}", i);
     createBuffer(g_stagingBuffers[i], wgpu::BufferUsage::MapWrite | wgpu::BufferUsage::CopySrc, StagingBufferSize,
                  label.c_str());
@@ -1587,7 +1600,7 @@ void abort_frame() noexcept {
     gx::drop_pending_frame_interpolation_uniforms();
     g_stagingBuffers[currentStagingBuffer].Unmap();
     s_mappingState.reset();
-    currentStagingBuffer = (currentStagingBuffer + 1) % g_stagingBuffers.size();
+    currentStagingBuffer = (currentStagingBuffer + 1) % g_stagingSlotCount;
     map_staging_buffer();
   }
   recycle_render_passes(g_renderPasses);
@@ -1659,7 +1672,7 @@ static void end_batch_impl(const wgpu::CommandEncoder& cmd, bool advanceFrame) {
     }
   }
   copiesScope.stop();
-  currentStagingBuffer = (currentStagingBuffer + 1) % g_stagingBuffers.size();
+  currentStagingBuffer = (currentStagingBuffer + 1) % g_stagingSlotCount;
   {
     FrameSealScope sealScope(kFrameSealMap, advanceFrame);
     map_staging_buffer();
