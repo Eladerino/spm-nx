@@ -575,7 +575,11 @@ void StartStallWatchdogOnce() {
                 const bool black = g_vi.black;  // racy read; diagnostics only
                 RT_LOGF(RT_TAG_VI, "[watchdog] %d s: %u guest frame(s) presented, VI black=%d\n", seconds, frames,
                         black ? 1 : 0);
-                if (frames != 0 && !black && seconds != 30) {  // SPM bring-up: always dump at 30 s
+                if (frames != 0 && !black) {
+                    // A picture is up: nothing to diagnose. (This used to dump
+                    // unconditionally at 30 s, and the dump's stack walk could
+                    // hold the guest fiber mutex for seconds mid-load, which
+                    // froze the game: the save-load hitch.)
                     continue;
                 }
                 RT_LOGF(RT_TAG_VI, "[watchdog] nothing visible yet; guest threads:\n");

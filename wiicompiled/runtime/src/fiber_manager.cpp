@@ -505,13 +505,25 @@ bool GuestFiberManager::ForEachFiber(
 }
 
 void GuestFiberManager::DumpGuestThreads(std::ostream& os) {
-    std::unique_lock<std::mutex> lock(s_mutex, std::try_to_lock);
-    if (!lock.owns_lock()) {
-        os << "[fiber] thread dump skipped: fiber table busy" << std::endl;
-        return;
+    // Snapshot the table under the lock, then format and walk guest stacks
+    // WITHOUT holding it. A stack walk over a live, still-loading game can
+    // take seconds (deep or transiently cyclic backchains), and every guest
+    // thread switch queues behind this mutex; holding it for the walk froze
+    // the game for seconds (the save-load hitch triggered by the VI stall
+    // watchdog's 30 s dump).
+    std::vector<std::pair<uint32_t, GuestFiber>> snapshot;
+    uint32_t current = 0;
+    {
+        std::unique_lock<std::mutex> lock(s_mutex, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            os << "[fiber] thread dump skipped: fiber table busy" << std::endl;
+            return;
+        }
+        snapshot.assign(s_fibers.begin(), s_fibers.end());
+        current = s_currentGuestThread;
     }
-    os << "[fiber] " << s_fibers.size() << " guest thread(s); current 0x" << std::hex << std::uppercase
-       << s_currentGuestThread << std::dec << std::nouppercase << std::endl;
+    os << "[fiber] " << snapshot.size() << " guest thread(s); current 0x" << std::hex << std::uppercase
+       << current << std::dec << std::nouppercase << std::endl;
     // The guest OS's own view (SPM addresses): which threads it can run and who sleeps on the VI
     // retrace queue. A thread the host calls READY but the OS never queues is waiting on something.
     const auto word = [](uint32_t addr) {
@@ -522,11 +534,11 @@ void GuestFiberManager::DumpGuestThreads(std::ostream& os) {
        << " Reschedule=0x" << word(0x8056DBA8u) << " retraceQueue head=0x" << word(0x8056DD88u)
        << " tail=0x" << word(0x8056DD8Cu) << " current=0x" << word(kOSCurrentContextAddr)
        << " running=0x" << word(kOSRunningContextAddr) << std::dec << std::nouppercase << std::endl;
-    for (const auto& [thread, fiber] : s_fibers) {
+    for (const auto& [thread, fiber] : snapshot) {
         os << "[fiber] thread 0x" << std::hex << std::uppercase << thread << " entry 0x" << fiber.entryPoint
            << std::dec << std::nouppercase << " state " << static_cast<uint32_t>(fiber.state)
            << (fiber.isSchedulerFiber ? " (scheduler)" : "") << (fiber.terminated ? " (terminated)" : "")
-           << (thread == s_currentGuestThread ? " (current)" : "") << std::endl;
+           << (thread == current ? " (current)" : "") << std::endl;
         // OSThread: state (u16) +0x2C8, suspend +0x2CC, priority +0x2D0, queue (waiting on) +0x2DC.
         os << "[fiber]   OSThread state=" << (word(thread + 0x2C8u) >> 16) << " suspend="
            << static_cast<int32_t>(word(thread + 0x2CCu)) << " priority="
