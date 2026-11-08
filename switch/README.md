@@ -148,7 +148,13 @@ with them. While the menu is open the game pauses and does
 not receive pad input, so nothing moves behind it. Rows that do not apply on the Switch are not shown: there are no keyboard
 bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
 
-- **Game** holds the port's **Prepare graphics** row, covered in its own section below.
+- **Game** holds the port's **Prepare graphics** row, covered in its own section below, and a
+  **Reset all settings** row under its System heading: behind a confirm prompt it puts every
+  setting the menu owns (game, display, sound, the session cheats, controller bindings for
+  every style, the Developer page's values and the Diagnostics switches) back to the
+  fresh-install defaults, through the same setters the rows themselves use. Saves, mods and
+  the shader cache are not settings and are not touched. Aspect and texture replacements
+  apply at the next launch, exactly as they do from their own rows.
 - **Controls** remaps the gamepad, and holds the vibration setting. Player 1's actions
   sit under Movement, Actions and System headings, as a table: one row per action,
   with a column for the first slot and a column for the second. Ten actions are shown
@@ -172,18 +178,21 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   texture to `Cache/texture_dumps` under the name a replacement would use, for making
   new replacement pictures; takes effect after a restart),
   and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
-  recovery step for a cache that has gone wrong). Diagnostics holds twenty-nine of the
+  recovery step for a cache that has gone wrong). Diagnostics holds thirty-six of the
   renderer's diagnostic switches, grouped under the same headings dk_diag.txt uses
   (each flip also writes all of them back to
   `UserData/dk_diag.txt`, the file the same switches are read from at boot), and Flush logs
-  and Mark log rows for test runs. Four more switches are boot-time only and have no row:
-  zcull, which is read once when the render queue is created (change it by editing the
+  and Mark log rows for test runs. The file knows forty-six keys in all; ten have no row
+  on the page. Four of them are boot-time only: zcull, which is read once when the render queue is created (change it by editing the
   `zcull` line in dk_diag.txt), guestcore, which the thread starter reads from the
   file before the diag system exists (edit the `guestcore` line), dkserver, which
   starts the debug server below (edit the `dkserver` line), and rttlog, which logs
   the state the file select waits on when Return to Title hangs, and the state at
-  the moment Return to Title is chosen (edit the `rttlog` line). The file knows
-  thirty-four keys in all. One of the page's rows is a display option rather than a
+  the moment Return to Title is chosen (edit the `rttlog` line). Five more are set
+  from the file only: wiisuppress (the tutorial Wii Remote suppression, on by
+  default), gxfutex and gxsvclate (the GX worker switches described below), and
+  padrec and padreplay (the input recorder and its replay). The tenth is abtoggle,
+  which carries parameters and is covered in its own paragraph below. One of the page's rows is a display option rather than a
   check: 30 fps cap (`fps30`), under Performance, shows gameplay frames one in two
   for a locked 30 fps while the game keeps its own pace; the title screen and the
   Prepare graphics sweep are not capped. Another Performance row is a measurement
@@ -283,6 +292,18 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   arrive while the game draws are not each a kernel wake. The game thread
   wakes a sleeping worker without taking the mutex; the worker's sleep is a
   1 ms bounded wait, so a wake that slips past costs at most that.
+  The late service switch (`gxsvclate`, on by default, file only) changes what a
+  drain does while it waits for the worker: the guest timing service (VI
+  retraces, alarms, audio) runs only once the wait passes 4 ms instead of at
+  every 1 ms timeout, so a frame is not pushed a whole retrace later by a
+  retrace the service processed in between. On by default since the November 8
+  stock-clock A/B: heavy 3D rose from about 30 to about 36 fps in he1_05 and
+  he2_03, it was judged smoother in play, and audio stayed clean. `gxsvclate=0`
+  in dk_diag.txt turns it off.
+  The futex wake (`gxfutex`, off by default, file only) has the worker sleep on
+  Horizon's address arbiter instead of a condition variable, so a publish can
+  never lose its wake (a lost one costs the frame up to 1 ms). It does remove
+  the lost wakes and measures frame-time neutral, so it stays a switch.
   One more switch has no row at all, and is a measuring instrument rather than a way
   to play: automatic A/B (`abtoggle=<switch>` in dk_diag.txt, or
   `abtoggle=<switch>:<windows>`) flips the named switch on and off by itself at the
@@ -392,14 +413,14 @@ the whole run.
 - **The pointer during flips.** The Wii Remote pointer (Tippi) is blocked out during the
   flip transition between 2D and 3D; it comes back once the flip finishes.
 - **Performance.** The port is CPU-bound on the guest side: the translated game code, not the
-  renderer, sets the frame rate. Set expectations by area, not by a single number. At a high
-  overclock (CPU 1963 MHz, GPU 1152 MHz, memory 2366 MHz, the clocks the port is
-  developed and measured at) 2D areas run at or near full speed; the heavy 3D side is
-  much slower, so keep expectations low there for now. The game steps its physics once
-  per frame, so a lower frame rate is a slower game, not just a less smooth one, and at stock
-  clocks everything runs slower still. Overclocking is the single biggest lever if you want
-  more speed; the numbers above come from a machine overclocked with Horizon-OC
-  (https://github.com/Horizon-OC/Horizon-OC/releases).
+  renderer, sets the frame rate, and the game steps its physics once per frame, so a
+  lower frame rate is a slower game, not just a less smooth one. Set expectations by
+  area, not by a single number: light areas run at full speed at stock clocks, heavy
+  2D areas run below full speed, and the heavy 3D side is much slower, so keep
+  expectations low there for now. Overclocking is the single biggest lever if you
+  want more speed. One load-time problem is gone in this release: earlier builds
+  froze for several seconds just after a save loaded; that is fixed, and the hunt
+  for it is written up in [`docs/PERF-HANDOFF.md`](docs/PERF-HANDOFF.md).
 - **First launch after installing** builds the shader and pipeline caches and can hitch (see
   step 5 of the install). Warm launches are fast. The caches live in `UserData/`; deleting
   that folder brings the slow first launch back, along with deleting your saves. To build
