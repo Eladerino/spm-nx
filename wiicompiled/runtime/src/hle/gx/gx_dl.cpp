@@ -593,7 +593,14 @@ static uint64_t s_hashCheckPrintedDisagreements = 0;
 static void HashCheckNoteLayoutHash(uint64_t maintained) {
     if (!s_hashCheckEnabled.load(std::memory_order_relaxed)) return;
     s_hashCheckChecks.fetch_add(1, std::memory_order_relaxed);
-    if (HashScanLayoutState() != maintained) {
+    const uint64_t recomputed = HashScanLayoutState();
+    // The worker mutates this state on its own scan/replay passes, so a
+    // write landing between the caller's sample of the maintained hash and
+    // the recompute above is a legitimate change, not a missed report.
+    // Count a disagreement only when the maintained value held still
+    // across the recompute and still differs from it.
+    if (recomputed != maintained &&
+        g_hleGxState.vtxLayoutHash == maintained) {
         s_hashCheckDisagreements.fetch_add(1, std::memory_order_relaxed);
     }
 }

@@ -326,9 +326,13 @@ struct HleGxState {
     // composition of the default state.
     uint64_t vtxLayoutHash = InitialVtxLayoutHash();
     bool vtxLayoutHashDirty = true;
-    // Bumped on every real vtxDesc/vtxAttrFmt mutation. Consumers that mirror
-    // this state (gx_dl.cpp's applied-state mirror) use it to detect that a
-    // republish would be a no-op.
+    // Bumped by InvalidateVtxLayoutHash: at the end of each CP desc/VAT
+    // decoder, and by the guest setters when the addressed slot changed.
+    // It does not cover the setters' forced NBT writes (a write to the
+    // GX_VA_NBT slot triggered by addressing a different slot), which the
+    // layout hash above does track. Consumers that mirror this state
+    // (gx_dl.cpp's applied-state mirror) use it to detect that a republish
+    // would be a no-op.
     uint32_t vtxStateGeneration = 0;
     struct VtxArray {
         uint32_t base = 0;
