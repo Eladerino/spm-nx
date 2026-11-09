@@ -567,6 +567,30 @@ uint32_t ProgressChunkEnd(uint32_t from, uint32_t to) {
     }
 }
 
+// Adds `delta` to the ends word's consumed half and returns the word as it stands
+// after the add (the carry fix). The word is one integer, so a consumed add that
+// wraps the low half at a 2^32 boundary carries one byte into the published half:
+// the published end would sit one byte past anything the owner published, and a
+// later pass could be aimed at a one-byte range there. Only the worker adds to
+// the low half, so it can see the wrap coming in its own counter and compensate
+// in the same breath: a spanning add is paired with an immediate -2^32, which
+// restores the published half before the worker reads the word again. Another
+// thread can observe the phantom byte only inside that breath, where every
+// reader of the published half either waits on an equality that just reads false
+// a moment longer (the CaughtUp tests) or reads a statistic; no pass end is ever
+// computed from it, because pass ends come from loads made outside the pair, and
+// the owner's own adds (deltas shifted into the high half) commute with the
+// compensation. Caller contract: the worker thread, the low half's only writer;
+// delta under 2^32 (a chunk delta is bounded by the ring).
+uint64_t AddConsumed(Worker& w, uint32_t delta) {
+    const uint32_t lowBefore = ConsumedEnd(w.ends.load(std::memory_order_seq_cst));
+    const uint64_t added = w.ends.fetch_add(delta, std::memory_order_seq_cst) + delta;
+    if (static_cast<uint64_t>(lowBefore) + delta < (uint64_t{1} << 32)) {
+        return added;
+    }
+    return w.ends.fetch_sub(uint64_t{1} << 32, std::memory_order_seq_cst) - (uint64_t{1} << 32);
+}
+
 void WorkerMain() {
     t_worker = true;
 #if defined(__SWITCH__)
@@ -655,16 +679,13 @@ void WorkerMain() {
         // drain just re-checks and sleeps again, and the mid-pass wakes are counted
         // (g_workerChunkWakes) so their cost stays visible. Only the worker adds to
         // the low half, and the chunk deltas sum to exactly (to - from), as the single
-        // add did. One pre-existing quirk of the ends word stands: when the consumed
-        // half crosses a 2^32 boundary (every ~4 GiB of records), the single add that
-        // spans it carries one byte into the published half; value ordering (consumed
-        // never passes published) does not prevent an addition carry, and splitting
-        // the adds neither causes nor cures it.
+        // add did; AddConsumed keeps the published half honest where a chunk add
+        // spans a 2^32 boundary (about every 4 GiB of records).
         uint32_t done = from;
         while (done != to) {
             const uint32_t next = ProgressChunkEnd(done, to);
             ReplayCounters(done, next, false);
-            const uint64_t after = w.ends.fetch_add(next - done, std::memory_order_seq_cst) + (next - done);
+            const uint64_t after = AddConsumed(w, next - done);
             done = next;
             const bool caughtUp = CaughtUp(after);
             if (caughtUp || w.ownerAsleep.load(std::memory_order_seq_cst)) {
