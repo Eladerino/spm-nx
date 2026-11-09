@@ -100,6 +100,12 @@ void Drain(uint32_t cause = DrainCause::kOther);
 // adversarial reviews live in the phase 2 spec (spm-frame-overlap-design-2026-11-08.md).
 void NoteFrameEnd();
 
+// Hands everything written so far to the worker, past Commit's 32 KB batching threshold
+// (Threaded mode only; a no-op otherwise). GXCopyDisp's record path calls it after noting
+// the frame mark, so the frame's tail is the worker's from that moment on instead of from
+// the next drain's publish (frame overlap, lever A).
+void PublishNow();
+
 // Waits until the worker (or an inline replay) has passed the newest frame mark. A no-op when
 // no copy has been recorded yet, when the mark is already passed, off the owning thread, and in
 // Immediate mode (Commit replays synchronously, so the mark is always passed already).

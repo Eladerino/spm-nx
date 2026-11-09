@@ -201,6 +201,9 @@ void (*g_waitService)() = nullptr;
 // Threaded mode: the hand-off to the worker thread. Heap-allocated and never freed, so nothing
 // destroys a joinable thread at exit (libnx runs static destructors before its own exit hooks).
 constexpr size_t kPublishBytes = 32u << 10;  // the game thread hands over at least this much at once
+constexpr uint32_t kProgressBytes = 32u << 10;  // the worker reports replay progress at least this often
+                                                // (lever A); the publish quantum's size by symmetry, so a
+                                                // waiting drain sees progress at the cadence work arrives
 //
 // The hand-off itself is lock-free: one 64-bit word holds both ends, published (high half, only the
 // game thread adds to it) and consumed (low half, only the worker adds to it), so either side reads
@@ -283,6 +286,7 @@ Stat g_workerCpuMicros;
 Stat g_drainPendingBytes;
 Stat g_ownerNotifyWakes;
 Stat g_ownerTimeoutWakes;
+Stat g_workerChunkWakes;  // lever A: mid-pass progress wakes the worker gave a sleeping owner
 Stat g_ownerServiceMicros;   // time the waiting owner spent in the guest timing service
 Stat g_ownerServiceCalls;
 // Measurement only. The worker's time blocked inside replay on the renderer, by site
@@ -533,6 +537,36 @@ bool SpinForWork(Worker& w) {
     }
 }
 
+// The counter just past the last whole record in [from, to) that ends by from +
+// kProgressBytes (frame overlap, lever A): progress chunks must end on record
+// boundaries, because ReplayRange runs any record that starts before its `to` in
+// full, so a chunk ending mid-record would leave the next chunk reading a payload
+// as a header. Walks headers only; every header read here belongs to a published
+// record, whose size is final (nothing grows a published record: ExtendLast). All
+// arithmetic is in deltas from `from`, so the walk stays correct where the
+// counters wrap at 2^32. Always advances at least one whole record, however large,
+// so a pass of any size makes progress. Caller contract (WorkerMain is the only
+// caller): from != to, both are record-boundary counters, and [from, to) is a
+// published range, which tiles by whole records exactly.
+uint32_t ProgressChunkEnd(uint32_t from, uint32_t to) {
+    const uint32_t soft = std::min(kProgressBytes, static_cast<uint32_t>(to - from));
+    uint32_t end = from;
+    uint32_t used = 0;  // end - from
+    for (;;) {
+        const uint32_t start = static_cast<uint32_t>(AlignUp(end));
+        const uint32_t advance = (start - end) + static_cast<uint32_t>(sizeof(RecordHeader)) +
+                                 HeaderAt(start % kRingBytes)->size;
+        if (used != 0 && used + advance > soft) {
+            return end;
+        }
+        used += advance;
+        end += advance;
+        if (used >= soft) {
+            return end;
+        }
+    }
+}
+
 void WorkerMain() {
     t_worker = true;
 #if defined(__SWITCH__)
@@ -612,15 +646,37 @@ void WorkerMain() {
 #endif
         const auto replayStart = std::chrono::steady_clock::now();
         const uint64_t cpuStart = ThreadCpuMicros();
-        ReplayCounters(from, to, false);
+        // Replay in whole-record pieces and report progress after each (frame overlap,
+        // lever A): the ends word's low half used to move only at the end of a whole
+        // pass, so a drain waiting on a mark inside the pass (the present latch, above
+        // all) saw no progress for the pass's whole length and its 1 ms slices all
+        // timed out. After each piece the owner is woken when it is asleep: its own
+        // predicate decides whether the piece was the one it waited for, so a full
+        // drain just re-checks and sleeps again, and the mid-pass wakes are counted
+        // (g_workerChunkWakes) so their cost stays visible. Only the worker adds to
+        // the low half, and the chunk deltas sum to exactly (to - from), as the single
+        // add did. One pre-existing quirk of the ends word stands: when the consumed
+        // half crosses a 2^32 boundary (every ~4 GiB of records), the single add that
+        // spans it carries one byte into the published half; value ordering (consumed
+        // never passes published) does not prevent an addition carry, and splitting
+        // the adds neither causes nor cures it.
+        uint32_t done = from;
+        while (done != to) {
+            const uint32_t next = ProgressChunkEnd(done, to);
+            ReplayCounters(done, next, false);
+            const uint64_t after = w.ends.fetch_add(next - done, std::memory_order_seq_cst) + (next - done);
+            done = next;
+            const bool caughtUp = CaughtUp(after);
+            if (caughtUp || w.ownerAsleep.load(std::memory_order_seq_cst)) {
+                if (!caughtUp) {
+                    g_workerChunkWakes.Add();
+                }
+                wakeOwner();
+            }
+        }
         g_workerCpuMicros.Add(ThreadCpuMicros() - cpuStart);
         g_workerBusyMicros.Add(static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - replayStart).count()));
-        // Only the worker adds to the low half, and it never passes the high half, so no carry.
-        const uint64_t after = w.ends.fetch_add(to - from, std::memory_order_seq_cst) + (to - from);
-        if (CaughtUp(after)) {
-            wakeOwner();
-        }
     }
 }
 
@@ -884,6 +940,12 @@ void DrainUpTo(uint32_t cause, uint64_t target) {
 }
 
 void Drain(uint32_t cause) { DrainUpTo(cause, UINT64_MAX); }
+
+void PublishNow() {
+    if (Threaded()) {
+        Publish();
+    }
+}
 
 void NoteFrameEnd() { g_newestFrameMark = g_write; }
 
@@ -1261,6 +1323,7 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
     const uint64_t drainPendingBytes = g_drainPendingBytes.TakeDelta();
     const uint64_t ownerNotifyWakes = g_ownerNotifyWakes.TakeDelta();
     const uint64_t ownerTimeoutWakes = g_ownerTimeoutWakes.TakeDelta();
+    const uint64_t workerChunkWakes = g_workerChunkWakes.TakeDelta();
     const uint64_t ownerServiceMicros = g_ownerServiceMicros.TakeDelta();
     const uint64_t ownerServiceCalls = g_ownerServiceCalls.TakeDelta();
     const uint64_t ownerServiceSkips = g_ownerServiceSkips.TakeDelta();
@@ -1334,11 +1397,12 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
         // thread reached a drain, and how its waits there ended.
         std::fprintf(stderr,
                      "[gxworker] frames %llu-%llu: worker cpu in replay %.2f ms a frame, %.1f KB unreplayed at drains a "
-                     "frame, owner woken %.2f by the worker and %.2f by timeout a frame\n",
+                     "frame, owner woken %.2f by the worker and %.2f by timeout a frame, %.2f progress wakes a frame\n",
                      static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
                      static_cast<double>(workerCpuMicros) / 1000.0 / frames,
                      static_cast<double>(drainPendingBytes) / 1024.0 / frames,
-                     static_cast<double>(ownerNotifyWakes) / frames, static_cast<double>(ownerTimeoutWakes) / frames);
+                     static_cast<double>(ownerNotifyWakes) / frames, static_cast<double>(ownerTimeoutWakes) / frames,
+                     static_cast<double>(workerChunkWakes) / frames);
         std::fprintf(stderr,
                      "[gxworker] frames %llu-%llu: owner ran the timing service %.2f times (%.2f ms) a frame while "
                      "waiting, skipped it %.2f times (gxsvclate %d)\n",

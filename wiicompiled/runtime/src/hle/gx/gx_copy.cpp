@@ -201,6 +201,13 @@ bool RecordCopyDisp(uint32_t da, uint32_t c) {
     new (mem) CopyDispPayload{da, c};
     GxWorker::Commit();
     GxWorker::NoteFrameEnd();
+    // Frame overlap, lever A: hand the worker everything up to and including the copy
+    // now, instead of leaving the frame's tail below Commit's 32 KB threshold until the
+    // boundary or the latch publishes it. The worker starts on the tail during the
+    // present prologue, and the latch's mark is already published when it waits. Safe
+    // for the reason ExtendLast states: a published record is only ever read by the
+    // worker, and nothing may grow one, so the copy record is final from here.
+    GxWorker::PublishNow();
     return true;
 }
 
