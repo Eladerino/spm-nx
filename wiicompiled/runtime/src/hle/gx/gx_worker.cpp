@@ -9,8 +9,10 @@
 // 2) replays them. The game thread publishes what it has written in batches (Publish); the worker
 // replays up to the published end and reports how far it got. A record is only ever touched by one
 // thread at a time: the game thread writes and extends records past the published end, the worker
-// reads records before it. The ring is linear, never wrapped: Drain waits until the worker has run
-// everything, and only then rewinds both ends to the start. Every exchange goes through one mutex,
+// reads records before it. The ends are monotonic counters and the ring wraps (frame overlap,
+// phase 1): a record never straddles the wrap, Reserve pads the tail with a no-op record instead,
+// and Drain no longer rewinds anything, it only waits for the worker to reach the published end.
+// Every exchange goes through one mutex,
 // a few dozen times a frame, so each thread's writes are visible to the other when it takes over.
 
 #include "gx_worker.h"
@@ -175,8 +177,11 @@ struct RecordHeader {
 static_assert(sizeof(RecordHeader) == kAlign, "a record's payload starts one alignment unit in");
 
 alignas(kAlign) uint8_t g_ring[kRingBytes];
-size_t g_write = 0;              // end of the last record's payload
-size_t g_lastRecord = kRingBytes; // offset of the newest record's header, or kRingBytes for none
+uint64_t g_write = 0;      // end of the last record's payload, a counter that never rewinds: its
+                           // ring offset is the counter modulo kRingBytes (phase 1, above)
+uint64_t g_lastRecord = 0; // counter of the newest record's header; valid while g_hasLastRecord
+bool g_hasLastRecord = false;
+uint64_t g_drainMark = 0;  // the counter the last completed drain replayed up to
 bool g_reserved = false;         // between Reserve and Commit
 bool g_draining = false;
 // Written only by the owner at a frame boundary; read by the perftimer's printing thread too.
@@ -224,7 +229,7 @@ constexpr uint32_t ConsumedEnd(uint64_t ends) noexcept { return static_cast<uint
 constexpr bool CaughtUp(uint64_t ends) noexcept { return PublishedEnd(ends) == ConsumedEnd(ends); }
 static_assert(kRingBytes <= UINT32_MAX, "ring offsets must fit a half of Worker::ends");
 Worker* g_worker = nullptr;
-size_t g_publishedLocal = 0;  // the owner's copy of Worker::published
+uint64_t g_publishedLocal = 0;  // the owner's copy of Worker::published (a counter, like g_write)
 
 // Totals for the [gxworker] line. The owner is the only writer (a relaxed load and store, as in
 // NativeOverrideCounter); the printing thread reads them and keeps what it last printed.
@@ -419,7 +424,7 @@ bool CanRecord() noexcept {
     return t_owner && CurrentMode() != Mode::Off && !g_draining && !g_frameSunk && !GxWorkerRecordingBlocked();
 }
 
-bool Pending() noexcept { return t_owner && g_write != 0; }
+bool Pending() noexcept { return t_owner && g_write != g_drainMark; }
 
 bool DcNoSyncRequested() noexcept { return g_dcNoSyncRequested.load(std::memory_order_relaxed); }
 
@@ -464,6 +469,23 @@ void ReplayRange(size_t from, size_t to, bool immediate) {
             g_replayErrors.Add();
             std::fprintf(stderr, "[gxworker] a deferred GX call threw\n");
         }
+    }
+}
+
+// A record that does nothing: Reserve writes one over the ring's tail when the next record does
+// not fit before the wrap, so the walk steps over the padding like any other record.
+void PadReplay(void*) {}
+
+// Replays the records between two counters (the ends word's halves are counters' low halves:
+// kRingBytes divides 2^32, so a half names the same ring offset as its counter). A range splits
+// at the wrap point; records never straddle it, so each piece is a plain offset range.
+void ReplayCounters(uint32_t from, uint32_t to, bool immediate) {
+    while (from != to) {
+        const uint32_t room = static_cast<uint32_t>(kRingBytes) - static_cast<uint32_t>(from % kRingBytes);
+        const uint32_t len = std::min(static_cast<uint32_t>(to - from), room);
+        const size_t off = from % kRingBytes;
+        ReplayRange(off, off + len, immediate);
+        from += len;
     }
 }
 
@@ -563,8 +585,8 @@ void WorkerMain() {
             lastBlocked = std::chrono::steady_clock::now();
             continue;
         }
-        const size_t from = ConsumedEnd(ends);
-        const size_t to = PublishedEnd(ends);
+        const uint32_t from = ConsumedEnd(ends);
+        const uint32_t to = PublishedEnd(ends);
 #if defined(__SWITCH__)
         if (std::chrono::steady_clock::now() - lastBlocked > std::chrono::milliseconds(1)) {
             svcSleepThread(-1);  // YieldType_WithoutCoreMigration: let core 2's other threads run
@@ -574,7 +596,7 @@ void WorkerMain() {
 #endif
         const auto replayStart = std::chrono::steady_clock::now();
         const uint64_t cpuStart = ThreadCpuMicros();
-        ReplayRange(from, to, false);
+        ReplayCounters(from, to, false);
         g_workerCpuMicros.Add(ThreadCpuMicros() - cpuStart);
         g_workerBusyMicros.Add(static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - replayStart).count()));
@@ -631,7 +653,7 @@ void Publish() {
 }
 
 // Waits until the worker has replayed everything published, servicing the guest's timing about once
-// a millisecond as Aurora's own waits do, then rewinds the ring. Returns the microseconds waited
+// a millisecond as Aurora's own waits do. Returns the microseconds waited
 // (the same figure g_waitMs totals), or zero when the worker had already caught up. Reuses the
 // start time read below: timing a drain costs no extra clock read.
 uint64_t WaitForWorker() {
@@ -668,11 +690,9 @@ uint64_t WaitForWorker() {
         }
         w.ownerAsleep.store(false, std::memory_order_relaxed);
     }
-    // Rewind. The worker has replayed everything published and only adds to `ends` after a
-    // replay, so nothing races this store: at most it is reading the caught-up pair on its way to
-    // sleep, and the rewound pair is just as caught up.
-    w.ends.store(0, std::memory_order_seq_cst);
-    g_publishedLocal = 0;
+    // No rewind (frame overlap, phase 1): the ends are monotonic counters and the ring wraps,
+    // so the next records continue where these stopped. g_publishedLocal already equals g_write
+    // (Publish ran before the wait), and the drain's caller records how far it got.
     if (waited) {
         const uint64_t micros =
             static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
@@ -699,7 +719,7 @@ void Drain(uint32_t cause) {
         g_dflushCoalesced.Add();
         return;
     }
-    if (g_write == 0) {
+    if (g_write == g_drainMark) {
         if (cause == kDcFlushRangeCause) {
             NoteDcFlushDrained();
         }
@@ -716,13 +736,19 @@ void Drain(uint32_t cause) {
     g_draining = true;
     g_drains.Add();
     CauseSlot* causeSlot = CountCause(cause);
-    if (g_write > g_peakBytes.load(std::memory_order_relaxed)) {
-        g_peakBytes.store(g_write, std::memory_order_relaxed);
+    const uint64_t pendingBytes = g_write - g_drainMark;
+    if (pendingBytes > g_peakBytes.load(std::memory_order_relaxed)) {
+        g_peakBytes.store(pendingBytes, std::memory_order_relaxed);
     }
     struct Done {
         ~Done() {
-            g_write = 0;
-            g_lastRecord = kRingBytes;
+            // This drain replayed everything up to g_write. The counters stay where they are
+            // (the ring wraps now); the mark records how far the drain got, and the publish
+            // pointer syncs so a later switch to Threaded never republishes what an inline
+            // drain already replayed.
+            g_drainMark = g_write;
+            g_publishedLocal = g_write;
+            g_hasLastRecord = false;
             g_draining = false;
         }
     } done;
@@ -737,7 +763,8 @@ void Drain(uint32_t cause) {
             causeSlot->AddWait(waitedMicros);
         }
     } else {
-        ReplayRange(0, g_write, CurrentMode() == Mode::Immediate);
+        ReplayCounters(static_cast<uint32_t>(g_drainMark), static_cast<uint32_t>(g_write),
+                       CurrentMode() == Mode::Immediate);
     }
     if (cause == kDcFlushRangeCause) {
         // The flush's drain completed (an Immediate replay that throws does not reach
@@ -750,24 +777,59 @@ void* Reserve(ReplayFn replay, size_t size, size_t align) {
     if (align > kAlign || size > kRingBytes / 4) {
         return nullptr;
     }
-    size_t start = AlignUp(g_write);
-    if (start + sizeof(RecordHeader) + size > kRingBytes) {
+    // Placement in counter space: the record goes at the write counter's ring offset, and when
+    // it does not fit before the wrap the tail is padded with a no-op record instead of being
+    // straddled. Capacity is judged against how far replay has provably got (the worker's
+    // consumed end, or the last drain's mark off the worker): a snapshot of the consumed end
+    // only ever understates it, so the ring is never overcommitted.
+    for (int attempt = 0;; ++attempt) {
+        uint64_t floor = g_drainMark;
+        if (Threaded()) {
+            // The ends word holds the consumed counter's low half: rebuild the counter in the
+            // published counter's epoch (consumed never passes published, and what is in flight
+            // is far under 2^32, so the epoch is unambiguous).
+            const uint32_t consumedHalf = ConsumedEnd(g_worker->ends.load(std::memory_order_seq_cst));
+            uint64_t rebuilt = (g_publishedLocal & ~uint64_t{0xFFFFFFFF}) | consumedHalf;
+            if (rebuilt > g_publishedLocal) {
+                rebuilt -= uint64_t{1} << 32;
+            }
+            floor = rebuilt;
+        }
+        const uint64_t start = AlignUp(g_write);
+        const uint64_t off = start % kRingBytes;
+        const uint64_t need = sizeof(RecordHeader) + size;
+        const uint64_t pad = (off + need > kRingBytes) ? (kRingBytes - off) : 0;
+        if (start + pad + AlignUp(need) - floor <= kRingBytes) {
+            if (pad != 0) {
+                RecordHeader* padHeader = HeaderAt(static_cast<size_t>(off));
+                padHeader->replay = &PadReplay;
+                padHeader->size = static_cast<uint32_t>(pad - sizeof(RecordHeader));
+                padHeader->reserved = 0;
+                g_write = start + pad;
+            }
+            const uint64_t place = start + pad;
+            RecordHeader* header = HeaderAt(static_cast<size_t>(place % kRingBytes));
+            header->replay = replay;
+            header->size = static_cast<uint32_t>(size);
+            header->reserved = 0;
+            g_lastRecord = place;
+            g_hasLastRecord = true;
+            g_write = place + need;
+            g_reserved = true;
+            g_records.Add();
+            return g_ring + (place % kRingBytes) + sizeof(RecordHeader);
+        }
+        if (attempt != 0 || g_draining) {
+            return nullptr;
+        }
+        // Ring full: drain everything (a full drain is the only rewind left) and retry into
+        // the emptied ring.
         g_ringFull.Add();
         Drain(DrainCause::kRingFull);
-        start = 0;
         if (g_draining) {
             return nullptr;
         }
     }
-    RecordHeader* header = HeaderAt(start);
-    header->replay = replay;
-    header->size = static_cast<uint32_t>(size);
-    header->reserved = 0;
-    g_lastRecord = start;
-    g_write = start + sizeof(RecordHeader) + size;
-    g_reserved = true;
-    g_records.Add();
-    return g_ring + start + sizeof(RecordHeader);
 }
 
 void Commit() {
@@ -781,17 +843,20 @@ void Commit() {
 
 void* ExtendLast(ReplayFn replay, size_t extra, void** extraOut) {
     // A published record may be replaying on the worker right now: only an unpublished one grows.
-    if (g_lastRecord == kRingBytes || g_reserved || g_lastRecord < g_publishedLocal) {
+    if (!g_hasLastRecord || g_reserved || g_lastRecord < g_publishedLocal) {
         return nullptr;
     }
-    RecordHeader* header = HeaderAt(g_lastRecord);
-    if (header->replay != replay || g_write + extra > kRingBytes) {
+    RecordHeader* header = HeaderAt(static_cast<size_t>(g_lastRecord % kRingBytes));
+    // The growth may not cross the wrap either: a record whose payload ends at the wrap has no
+    // contiguous room at offset 0, and one that would grow past it stops at it.
+    const uint64_t writeOff = g_write % kRingBytes;
+    if (header->replay != replay || writeOff == 0 || writeOff + extra > kRingBytes) {
         return nullptr;
     }
-    *extraOut = g_ring + g_write;
+    *extraOut = g_ring + writeOff;
     header->size += static_cast<uint32_t>(extra);
     g_write += extra;
-    return g_ring + g_lastRecord + sizeof(RecordHeader);
+    return g_ring + (g_lastRecord % kRingBytes) + sizeof(RecordHeader);
 }
 
 void FrameBoundary() {
