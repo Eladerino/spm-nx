@@ -182,6 +182,12 @@ uint64_t g_write = 0;      // end of the last record's payload, a counter that n
 uint64_t g_lastRecord = 0; // counter of the newest record's header; valid while g_hasLastRecord
 bool g_hasLastRecord = false;
 uint64_t g_drainMark = 0;  // the counter the last completed drain replayed up to
+// Frame overlap phase 2 (gx_worker.h): the write counter just past the newest frame's copy
+// record, and the previous frame's, which is as far as a frame boundary drains. Owner thread
+// only, like g_write: GXCopyDisp notes the newest at its record's Commit, the boundary
+// adopts it as the previous after draining.
+uint64_t g_newestFrameMark = 0;
+uint64_t g_prevFrameMark = 0;
 bool g_reserved = false;         // between Reserve and Commit
 bool g_draining = false;
 // Written only by the owner at a frame boundary; read by the perftimer's printing thread too.
@@ -249,6 +255,15 @@ Stat g_drains;
 Stat g_ringFull;
 Stat g_replayErrors;
 Stat g_waitMs;           // Threaded: microseconds the game thread waited on the worker, totalled per drain
+Stat g_latchMicros;      // phase 2: microseconds PresentFrame's latch waited for the newest frame's copy
+Stat g_latchWaits;       // phase 2: latch calls that found the newest frame mark ahead of the drain mark
+// The seal witness (gx_worker.h): presents that entered VI_HLE_PresentFrame past its
+// reentrancy guard, aurora_end_frame calls that returned, and presents that left by
+// exception before sealing. Written on the game thread, read by the printing thread;
+// cumulative for the process, never reset.
+std::atomic<uint64_t> g_presentsEntered{0};
+std::atomic<uint64_t> g_sealsCompleted{0};
+std::atomic<uint64_t> g_presentsAbandoned{0};
 Stat g_unsafeDrains;     // Threaded: a drain reached while one was already waiting; the call ran unsynchronised
 // Written by the worker thread only (its own single writer): the time it spent replaying records,
 // and the 1 ms yields it made to core 2's other threads. Busy against the frame time says whether
@@ -399,6 +414,7 @@ const char* FixedCauseName(uint32_t cause) {
     case DrainCause::kFifo: return "(FIFO store)";
     case DrainCause::kUnnamedNative: return "(native)";
     case DrainCause::kSelfDefer: return "(self-defer)";
+    case DrainCause::kCopyLatch: return "(copy latch)";
     default: return nullptr;
     }
 }
@@ -702,13 +718,83 @@ uint64_t WaitForWorker() {
     return 0;
 }
 
+// The worker's consumed counter rebuilt in full from the ends word: Reserve's epoch rebuild
+// (the low half keyed to the published counter's epoch; consumed never passes published and
+// what is in flight is far under 2^32, so the epoch is unambiguous, and a stale read only
+// ever understates it). Threaded mode only: g_worker must exist.
+uint64_t ConsumedCounter() {
+    const uint32_t consumedHalf = ConsumedEnd(g_worker->ends.load(std::memory_order_seq_cst));
+    uint64_t rebuilt = (g_publishedLocal & ~uint64_t{0xFFFFFFFF}) | consumedHalf;
+    if (rebuilt > g_publishedLocal) {
+        rebuilt -= uint64_t{1} << 32;
+    }
+    return rebuilt;
+}
+
+// WaitForWorker with a nearer finish line (frame overlap phase 2): waits until the worker's
+// consumed counter reaches `target` (a frame mark), not the published end, so the records
+// past the mark keep their overlap. The worker's idleCv only fires at full catch-up, so the
+// wait polls the ends word on the same 1 ms cadence and with the same timing service (and
+// the same gxsvclate skip) as WaitForWorker; the predicate is checked before the first
+// slice, so a copy that finished before the wait costs nothing. Returns the microseconds
+// waited, as WaitForWorker does.
+uint64_t WaitForWorkerUpTo(uint64_t target) {
+    Worker& w = *g_worker;
+    const auto start = std::chrono::steady_clock::now();
+    const auto reached = [target] { return ConsumedCounter() >= target; };
+    bool waited = false;
+    if (!reached()) {
+        waited = true;
+        std::unique_lock lock(w.mutex);
+        w.ownerAsleep.store(true, std::memory_order_seq_cst);
+        while (!reached()) {
+            if (w.idleCv.wait_for(lock, std::chrono::milliseconds(1), reached)) {
+                g_ownerNotifyWakes.Add();
+                break;
+            }
+            g_ownerTimeoutWakes.Add();
+            if (g_waitService != nullptr) {
+                if (g_gxSvcLateRequested.load(std::memory_order_relaxed) &&
+                    std::chrono::steady_clock::now() - start < kServiceAfter) {
+                    g_ownerServiceSkips.Add();
+                    continue;
+                }
+                lock.unlock();
+                const auto serviceStart = std::chrono::steady_clock::now();
+                g_waitService();
+                g_ownerServiceMicros.Add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                                   std::chrono::steady_clock::now() - serviceStart)
+                                                                   .count()));
+                g_ownerServiceCalls.Add();
+                lock.lock();
+            }
+        }
+        w.ownerAsleep.store(false, std::memory_order_relaxed);
+    }
+    if (waited) {
+        const uint64_t micros =
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count());
+        g_waitMs.Add(micros);
+        return micros;
+    }
+    return 0;
+}
+
 } // namespace
 
 bool OnWorkerThread() noexcept { return t_worker; }
 
 void SetWaitService(void (*service)()) noexcept { g_waitService = service; }
 
-void Drain(uint32_t cause) {
+// Runs pending records up to `target` (a write counter), oldest first. Drain below is this
+// with no target: every other caller drains in full. Phase 2's two bounded callers are the
+// frame boundary (the previous frame's mark) and the present latch (the newest one). A
+// bounded drain keeps the full drain's discipline exactly: the same g_draining guard, the
+// same publication, and on an unwind the same per-record progress with no completion
+// bookkeeping (the Done below only books a drain that finished). The g_draining case runs
+// nothing and, in Threaded mode, counts an unsynchronised drain, as Drain always has: the
+// phase 2 latch is careful never to call in that state (it checks g_draining first).
+void DrainUpTo(uint32_t cause, uint64_t target) {
     if (!t_owner) {
         return;
     }
@@ -719,7 +805,10 @@ void Drain(uint32_t cause) {
         g_dflushCoalesced.Add();
         return;
     }
-    if (g_write == g_drainMark) {
+    if (target > g_write) {
+        target = g_write;
+    }
+    if (g_drainMark >= target) {
         if (cause == kDcFlushRangeCause) {
             NoteDcFlushDrained();
         }
@@ -740,37 +829,115 @@ void Drain(uint32_t cause) {
     if (pendingBytes > g_peakBytes.load(std::memory_order_relaxed)) {
         g_peakBytes.store(pendingBytes, std::memory_order_relaxed);
     }
+    const bool full = target == g_write;
     struct Done {
+        uint64_t target;
+        bool full;
+        bool completed = false;
         ~Done() {
-            // This drain replayed everything up to g_write. The counters stay where they are
-            // (the ring wraps now); the mark records how far the drain got, and the publish
-            // pointer syncs so a later switch to Threaded never republishes what an inline
-            // drain already replayed.
-            g_drainMark = g_write;
-            g_publishedLocal = g_write;
-            g_hasLastRecord = false;
+            if (!completed) {
+                // The drain unwound (the wait service or a replay threw): per-record progress
+                // stands where it fell, but no completion is booked, so the mark never claims
+                // a counter the replay did not reach. Only the guard clears.
+                g_draining = false;
+                return;
+            }
+            if (full) {
+                // This drain replayed everything up to g_write. The counters stay where they are
+                // (the ring wraps now); the mark records how far the drain got, and the publish
+                // pointer syncs so a later switch to Threaded never republishes what an inline
+                // drain already replayed.
+                g_drainMark = g_write;
+                g_publishedLocal = g_write;
+                g_hasLastRecord = false;
+            } else {
+                // A bounded drain claims only the counter it was asked to reach. The worker
+                // may in fact be further along (its consumed end is the truth Reserve reads),
+                // but the next inline replay must start from a counter nothing has skipped:
+                // records past the target stay pending, the newest one stays growable, and
+                // the publish pointer stays where Publish (or the last full drain) left it.
+                g_drainMark = target;
+            }
             g_draining = false;
         }
-    } done;
+    } done{target, full};
     if (Threaded()) {
         Publish();
         {
             const uint64_t ends = g_worker->ends.load(std::memory_order_seq_cst);
             g_drainPendingBytes.Add(PublishedEnd(ends) - ConsumedEnd(ends));
         }
-        const uint64_t waitedMicros = WaitForWorker();
+        const uint64_t waitedMicros = full ? WaitForWorker() : WaitForWorkerUpTo(target);
         if (causeSlot != nullptr && waitedMicros != 0) {
             causeSlot->AddWait(waitedMicros);
         }
     } else {
-        ReplayCounters(static_cast<uint32_t>(g_drainMark), static_cast<uint32_t>(g_write),
+        ReplayCounters(static_cast<uint32_t>(g_drainMark), static_cast<uint32_t>(target),
                        CurrentMode() == Mode::Immediate);
     }
+    done.completed = true;
     if (cause == kDcFlushRangeCause) {
         // The flush's drain completed (an Immediate replay that throws does not reach
         // this: the drain did not complete, and the witness keeps its earlier word).
         NoteDcFlushDrained();
     }
+}
+
+void Drain(uint32_t cause) { DrainUpTo(cause, UINT64_MAX); }
+
+void NoteFrameEnd() { g_newestFrameMark = g_write; }
+
+void NotePresentEntered() noexcept { g_presentsEntered.fetch_add(1, std::memory_order_relaxed); }
+
+void NoteSealCompleted() noexcept { g_sealsCompleted.fetch_add(1, std::memory_order_relaxed); }
+
+void NotePresentAbandoned() noexcept { g_presentsAbandoned.fetch_add(1, std::memory_order_relaxed); }
+
+// Phase 2's latch (gx_worker.h): PresentFrame waits here, after the boundary and the sink
+// hooks, until replay has passed the newest frame's copy, so the copy's resolve annotation
+// lands in its own frame's pass list before aurora_end_frame seals it.
+void WaitForFrameMark() {
+    if (!t_owner) {
+        return;
+    }
+    const uint64_t target = g_newestFrameMark;
+    if (target == 0 || g_drainMark >= target) {
+        return;
+    }
+    g_latchWaits.Add();
+    const auto start = std::chrono::steady_clock::now();
+    if (g_draining) {
+        // This present fired from the wait service inside an outer drain (the AdvanceRetrace
+        // gate in vi.cpp). The latch must not route through DrainUpTo here: its refusal
+        // counts an unsynchronised drain, and this wait runs nothing unsynchronised. In
+        // Threaded mode the worker advances the consumed counter on its own, so poll it in
+        // bare slices; no wait service runs in the poll, because the outer wait resumes
+        // servicing when this present returns. In the other modes no wait runs inside a
+        // replay, so this case cannot arise, and the outer replay is itself the progress.
+        if (Threaded()) {
+            // The poll terminates because of three facts a reader should check before
+            // touching any of them: the outer drain published everything written so far
+            // before it waited (DrainUpTo's Publish), CanRecord refuses new records while
+            // g_draining holds (so no newer mark can be noted mid-drain: this target is the
+            // newest there is), and the worker replays what was published without needing
+            // the game thread. The bound is the belt on those braces: if a future change
+            // breaks one, the failure is one stale copy and a log line, not a silent freeze.
+            const auto deadline = start + std::chrono::milliseconds(250);
+            while (ConsumedCounter() < target) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    std::fprintf(stderr, "[gxworker] copy latch poll gave up: mark %llu, consumed %llu\n",
+                                 static_cast<unsigned long long>(target),
+                                 static_cast<unsigned long long>(ConsumedCounter()));
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    } else {
+        DrainUpTo(DrainCause::kCopyLatch, target);
+    }
+    g_latchMicros.Add(static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count()));
 }
 
 void* Reserve(ReplayFn replay, size_t size, size_t align) {
@@ -859,6 +1026,14 @@ void* ExtendLast(ReplayFn replay, size_t extra, void** extraOut) {
     return g_ring + (g_lastRecord % kRingBytes) + sizeof(RecordHeader);
 }
 
+// The diagnostics that own presented frames while they are on (the gxskip spike and the
+// dstep mode, gx_worker.h): either one's request atomic is how the boundary knows, sampled
+// here on the owner thread. While one is on, deferral is off at the boundary (below).
+bool DiagnosticsActive() noexcept {
+    return g_gxSkipRequested.load(std::memory_order_relaxed) ||
+           g_dstepRequested.load(std::memory_order_relaxed);
+}
+
 void FrameBoundary() {
     if (!g_hasOwner) {
         g_hasOwner = true;
@@ -884,10 +1059,35 @@ void FrameBoundary() {
     // the presented-frame boundary every [gxworker] window is counted in — the same
     // one the mode switch below applies at.
     ++g_dflushFrame;
-    Drain(DrainCause::kFrame);
+    // Frame overlap phase 2: the boundary drains only as far as the PREVIOUS frame's mark,
+    // so the frame that just ended (its copy included) is still replaying while the next
+    // frame's guest work starts; PresentFrame's latch settles the copy before the seal. A
+    // full drain still runs whenever a frame-owning diagnostic is merely requested, gate
+    // or not (conservative on purpose: its hooks later in the present flip Aurora's FIFO
+    // sink, which a pending tail would replay under, so while one is on, deferral is off
+    // at the boundary, which was every boundary's behavior before phase 2 anyway), and as
+    // a top-up in the two cases below.
+    const bool diagBefore = DiagnosticsActive();
+    if (diagBefore) {
+        Drain(DrainCause::kFrame);
+    } else {
+        DrainUpTo(DrainCause::kFrame, g_prevFrameMark);
+    }
+    if (!diagBefore && DiagnosticsActive()) {
+        // A diagnostic engaged during the deferred drain (the atomics are written live from
+        // the menu, the dk channel and the debug server): its hooks may flip the sink later
+        // in this same present, so the tail goes now.
+        Drain(DrainCause::kFrame);
+    }
+    g_prevFrameMark = g_newestFrameMark;
     const Mode requested = RequestedMode();
     const Mode current = CurrentMode();
     if (requested != current) {
+        if (g_write != g_drainMark) {
+            // A mode switch applies over an empty ring (StartWorker's precondition, and the
+            // mode application below assumes it): top up before switching.
+            Drain(DrainCause::kFrame);
+        }
         if (requested == Mode::Threaded) {
             StartWorker();  // the ring is empty and the worker idle until the first publish
         }
@@ -1073,6 +1273,12 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
         byRetraces[i] = g_framesByRetraces[i].TakeDelta();
         byInterval[i] = g_framesByInterval[i].TakeDelta();
     }
+    const uint64_t latchMicros = g_latchMicros.TakeDelta();
+    const uint64_t latchWaits = g_latchWaits.TakeDelta();
+    const uint64_t presentsEntered = g_presentsEntered.load(std::memory_order_relaxed);
+    const uint64_t sealsCompleted = g_sealsCompleted.load(std::memory_order_relaxed);
+    const uint64_t presentsAbandoned = g_presentsAbandoned.load(std::memory_order_relaxed);
+    const uint64_t sealGap = presentsEntered - sealsCompleted - presentsAbandoned;
     const uint64_t coalesced = g_dflushCoalesced.TakeDelta();
     const uint64_t dcFree = g_dcNoSyncFree.TakeDelta();
     const uint64_t dcCopyDrains = g_dcNoSyncCopyDrains.TakeDelta();
@@ -1097,6 +1303,21 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                      "drains\n",
                      static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
                      static_cast<double>(waitMicros) / 1000.0 / frames, static_cast<unsigned long long>(unsafeDrains));
+    }
+    if (latchWaits != 0 || latchMicros != 0 || sealGap != 0 || presentsAbandoned != 0) {
+        // Phase 2: what the present latch cost, and the seal witness. Presents, seals and
+        // abandoned presents are cumulative for the process; the gap (entered minus sealed
+        // minus abandoned) is 0 or 1 (1 only with a present in flight as this prints) and
+        // the run's last window must read 0. A gap that stays at 1 is a seal that never
+        // happened; an abandoned count above 0 means an exception left a present unsealed,
+        // which is its own event and does not masquerade as a lost seal.
+        std::fprintf(stderr,
+                     "[gxworker] frames %llu-%llu: copy latch waited %.2f ms a frame (%llu waits), seals %llu of %llu "
+                     "presents (gap %llu, abandoned %llu)\n",
+                     static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                     static_cast<double>(latchMicros) / 1000.0 / frames, static_cast<unsigned long long>(latchWaits),
+                     static_cast<unsigned long long>(sealsCompleted), static_cast<unsigned long long>(presentsEntered),
+                     static_cast<unsigned long long>(sealGap), static_cast<unsigned long long>(presentsAbandoned));
     }
     if (workerBusyMicros != 0) {
         // Measurement only: the worker's own replay time (wall clock inside ReplayRange, so a

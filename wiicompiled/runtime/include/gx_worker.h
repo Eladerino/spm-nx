@@ -58,8 +58,9 @@ inline bool Engaged() noexcept { return g_engaged.load(std::memory_order_relaxed
 void RequestMode(Mode mode) noexcept;
 Mode RequestedMode() noexcept;
 
-// Called at the start of every presented frame on the game thread: runs what is pending, then
-// applies the requested mode. The first thread to call it owns the ring.
+// Called at the start of every presented frame on the game thread: runs what is pending
+// (frame overlap phase 2: only up to the previous frame's mark, unless a frame-owning
+// diagnostic is on), then applies the requested mode. The first thread to call it owns the ring.
 void FrameBoundary();
 
 // True when the caller may append a record now: records are on, this thread owns the ring, no
@@ -76,6 +77,7 @@ constexpr uint32_t kCommit = 3;          // Immediate mode: every record
 constexpr uint32_t kFifo = 4;            // a guest FIFO store that couldn't be recorded
 constexpr uint32_t kUnnamedNative = 5;   // a native reached without its guest address
 constexpr uint32_t kSelfDefer = 6;       // a self-deferring call that couldn't be recorded
+constexpr uint32_t kCopyLatch = 7;       // PresentFrame waiting for the newest frame's copy record
 }
 
 // Runs every pending record, oldest first (Threaded: hands them to the worker and waits until it has
@@ -83,6 +85,35 @@ constexpr uint32_t kSelfDefer = 6;       // a self-deferring call that couldn't 
 // point reached from inside a replayed call already has everything recorded before that call
 // applied, which is exactly what it would have seen inline.
 void Drain(uint32_t cause = DrainCause::kOther);
+
+// ---- frame overlap phase 2: the display copy as a record, the present latch -------------------
+//
+// GXCopyDisp (gx_copy.cpp) records its Aurora half instead of running it inline, so the copy
+// replays in ring order while the game thread runs on into the next frame. NoteFrameEnd is
+// called on the game thread just after that record commits: it remembers the write counter
+// just past the copy (the frame mark). The frame boundary then only runs records up to the
+// PREVIOUS frame's mark, so one frame of records (the copy included) is normally still in
+// flight when the next frame starts. WaitForFrameMark is the latch that makes that safe:
+// VI_HLE_PresentFrame calls it after the boundary and the sink hooks, before anything that
+// can seal, and it waits until replay has passed the newest mark, so the frame's copy has
+// annotated the frame's own render pass before aurora_end_frame seals it. The design and its
+// adversarial reviews live in the phase 2 spec (spm-frame-overlap-design-2026-11-08.md).
+void NoteFrameEnd();
+
+// Waits until the worker (or an inline replay) has passed the newest frame mark. A no-op when
+// no copy has been recorded yet, when the mark is already passed, off the owning thread, and in
+// Immediate mode (Commit replays synchronously, so the mark is always passed already).
+void WaitForFrameMark();
+
+// The seal witness for the [gxworker] window line: every VI_HLE_PresentFrame call that gets
+// past its reentrancy guard counts one entered present, and every aurora_end_frame that
+// returns counts one completed seal. A present that leaves by exception before sealing
+// counts as abandoned instead, so it does not wear a lost seal's face for the rest of the
+// run. Same population by construction, so a gap (entered minus sealed minus abandoned)
+// that does not return to zero is a seal that never happened.
+void NotePresentEntered() noexcept;
+void NoteSealCompleted() noexcept;
+void NotePresentAbandoned() noexcept;
 
 // True on the worker thread. Code that must only run on the game thread (servicing the guest's
 // VI and alarm timing) checks it: replayed calls that service timing inline skip it there, since

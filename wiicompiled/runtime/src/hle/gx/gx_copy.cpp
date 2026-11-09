@@ -169,6 +169,41 @@ PPC_NATIVE_OVERRIDE_VOID(8028df8c, GX__SetDispCopyGamma_8016fc24, (uint32_t g), 
 // log the only reader, both on the guest thread.
 uint64_t g_copyDispWorkerWaitNanos = 0;
 
+// Frame overlap phase 2: the display copy as a GX worker record. The payload is the guest
+// address and the clear flag only (both captured values); the host pointer is resolved at
+// replay, so the record means the same copy whenever it runs. GXDrawDone is deliberately not part of the record:
+// Aurora's GXCopyDisp waits for the decode thread itself (fifo::sync, then
+// drain_if_pending, which is the same hand-off and decoder-idle wait GXDrawDone performs),
+// so the copy alone is complete (the phase 2 spec's callback gate read).
+struct CopyDispPayload {
+    uint32_t guestAddr;
+    uint32_t clear;
+};
+
+void ReplayCopyDisp(void* data) {
+    const CopyDispPayload& payload = *static_cast<const CopyDispPayload*>(data);
+    // Perftimer: a wait on Aurora's decode thread in here is the XFB copy's, not a draw done's.
+    const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_DISP);
+    GXCopyDisp(GuestToHostPtr(payload.guestAddr), static_cast<GXBool>(payload.clear));
+}
+
+// Records the frame's display copy and notes the frame mark just past it. False when the
+// copy cannot be recorded (records off, a drain or replay in progress, a sunk frame, or no
+// room after a drain): the caller then runs tonight's inline pair instead, unchanged.
+bool RecordCopyDisp(uint32_t da, uint32_t c) {
+    if (!GxWorker::CanRecord()) {
+        return false;
+    }
+    void* mem = GxWorker::Reserve(&ReplayCopyDisp, sizeof(CopyDispPayload), alignof(CopyDispPayload));
+    if (mem == nullptr) {
+        return false;
+    }
+    new (mem) CopyDispPayload{da, c};
+    GxWorker::Commit();
+    GxWorker::NoteFrameEnd();
+    return true;
+}
+
 extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
     EnsureAuroraFrameActive();
     // The gxskip spike (gx_worker.h): a sunk frame produced no draws, so there is nothing to
@@ -184,11 +219,15 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
         VI_HLE_PresentFrame(/*presentedXfb=*/true, /*paceToRetrace=*/true);
         return;
     }
-    {
+    // Frame overlap phase 2: the copy becomes a record and replays in ring order while this
+    // thread runs on; VI_HLE_PresentFrame's latch (GxWorker::WaitForFrameMark) waits for the
+    // copy before the frame seals. GX copies are FIFO-ordered on hardware, and the record
+    // keeps that order: everything submitted before it replays before it. When the copy
+    // cannot be recorded, tonight's inline pair runs instead, unchanged: drain submitted
+    // draws before resolving the EFB so high-level copies see the same contents.
+    if (!RecordCopyDisp(da, c)) {
         // Perftimer: a wait on Aurora's decode thread in here is the XFB copy's, not a draw done's.
         const AuroraGxWaitSiteScope waitSite(AURORA_GX_WAIT_COPY_DISP);
-        // GX copies are FIFO-ordered on hardware. Drain submitted draws before
-        // resolving the EFB so high-level copies see the same contents.
         GXDrawDone();
         GXCopyDisp(GuestToHostPtr(da), (GXBool)c);
     }

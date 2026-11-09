@@ -1006,8 +1006,24 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     if (s_presentSequenceActive.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
-    // GX records (gx_worker.h): the frame's pending GX calls run before it is presented, and a mode
-    // change from the dk_diag switches or the settings menu takes effect here.
+    // The seal witness's entered half (gx_worker.h): only calls past the guard count, so
+    // the population matches the seals counted at aurora_end_frame below exactly.
+    GxWorker::NotePresentEntered();
+    // If anything below throws out of this call (the executor catches native exceptions),
+    // the present never seals: count it as abandoned on the way out, so the witness gap
+    // does not wear a lost seal's face for the rest of the run.
+    struct SealGuard {
+        bool sealed = false;
+        ~SealGuard() {
+            if (!sealed) {
+                GxWorker::NotePresentAbandoned();
+            }
+        }
+    } sealGuard;
+    // GX records (gx_worker.h): the frame's pending GX calls up to the previous frame's
+    // mark run before it is presented (frame overlap phase 2; the latch below settles the
+    // rest), and a mode change from the dk_diag switches or the settings menu takes
+    // effect here.
     GxWorker::FrameBoundary();
     // The gxskip spike (gx_worker.h): a presented (XFB) frame closes its tick's interval and
     // decides whether the next frame's GX output is discarded. Retrace-context presents are
@@ -1035,6 +1051,13 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     struct SequenceGuard {
         ~SequenceGuard() { s_presentSequenceActive.store(false, std::memory_order_release); }
     } sequenceGuard;
+    // Frame overlap phase 2 (gx_worker.h): the frame boundary above drained only up to the
+    // previous frame's mark, so the frame that just ended may still be replaying, its
+    // display copy included. Wait here, past the guard (an exception unwinding through it
+    // still clears the sequence flag), after the sink hooks and before AuroraGxSync and
+    // the seal, until replay has passed the newest frame's copy: the copy's resolve
+    // annotation must land in its own frame's pass list before aurora_end_frame seals it.
+    GxWorker::WaitForFrameMark();
     if (presentedXfb) {
         {
             // The draw-dump and draw-limit counters below are Aurora's decoder's: with its decode
@@ -1144,6 +1167,9 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
 
     const Clock::time_point endFrameStart = Clock::now();
     aurora_end_frame();
+    // The seal witness's completed half (gx_worker.h).
+    GxWorker::NoteSealCompleted();
+    sealGuard.sealed = true;
     const Clock::time_point paceStart = Clock::now();
     if (paceThisFrame) {
         PaceToRetraceBoundary(paceDeadline);

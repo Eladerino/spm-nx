@@ -23,7 +23,7 @@
 // and its meta, which nothing reads until LoadTexObj, and that copies the object at the call.
 //
 // Not here on purpose, so Inline: the other getters (Get*), waits (DrawDone, Flush, PixModeSync,
-// SetDrawSync), InitTlutObj and LoadTlut (they read a host object keyed by the guest address), display list recording, copies, FIFO setup, the indexed matrix loads (they read the matrix array
+// SetDrawSync), InitTlutObj and LoadTlut (they read a host object keyed by the guest address), display list recording, copies (GXCopyTex stays Inline: its body downloads the copy for the CPU to read; GXCopyDisp is the one exception, classified at the end of this file), FIFO setup, the indexed matrix loads (they read the matrix array
 // through array state a pending SetArray may still change), setters that write __GXData
 // (SetScissorBoxOffset, SetZScaleOffset; SetScissor writes its part at the call and defers the
 // rest), the Poke* calls, list setters (SetVtxDescv, SetVtxAttrFmtv), and the EGG and NSMBW
@@ -156,5 +156,16 @@ GX_WORKER_KIND(0x8026D7D4u, NoSync);     // DCInvalidateRange
 GX_WORKER_KIND(0x8026D800u, NoSync);     // DCFlushRange
 GX_WORKER_KIND(0x8026D830u, NoSync);     // DCStoreRange
 GX_WORKER_KIND(0x8026D860u, NoSync);     // DCFlushRangeNoSync
+
+// The display copy (gx_copy.cpp). NoSync because the body does its own recording now: frame
+// overlap phase 2 splits GXCopyDisp so only its Aurora half becomes a record (the payload is
+// the guest address and the clear flag; the host pointer is resolved at replay), the record
+// replays in ring order while the game thread runs on, and PresentFrame's latch
+// (GxWorker::WaitForFrameMark) waits for the newest frame's copy before the frame seals.
+// GXDrawDone is not part of the record: Aurora's GXCopyDisp waits for the decode thread
+// itself (fifo::sync, then drain_if_pending, which is the same finish drain), so the copy
+// alone is complete. The dispatch drain this classification removes was the point: it ran
+// the whole frame's records on the game thread at every frame end.
+GX_WORKER_KIND(0x8028DFA0u, NoSync);     // GXCopyDisp
 
 #undef GX_WORKER_KIND
