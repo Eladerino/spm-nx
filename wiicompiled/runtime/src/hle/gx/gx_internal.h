@@ -221,13 +221,110 @@ struct VtxAttrFmt {
     u8 frac = 0;
 };
 
+// ---------------------------------------------------------------------------
+// Vertex-layout hash (lever B P2): a Zobrist-style incremental hash over
+// vtxDesc + vtxAttrFmt. Every slot contributes a fixed random-looking 64-bit
+// value that depends on the slot and its content; the layout hash is the XOR
+// of all 234 slot contributions, so a mutation updates it by XORing out the
+// old contribution and XORing in the new one (HleGxState::NoteVtxDescChanged
+// / NoteVtxAttrFmtChanged) instead of recomputing 650 FNV mixes over the
+// arrays. The hash stays a pure function of (vtxDesc, vtxAttrFmt): two
+// states hash equal only if their contributions cancel, a ~2^-64 event for
+// distinct states, the same class as the FNV composition it replaces.
+
+inline uint64_t VtxLayoutSplitMixNext(uint64_t& state) noexcept {
+    uint64_t z = (state += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+inline uint64_t VtxLayoutMix(uint64_t x) noexcept {
+    x ^= x >> 30;
+    x *= 0xBF58476D1CE4E5B9ull;
+    x ^= x >> 27;
+    x *= 0x94D049BB133111EBull;
+    x ^= x >> 31;
+    return x;
+}
+
+struct VtxLayoutZobristTables {
+    // desc[attr][value]: GXAttrType has exactly four values, so the desc
+    // contribution is a table lookup. fmt[attr][field]: one random tag per
+    // (attribute, field) of cnt/type/frac, mixed with the field value and
+    // the format row at the contribution site (the row cannot index a
+    // per-attribute table).
+    uint64_t desc[26][4];
+    uint64_t fmt[26][3];
+    VtxLayoutZobristTables() noexcept {
+        // Fixed seed: the tables are identical in every build and process,
+        // so hashes are comparable across runs and snapshot restores.
+        uint64_t state = 0x243F6A8885A308D3ull;
+        for (auto& row : desc) {
+            for (uint64_t& v : row) v = VtxLayoutSplitMixNext(state);
+        }
+        for (auto& row : fmt) {
+            for (uint64_t& v : row) v = VtxLayoutSplitMixNext(state);
+        }
+    }
+};
+
+inline const VtxLayoutZobristTables& GetVtxLayoutZobristTables() noexcept {
+    static const VtxLayoutZobristTables tables;
+    return tables;
+}
+
+inline uint64_t VtxDescHashContribution(int attr, GXAttrType value) noexcept {
+    const uint32_t v = static_cast<uint32_t>(value);
+    const auto& tables = GetVtxLayoutZobristTables();
+    if (v < 4) return tables.desc[attr][v];
+    // Unreachable for SDK-typed values (every writer masks to two bits or
+    // passes a GXAttrType); keep the hash a pure function of the raw value
+    // even so, the way the old FNV mix was.
+    return VtxLayoutMix(tables.desc[attr][0] ^ (0x9E3779B97F4A7C15ull * (v + 1)));
+}
+
+inline uint64_t VtxAttrFmtHashContribution(int fmt, int attr, const VtxAttrFmt& value) noexcept {
+    const auto& tags = GetVtxLayoutZobristTables().fmt[attr];
+    const uint64_t row = 0x9E3779B97F4A7C15ull * static_cast<uint64_t>(fmt + 1);
+    return VtxLayoutMix(tags[0] ^ row ^ (0x2545F4914F6CDD1Dull * (static_cast<uint32_t>(value.cnt) + 1))) ^
+           VtxLayoutMix(tags[1] ^ row ^ (0x2545F4914F6CDD1Dull * (static_cast<uint32_t>(value.type) + 1))) ^
+           VtxLayoutMix(tags[2] ^ row ^ (0x2545F4914F6CDD1Dull * (static_cast<uint32_t>(value.frac) + 1)));
+}
+
+// The layout hash of a complete state, composed from scratch. The mutation
+// sites maintain HleGxState::vtxLayoutHash incrementally so it always equals
+// this over the live arrays; this from-scratch form is the hashcheck
+// diagnostic's reference (gx_dl.cpp) and the initial value below.
+inline uint64_t ComposeVtxLayoutHash(const GXAttrType (&desc)[26],
+                                     const VtxAttrFmt (&fmt)[8][26]) noexcept {
+    uint64_t hash = 0;
+    for (int attr = 0; attr < 26; ++attr) {
+        hash ^= VtxDescHashContribution(attr, desc[attr]);
+    }
+    for (int f = 0; f < 8; ++f) {
+        for (int attr = 0; attr < 26; ++attr) {
+            hash ^= VtxAttrFmtHashContribution(f, attr, fmt[f][attr]);
+        }
+    }
+    return hash;
+}
+
+inline uint64_t InitialVtxLayoutHash() noexcept {
+    const GXAttrType desc[26]{};  // all GX_NONE, the HleGxState default
+    const VtxAttrFmt fmt[8][26]{};  // all VtxAttrFmt defaults
+    return ComposeVtxLayoutHash(desc, fmt);
+}
+
 struct HleGxState {
     GXAttrType vtxDesc[26]{};
     VtxAttrFmt vtxAttrFmt[8][26]{};
     // Display-list scans key their decoded index bounds by the active vertex
-    // layout. Most display lists reuse that layout, so recompute its content
-    // hash only after a real VCD/VAT mutation.
-    uint64_t vtxLayoutHash = 0;
+    // layout. The hash is maintained incrementally (Zobrist XOR deltas at
+    // every real mutation, reported through the Note*Changed methods below),
+    // so reading it on a scan-cache lookup is a plain load; it starts at the
+    // composition of the default state.
+    uint64_t vtxLayoutHash = InitialVtxLayoutHash();
     bool vtxLayoutHashDirty = true;
     // Bumped on every real vtxDesc/vtxAttrFmt mutation. Consumers that mirror
     // this state (gx_dl.cpp's applied-state mirror) use it to detect that a
@@ -259,6 +356,27 @@ struct HleGxState {
     void InvalidateVtxLayoutHash() noexcept {
         vtxLayoutHashDirty = true;
         ++vtxStateGeneration;
+    }
+    // Incremental layout-hash maintenance: every real vtxDesc / vtxAttrFmt
+    // mutation reports the slot it touched with its old and new values,
+    // beside the InvalidateVtxLayoutHash call it already makes, so
+    // vtxLayoutHash always equals ComposeVtxLayoutHash of the live arrays.
+    // A site that skips its report leaves the hash describing an older
+    // layout; the hashcheck diagnostic (gx_dl.cpp) exists to catch exactly
+    // that in proof runs.
+    void NoteVtxDescChanged(int attr, GXAttrType oldValue, GXAttrType newValue) noexcept {
+        if (oldValue != newValue) {
+            vtxLayoutHash ^= VtxDescHashContribution(attr, oldValue) ^
+                             VtxDescHashContribution(attr, newValue);
+        }
+    }
+    void NoteVtxAttrFmtChanged(int fmt, int attr, const VtxAttrFmt& oldValue,
+                               const VtxAttrFmt& newValue) noexcept {
+        if (oldValue.cnt != newValue.cnt || oldValue.type != newValue.type ||
+            oldValue.frac != newValue.frac) {
+            vtxLayoutHash ^= VtxAttrFmtHashContribution(fmt, attr, oldValue) ^
+                             VtxAttrFmtHashContribution(fmt, attr, newValue);
+        }
     }
     GXAttr NextEnabledAttr(int startAttr);
     int GetExpectedCompCount(GXAttr attr, const VtxAttrFmt& fmt);

@@ -53,6 +53,9 @@ extern "C" void spm_axfx_native_set(bool enabled);
 // The runtime's GX setter dedup experiment (gx_vertex.cpp), declared here the same way:
 // diag_init and diag_set forward the "gxdedup" switch to it.
 extern "C" void spm_gxdedup_set(bool enabled);
+// The runtime's layout-hash self-check (gx_dl.cpp), declared here the same way:
+// diag_init and diag_set forward the "hashcheck" switch to it.
+extern "C" void spm_hashcheck_set(bool enabled);
 
 // The runtime's double-step mode (gx_worker.cpp), declared here the same way:
 // diag_init and diag_set forward the "dstep" switch to it.
@@ -137,6 +140,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"natnosync", &Diag::natNoSync},
     {"gxspin", &Diag::gxSpin},       {"gxfutex", &Diag::gxFutex},     {"gxsvclate", &Diag::gxSvcLate},
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
+    {"hashcheck", &Diag::hashCheck},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -394,6 +398,10 @@ void diag_init() {
     if (g_diag.godMode) spm_godmode_set(true);
     // A gxdedup=1 in dk_diag.txt arms the runtime's GX setter dedup experiment from the start.
     if (g_diag.gxDedup) spm_gxdedup_set(true);
+    // A hashcheck=1 in dk_diag.txt arms the runtime's layout-hash self-check from the
+    // start. The check only recomputes and counts, so boot and the title are checked
+    // the same as gameplay.
+    if (g_diag.hashCheck) spm_hashcheck_set(true);
     // A dstep=1 in dk_diag.txt arms the runtime's double-step mode from the start. The
     // runtime only doubles frames while its gameplay gate is open, so boot and the title
     // are untouched either way.
@@ -463,6 +471,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "reverboff")) spm_reverboff_set(on);
     else if (!std::strcmp(key, "godmode")) spm_godmode_set(on);
     else if (!std::strcmp(key, "gxdedup")) spm_gxdedup_set(on);
+    else if (!std::strcmp(key, "hashcheck")) spm_hashcheck_set(on);
     else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
     else if (!std::strcmp(key, "dflushcoal")) spm_dflushcoal_set(on);
     else if (!std::strcmp(key, "dcnosync")) spm_dcnosync_set(on);

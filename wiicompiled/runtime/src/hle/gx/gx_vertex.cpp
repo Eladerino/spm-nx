@@ -188,6 +188,7 @@ extern "C" void GX__ClearVtxDesc_8016dc34() {
     bool changed = false;
     for(int i=0; i<26; ++i){
         changed |= g_hleGxState.vtxDesc[i] != GX_NONE;
+        g_hleGxState.NoteVtxDescChanged(i, g_hleGxState.vtxDesc[i], GX_NONE);
         g_hleGxState.vtxDesc[i]=GX_NONE;
     }
     if (changed) g_hleGxState.InvalidateVtxLayoutHash();
@@ -201,9 +202,14 @@ extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
     const uint32_t attr = CanonicalVtxAttr(a);
     if(attr>=26||attr==GX_VA_NULL) return;
     const GXAttrType oldType = g_hleGxState.vtxDesc[attr];
+    const GXAttrType oldNbt = g_hleGxState.vtxDesc[GX_VA_NBT];
     g_hleGxState.vtxDesc[attr]=(GXAttrType)t;
     if (a == GX_VA_NBT) {
         g_hleGxState.vtxDesc[GX_VA_NBT] = GX_NONE;
+    }
+    g_hleGxState.NoteVtxDescChanged(attr, oldType, g_hleGxState.vtxDesc[attr]);
+    if (attr != GX_VA_NBT) {
+        g_hleGxState.NoteVtxDescChanged(GX_VA_NBT, oldNbt, g_hleGxState.vtxDesc[GX_VA_NBT]);
     }
     if (g_hleGxState.vtxDesc[attr] != oldType) g_hleGxState.InvalidateVtxLayoutHash();
     if(IsMatrixIndexAttr((GXAttr)attr)) return;
@@ -269,6 +275,7 @@ extern "C" void GX__SetVtxAttrFmt_8016dc68(uint32_t vf, uint32_t a, uint32_t c, 
     const uint32_t attr = CanonicalVtxAttr(a);
     if(vf<8&&attr<26){
         const VtxAttrFmt oldFmt = g_hleGxState.vtxAttrFmt[vf][attr];
+        const VtxAttrFmt oldNbtFmt = g_hleGxState.vtxAttrFmt[vf][GX_VA_NBT];
         g_hleGxState.vtxAttrFmt[vf][attr].cnt=(GXCompCnt)c;
         g_hleGxState.vtxAttrFmt[vf][attr].type=(GXCompType)t;
         g_hleGxState.vtxAttrFmt[vf][attr].frac=(u8)fr;
@@ -276,6 +283,11 @@ extern "C" void GX__SetVtxAttrFmt_8016dc68(uint32_t vf, uint32_t a, uint32_t c, 
             g_hleGxState.vtxAttrFmt[vf][GX_VA_NBT] = {};
         }
         const auto& newFmt = g_hleGxState.vtxAttrFmt[vf][attr];
+        g_hleGxState.NoteVtxAttrFmtChanged(vf, attr, oldFmt, newFmt);
+        if (attr != GX_VA_NBT) {
+            g_hleGxState.NoteVtxAttrFmtChanged(vf, GX_VA_NBT, oldNbtFmt,
+                                               g_hleGxState.vtxAttrFmt[vf][GX_VA_NBT]);
+        }
         if (oldFmt.cnt != newFmt.cnt || oldFmt.type != newFmt.type || oldFmt.frac != newFmt.frac) {
             g_hleGxState.InvalidateVtxLayoutHash();
         }
@@ -543,6 +555,7 @@ extern "C" void GX__DrawSphere_80172a30(uint32_t numMajor, uint32_t numMinor) {
         EnsureAuroraFrameActive();
 
         for (uint32_t i = 0; i < kAttrCount; ++i) {
+            g_hleGxState.NoteVtxDescChanged(i, g_hleGxState.vtxDesc[i], GX_NONE);
             g_hleGxState.vtxDesc[i] = GX_NONE;
         }
         g_hleGxState.InvalidateVtxLayoutHash();
@@ -611,6 +624,7 @@ extern "C" void GX__DrawSphere_80172a30(uint32_t numMajor, uint32_t numMinor) {
     }
 
     for (uint32_t i = 0; i < kAttrCount; ++i) {
+        g_hleGxState.NoteVtxDescChanged(i, g_hleGxState.vtxDesc[i], GX_NONE);
         g_hleGxState.vtxDesc[i] = GX_NONE;
     }
     g_hleGxState.InvalidateVtxLayoutHash();

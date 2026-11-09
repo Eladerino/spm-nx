@@ -14,18 +14,22 @@ inline bool SameVtxAttrFmt(const VtxAttrFmt& lhs, const VtxAttrFmt& rhs) {
 
 inline void VcdLo(uint32_t value) {
     bool changed = false;
-    const auto assign = [&changed](GXAttrType& dst, GXAttrType next) {
-        changed |= dst != next;
+    const auto assign = [&changed](int attr, GXAttrType next) {
+        GXAttrType& dst = g_hleGxState.vtxDesc[attr];
+        if (dst != next) {
+            g_hleGxState.NoteVtxDescChanged(attr, dst, next);
+            changed = true;
+        }
         dst = next;
     };
     for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7MTXIDX; ++i) {
-        assign(g_hleGxState.vtxDesc[i], (value & (1u << i)) ? GX_DIRECT : GX_NONE);
+        assign(i, (value & (1u << i)) ? GX_DIRECT : GX_NONE);
     }
-    assign(g_hleGxState.vtxDesc[GX_VA_POS], AttrType2(value >> 9));
-    assign(g_hleGxState.vtxDesc[GX_VA_NRM], AttrType2(value >> 11));
-    assign(g_hleGxState.vtxDesc[GX_VA_CLR0], AttrType2(value >> 13));
-    assign(g_hleGxState.vtxDesc[GX_VA_CLR1], AttrType2(value >> 15));
-    assign(g_hleGxState.vtxDesc[GX_VA_NBT], GX_NONE);
+    assign(GX_VA_POS, AttrType2(value >> 9));
+    assign(GX_VA_NRM, AttrType2(value >> 11));
+    assign(GX_VA_CLR0, AttrType2(value >> 13));
+    assign(GX_VA_CLR1, AttrType2(value >> 15));
+    assign(GX_VA_NBT, GX_NONE);
     if (changed) {
         g_hleGxState.InvalidateVtxLayoutHash();
     }
@@ -36,6 +40,9 @@ inline void VcdHi(uint32_t value) {
     for (int tex = 0; tex < 8; ++tex) {
         auto& dst = g_hleGxState.vtxDesc[GX_VA_TEX0 + tex];
         const auto next = AttrType2(value >> (tex * 2));
+        if (dst != next) {
+            g_hleGxState.NoteVtxDescChanged(GX_VA_TEX0 + tex, dst, next);
+        }
         changed |= dst != next;
         dst = next;
     }
@@ -77,6 +84,11 @@ inline void VatA(uint8_t fmt, uint32_t value) {
     tex0.cnt = ((value >> 21) & 1u) ? GX_TEX_ST : GX_TEX_S;
     tex0.type = static_cast<GXCompType>((value >> 22) & 7u);
     tex0.frac = static_cast<u8>((value >> 25) & 0x1fu);
+    g_hleGxState.NoteVtxAttrFmtChanged(fmt, GX_VA_POS, oldPos, pos);
+    g_hleGxState.NoteVtxAttrFmtChanged(fmt, GX_VA_NRM, oldNrm, nrm);
+    g_hleGxState.NoteVtxAttrFmtChanged(fmt, GX_VA_CLR0, oldClr0, clr0);
+    g_hleGxState.NoteVtxAttrFmtChanged(fmt, GX_VA_CLR1, oldClr1, clr1);
+    g_hleGxState.NoteVtxAttrFmtChanged(fmt, GX_VA_TEX0, oldTex0, tex0);
     if (!SameVtxAttrFmt(oldPos, pos) || !SameVtxAttrFmt(oldNrm, nrm) ||
         !SameVtxAttrFmt(oldClr0, clr0) || !SameVtxAttrFmt(oldClr1, clr1) ||
         !SameVtxAttrFmt(oldTex0, tex0)) {
@@ -97,6 +109,9 @@ inline void VatB(uint8_t fmt, uint32_t value) {
             attr.frac = static_cast<u8>((value >> (shift + 4)) & 0x1fu);
         }
     }
+    for (int tex = 1; tex <= 4; ++tex) {
+        g_hleGxState.NoteVtxAttrFmtChanged(fmt, GX_VA_TEX0 + tex, before[tex - 1], attrs[GX_VA_TEX0 + tex]);
+    }
     bool changed = false;
     for (int tex = 1; tex <= 4; ++tex) changed |= !SameVtxAttrFmt(before[tex - 1], attrs[GX_VA_TEX0 + tex]);
     if (changed) {
@@ -115,6 +130,9 @@ inline void VatC(uint8_t fmt, uint32_t value) {
         attr.cnt = ((value >> shift) & 1u) ? GX_TEX_ST : GX_TEX_S;
         attr.type = static_cast<GXCompType>((value >> (shift + 1)) & 7u);
         attr.frac = static_cast<u8>((value >> (shift + 4)) & 0x1fu);
+    }
+    for (int tex = 4; tex <= 7; ++tex) {
+        g_hleGxState.NoteVtxAttrFmtChanged(fmt, GX_VA_TEX0 + tex, before[tex - 4], attrs[GX_VA_TEX0 + tex]);
     }
     bool changed = false;
     for (int tex = 4; tex <= 7; ++tex) changed |= !SameVtxAttrFmt(before[tex - 4], attrs[GX_VA_TEX0 + tex]);

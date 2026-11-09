@@ -569,29 +569,33 @@ private:
     }
 };
 
+// From-scratch recompute of the vertex-layout hash over the live arrays.
+// The scan path does not call this: HleGxState::vtxLayoutHash is maintained
+// incrementally by the mutation sites (Zobrist XOR deltas, gx_internal.h),
+// so a lookup reads the field directly. This recompute survives for the
+// hashcheck diagnostic below, which asserts the maintained value against it.
 static uint64_t HashScanLayoutState() {
-    if (!g_hleGxState.vtxLayoutHashDirty) {
-        return g_hleGxState.vtxLayoutHash;
+    return ComposeVtxLayoutHash(g_hleGxState.vtxDesc, g_hleGxState.vtxAttrFmt);
+}
+
+// The hashcheck diagnostic (dk_diag.txt "hashcheck", forwarded through
+// spm_hashcheck_set): while on, every scan-cache lookup also recomputes the
+// layout hash from scratch and counts disagreements with the incrementally
+// maintained value. A mutation site that forgets its report shows up as a
+// nonzero disagreement count in the [hashcheck] perftimer window line
+// (GxWorker::PrintHashCheckWindow). The check reads state only.
+static std::atomic<bool> s_hashCheckEnabled{false};
+static std::atomic<uint64_t> s_hashCheckChecks{0};
+static std::atomic<uint64_t> s_hashCheckDisagreements{0};
+static uint64_t s_hashCheckPrintedChecks = 0;
+static uint64_t s_hashCheckPrintedDisagreements = 0;
+
+static void HashCheckNoteLayoutHash(uint64_t maintained) {
+    if (!s_hashCheckEnabled.load(std::memory_order_relaxed)) return;
+    s_hashCheckChecks.fetch_add(1, std::memory_order_relaxed);
+    if (HashScanLayoutState() != maintained) {
+        s_hashCheckDisagreements.fetch_add(1, std::memory_order_relaxed);
     }
-    uint64_t hash = 1469598103934665603ull;
-    auto mix = [&hash](uint32_t value) {
-        hash ^= static_cast<uint64_t>(value);
-        hash *= 1099511628211ull;
-    };
-    for (int attr = 0; attr < 26; ++attr) {
-        mix(static_cast<uint32_t>(g_hleGxState.vtxDesc[attr]));
-    }
-    for (int fmt = 0; fmt < 8; ++fmt) {
-        for (int attr = 0; attr < 26; ++attr) {
-            const auto& f = g_hleGxState.vtxAttrFmt[fmt][attr];
-            mix(static_cast<uint32_t>(f.cnt));
-            mix(static_cast<uint32_t>(f.type));
-            mix(static_cast<uint32_t>(f.frac));
-        }
-    }
-    g_hleGxState.vtxLayoutHash = hash;
-    g_hleGxState.vtxLayoutHashDirty = false;
-    return g_hleGxState.vtxLayoutHash;
 }
 
 static uint64_t DlScanCacheKey(uint32_t listAddr, uint32_t nbytes, uint64_t layoutHash) {
@@ -1365,6 +1369,32 @@ static bool ApplyAuroraIndexedXFArraysForDisplayList(const std::array<uint32_t, 
 
 extern "C" unsigned g_spmAudit[8];  // aurora command_processor (SPM diagnostics)
 extern "C" int g_spmSweepDump;
+// The deko diag channel's door for the hashcheck diagnostic (switch/deko/device.cpp),
+// the same shape as spm_dlprobe_set: diag_init and diag_set forward the switch here.
+extern "C" void spm_hashcheck_set(bool enabled) {
+    s_hashCheckEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+namespace GxWorker {
+void PrintHashCheckWindow(uint64_t firstFrame, uint64_t lastFrame) {
+    if (lastFrame < firstFrame) return;
+    const uint64_t checks = s_hashCheckChecks.load(std::memory_order_relaxed);
+    const uint64_t disagreements = s_hashCheckDisagreements.load(std::memory_order_relaxed);
+    const uint64_t windowChecks = checks - s_hashCheckPrintedChecks;
+    const uint64_t windowDisagreements = disagreements - s_hashCheckPrintedDisagreements;
+    s_hashCheckPrintedChecks = checks;
+    s_hashCheckPrintedDisagreements = disagreements;
+    if (windowChecks == 0) {
+        return;  // the switch was off (or no scan-cache lookup ran) for this whole window
+    }
+    std::fprintf(stderr,
+                 "[hashcheck] frames %llu-%llu: %llu layout-hash checks, %llu disagreements\n",
+                 static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                 static_cast<unsigned long long>(windowChecks),
+                 static_cast<unsigned long long>(windowDisagreements));
+}
+}  // namespace GxWorker
+
 extern "C" void GxNotifyDisplayListMemoryWrite(uint32_t addr, uint32_t size) {
     GxGuestWrite::NotifyWrite(addr, size);
 }
@@ -1643,7 +1673,8 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
         if (s_skipNext) { s_skipNext = false; return; }
 
         const bool allowScanCache = nbytes <= kDlScanCacheMaxEntryBytes;
-        const uint64_t scanLayoutHash = allowScanCache ? HashScanLayoutState() : 0;
+        const uint64_t scanLayoutHash = allowScanCache ? g_hleGxState.vtxLayoutHash : 0;
+        if (allowScanCache) HashCheckNoteLayoutHash(scanLayoutHash);
         // The digest is computed lazily inside the probe: an entry whose covering
         // write-tracking granules have not moved since it was stored keeps its
         // recorded digest and skips the XXH3 pass over the whole list entirely.

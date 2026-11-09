@@ -186,6 +186,16 @@ void PrintGxSkipWindow(uint64_t firstFrame, uint64_t lastFrame);
 // experiment exists to measure. Prints nothing while nothing was counted.
 void PrintGxDedupWindow(uint64_t firstFrame, uint64_t lastFrame);
 
+// ---- the hashcheck diagnostic (Switch Diagnostics "hashcheck"; state in gx_dl.cpp) ----------
+//
+// While the switch is on, every display-list scan-cache lookup also recomputes the
+// vertex-layout hash from scratch and counts disagreements with the incrementally
+// maintained (Zobrist) value. The [hashcheck] line for a perftimer window, printed
+// with the [calls] lines: checks run and disagreements found while the switch was
+// on. A nonzero disagreement count names a missed layout-mutation site. Prints
+// nothing while no check ran.
+void PrintHashCheckWindow(uint64_t firstFrame, uint64_t lastFrame);
+
 // ---- the dstep mode (Switch Diagnostics "dstep"; state in gx_worker.cpp) ----------------------
 //
 // The double-step full-speed mode, built on the gxskip sink: while the switch is on and the
