@@ -49,6 +49,8 @@ struct RuntimeUserConfig {
     std::optional<bool> metalFxSpatialUpscaling;
     std::optional<bool> skipUnreadyPipelines;
     std::optional<bool> disableCopyFilter;
+    std::optional<int32_t> crtFilter;    // [video] crt_filter: the CRT post filter step, 0 off .. 4 max
+    std::optional<int32_t> crtVignette;  // [video] crt_vignette: its vignette step, 0 off .. 4 max
     std::optional<bool> textureReplacements;
     std::optional<bool> textureDumps;
     std::optional<bool> showFps;
@@ -618,6 +620,8 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
         FindConfigValue<bool>(document, "video", "metalfx_spatial_upscaling");
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
+    config.crtFilter = FindConfigInt(document, "video", "crt_filter");
+    config.crtVignette = FindConfigInt(document, "video", "crt_vignette");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
     config.showDeveloperOptions = FindConfigValue<bool>(document, "dev", "show_developer_options");
     config.mousePointer = FindConfigValue<bool>(document, "input", "mouse_pointer");
@@ -889,6 +893,28 @@ inline bool SetSkipUnreadyPipelines(bool value) {
 inline bool SetDisableCopyFilter(bool value) {
     Mutable().disableCopyFilter = value;
     return WriteSetting("video", "disable_copy_filter", value ? "true" : "false");
+}
+
+inline int32_t CrtFilter(int32_t fallback = 0) {
+    const int32_t value = Get().crtFilter.value_or(fallback);
+    return value < 0 ? 0 : value > 4 ? 4 : value;
+}
+
+inline bool SetCrtFilter(int32_t value) {
+    value = value < 0 ? 0 : value > 4 ? 4 : value;
+    Mutable().crtFilter = value;
+    return WriteSetting("video", "crt_filter", std::to_string(value));
+}
+
+inline int32_t CrtVignette(int32_t fallback = 0) {
+    const int32_t value = Get().crtVignette.value_or(fallback);
+    return value < 0 ? 0 : value > 4 ? 4 : value;
+}
+
+inline bool SetCrtVignette(int32_t value) {
+    value = value < 0 ? 0 : value > 4 ? 4 : value;
+    Mutable().crtVignette = value;
+    return WriteSetting("video", "crt_vignette", std::to_string(value));
 }
 
 inline bool MousePointer(bool fallback = true) {

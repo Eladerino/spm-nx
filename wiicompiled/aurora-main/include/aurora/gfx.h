@@ -88,6 +88,14 @@ bool aurora_flush_pipeline_cache_writes();
 void aurora_set_disable_copy_filter(bool disabled);
 bool aurora_get_disable_copy_filter();
 
+// The CRT post filter's stepped levels (0 off, 1 low, 2 med, 3 high, 4 max) and
+// its companion vignette, applied by the Switch deko3d present to the finished
+// picture. Live: a change lands on the next presented frame. No-ops off Switch.
+void aurora_set_crt_filter(int level);
+int aurora_get_crt_filter();
+void aurora_set_crt_vignette(int level);
+int aurora_get_crt_vignette();
+
 // Guest-RAM write tracking. `generation` changes whenever guest RAM covering a host range was
 // written (or returns AURORA_GUEST_WRITE_UNTRACKED); `notify` reports writes aurora made itself.
 #define AURORA_GUEST_WRITE_UNTRACKED UINT64_MAX
