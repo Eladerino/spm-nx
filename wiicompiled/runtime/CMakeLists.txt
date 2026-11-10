@@ -233,7 +233,8 @@ set(MKW_PPC_SEMANTIC_RUNTIME_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/src/ppc_helpers.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/fpu_helpers.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/src/ppc_quantized.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/src/hle/input/kpad.cpp")
+    "${CMAKE_CURRENT_LIST_DIR}/src/hle/input/kpad.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/src/hle/sqrt_native.cpp")
 set_source_files_properties(${MKW_PPC_SEMANTIC_RUNTIME_SOURCES} PROPERTIES
     SKIP_UNITY_BUILD_INCLUSION ON
     SKIP_PRECOMPILE_HEADERS ON
