@@ -13,9 +13,11 @@
 #include <aurora/aurora.h>
 
 #include <dolphin/pad.h>
+#include <dolphin/gx/GXAurora.h>
 #include <SDL3/SDL_error.h>
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_mouse.h>
+#include <SDL3/SDL_touch.h>
 #include <SDL3/SDL_video.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_timer.h>
@@ -740,6 +742,87 @@ void UpdatePointer(WiiRemoteInput::KpadSample& sample) {
                 pos[1] = (my - h * 0.5f) / (pictureH * 0.5f);
                 if (buttons & SDL_BUTTON_LMASK) sample.hold |= kWpadA;  // click = A where you point
             }
+        }
+    }
+
+
+    // Touchscreen (absolute, like the mouse; on the Switch, the handheld panel): a drag
+    // aims Tippi's pointer and nothing else — no A while the finger is down, where copying
+    // the mouse's held click would fire the moment a drag crossed a target. Letting go
+    // latches the position, keeps the pointer up for the usual linger and pulses A for a
+    // few frames: the port cannot know whether the release point is on an interactable,
+    // so the pulse is unconditional and the game decides hit or miss, exactly like a
+    // missed mouse click. In the arcade pointer games aiming is continuous and select is
+    // deliberate, so a release there owes no pulse (InArcade). Off unless the player turns
+    // it on ([input] touch_tippi); with it off this block is skipped whole, and with no
+    // finger down it changes nothing.
+    static bool touchDown = false;
+    static SDL_FingerID touchFinger = 0;
+    static int touchPulseFrames = 0;
+    constexpr int kTouchPulseFrames = 3;  // ~50 ms at the game's read rate: a short tap of A
+    if (RuntimeConfigFile::TouchTippi(false)) {
+        bool fingerDown = false;
+        float fingerX = 0.0f, fingerY = 0.0f;
+        int deviceCount = 0;
+        SDL_TouchID* devices = SDL_GetTouchDevices(&deviceCount);
+        for (int d = 0; devices != nullptr && d < deviceCount && !fingerDown; ++d) {
+            int fingerCount = 0;
+            SDL_Finger** fingers = SDL_GetTouchFingers(devices[d], &fingerCount);
+            for (int f = 0; fingers != nullptr && f < fingerCount; ++f) {
+                if (fingers[f] == nullptr) continue;
+                // One finger steers: the first one down. A second finger neither steals
+                // the drag nor ends it; it is ignored until the first one lifts.
+                if (touchDown && fingers[f]->id != touchFinger) continue;
+                fingerDown = true;
+                touchFinger = fingers[f]->id;
+                fingerX = fingers[f]->x;
+                fingerY = fingers[f]->y;
+                break;
+            }
+            SDL_free(fingers);
+        }
+        SDL_free(devices);
+        if (fingerDown) {
+            uint32_t surfaceW = 0, surfaceH = 0;
+            AuroraGetSurfaceSize(&surfaceW, &surfaceH);
+            if (surfaceW > 0 && surfaceH > 0) {
+                // The mouse's letterbox arithmetic, fed the finger's position in surface
+                // pixels: finger coordinates are normalised over the presented surface,
+                // the mouse's are pixels in the window presenting it, and the surface
+                // Aurora reports is that window's own size, so the two feeds agree.
+                // aim(true) for the absolute source's no-centre-reset; the mouse is then
+                // stood down as the aiming source, or its stale position would take the
+                // pointer back on the release frame and spoil the latch.
+                aim(true);
+                mouseAiming = false;
+                const auto settings = DisplaySettings::Current();
+                const float windowAspect = static_cast<float>(surfaceW) / static_cast<float>(surfaceH);
+                const float pictureAspect = settings.aspect == DisplaySettings::kAspect4x3    ? 4.0f / 3.0f
+                                            : settings.aspect == DisplaySettings::kAspect16x9  ? 16.0f / 9.0f
+                                            : settings.aspect == DisplaySettings::kAspectCinematic
+                                                ? DisplaySettings::kRatioCinematic
+                                                : windowAspect;
+                const float pictureH = pictureAspect >= windowAspect ? static_cast<float>(surfaceW) / pictureAspect
+                                                                     : static_cast<float>(surfaceH);
+                const float pictureW = pictureH * pictureAspect;
+                const float viewW = std::min(pictureW, pictureH * (DisplaySettings::GameWidescreen() ? 16.0f / 9.0f : 4.0f / 3.0f));
+                pos[0] = (fingerX * static_cast<float>(surfaceW) - surfaceW * 0.5f) / (viewW * 0.5f);
+                pos[1] = (fingerY * static_cast<float>(surfaceH) - surfaceH * 0.5f) / (pictureH * 0.5f);
+                touchDown = true;
+            }
+        } else {
+            if (touchDown) {
+                // Release: pos already holds the last drag point, so the latch is just
+                // keeping it. A finger that slides off the panel stops being reported,
+                // which reads as a release at the edge — the same as lifting there.
+                visibleUntilNs = now + kLingerNs;
+                if (!InArcade()) touchPulseFrames = kTouchPulseFrames;
+            }
+            touchDown = false;
+        }
+        if (touchPulseFrames > 0) {
+            sample.hold |= kWpadA;
+            --touchPulseFrames;
         }
     }
 
