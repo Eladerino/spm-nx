@@ -68,7 +68,7 @@ struct IndirectCallOverride {
     RawDispatchRecord record{};
     bool resolved = false;
 };
-constexpr size_t kMaxIndirectCallOverrides = 8;
+constexpr size_t kMaxIndirectCallOverrides = 16;
 std::array<IndirectCallOverride, kMaxIndirectCallOverrides>& IndirectCallOverrides() {
     static std::array<IndirectCallOverride, kMaxIndirectCallOverrides> overrides{};
     return overrides;
