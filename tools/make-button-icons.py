@@ -82,7 +82,7 @@ TEXTURES = [
     ("tex1_40x40_e73bd2aadadde9d9_14.png", "glyph", [("A", 0.5, 0.5, 0.5)]),
     ("tex1_56x56_4986da0fff2e544e_5.png", "face", [("A", 0.507, 0.453, 0.15)]),
     ("tex1_56x56_ff3270a64a8b87b2_5.png", "face", [("A", 0.507, 0.385, 0.15)]),
-    ("tex1_56x72_38dcf921a993679a_5.png", "face", [("2", 0.504, 0.368, 0.15)]),
+    ("tex1_56x72_38dcf921a993679a_5.png", "disc", [("2", 0.504, 0.368, 0.30)]),
     ("tex1_168x136_42b4c0a037f4bbee_5.png", "tippi", [("stick", 0, 0, 0)]),
     # <icon PAD> (wicon.tpl #0), the whole remote in "Shake [remote] to recover!" and the other shake prompts (also
     # "Point"/"Tilt", rarer): the shake button instead, or a controller player can't tell what to press.
