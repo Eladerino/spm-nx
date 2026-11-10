@@ -74,7 +74,7 @@
 //
 // Instrumentation (gate G2): a call counter and a fallback counter,
 // read through mkw_sqrt_native_calls() / mkw_sqrt_native_fallbacks()
-// and echoed to stderr every 200k calls in the shape the campaign's
+// and echoed to stderr every 262144 calls in the shape the campaign's
 // A/B logs already use (the fnprobe / bboxcache window lines), so the
 // console A/B can report the denormal fallback share per scene.
 
@@ -99,7 +99,7 @@ inline constexpr uint32_t kErrorCellValue = 33;
 inline constexpr uint32_t kErrorCellOffset = 29872; // from ctx->gpr[13]
 inline constexpr uint32_t kNaNConstantAddress = 0x8056D218u;
 inline constexpr uint32_t kFpscrNiBit = 0x4u;
-inline constexpr uint64_t kLogWindowCalls = 200000;
+inline constexpr uint64_t kLogWindowCalls = 262144; // 2^18; the window test is a mask
 
 std::atomic<uint64_t> g_sqrtCalls{0};
 std::atomic<uint64_t> g_sqrtFallbacks{0};
@@ -127,7 +127,7 @@ inline double HostSqrt(double value) noexcept {
 // with the register, per that helper's contract.
 inline double HostSqrtFlushCleared(double value) noexcept {
     const uint32_t saved = MkwGetHostFpControl();
-    MkwSetHostFpControl(saved & ~kMkwFpControlFlushToZeroBits);
+    MkwApplyHostNiMode(0);
     const double result = HostSqrt(value);
     MkwRestoreHostMxcsr(saved);
     return result;
@@ -145,7 +145,7 @@ extern "C" uint64_t mkw_sqrt_native_fallbacks() noexcept {
 
 extern "C" void mkw_sqrt_native(CpuContext* ctx) {
     const uint64_t callIndex = g_sqrtCalls.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (callIndex % kLogWindowCalls == 0) {
+    if ((callIndex & (kLogWindowCalls - 1)) == 0) {
         std::fprintf(stderr, "[sqrt] calls %llu fallbacks %llu\n",
                      static_cast<unsigned long long>(callIndex),
                      static_cast<unsigned long long>(
