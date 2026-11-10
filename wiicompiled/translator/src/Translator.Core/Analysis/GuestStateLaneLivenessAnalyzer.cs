@@ -203,35 +203,47 @@ public static class GuestStateLaneLivenessAnalyzer
             return RootFprUses(after, assign);
         if (assign.Value.Kind == "register" && FprIndex(assign.Value.RegisterName) is int source)
         {
-            // fmr: scalar move. ps0 comes from the source's ps0; ps1 is the
-            // destination's own incoming ps1 (scalar writes preserve PS1,
-            // unlike ps_mr, which the lifter emits as PPC_PsMr).
+            // fmr is a full copy: the lifter emits it as a full .d move
+            // (f31.d = f1.d), so each destination lane comes from the
+            // corresponding source lane (same shape as PPC_PsMr).
             var live = after;
-            if (Demanded(live, dest, lane: 0)) live = RootLanes(live, source, ps0: true, ps1: false);
-            return Kill(live, dest, ps0: true, ps1: false);
+            foreach (var lane in DemandedLanes(live, dest).ToArray())
+                live = RootLanes(live, source, ps0: lane == 0, ps1: lane == 1);
+            return Kill(live, dest, ps0: true, ps1: true);
         }
-        // Constant, GPR or temporary source: the value does not come from an
-        // incoming FPR (temporaries carrying FPR values are rooted at their
-        // own defining instruction, which is unmodelled or non-FPR-destined
-        // and therefore roots its FPR reads unconditionally).
-        return Kill(after, dest, ps0: true, ps1: true);
+        // Constant, GPR or temporary source: root the source value (both
+        // lanes) before killing both destination lanes, so no
+        // kill-without-root path exists. (Temporaries carrying FPR values
+        // are also rooted at their own defining instruction, which is
+        // unmodelled or non-FPR-destined and therefore roots its FPR reads
+        // unconditionally.)
+        var rooted = RootLanes(after, assign.Value, ps0: true, ps1: true);
+        return Kill(rooted, dest, ps0: true, ps1: true);
     }
 
     private static LaneDemand TransferBinary(IrBinary binary, LaneDemand after)
     {
         if (FprIndex(binary.Destination) is not int dest)
             return RootFprUses(after, binary);
-        // Every FPR-destined IrBinary the lifter emits is a scalar FP op
-        // (fneg / fabs / frsp / fctiw / fctiwz / scalar mul): ps0 is computed
-        // from the operands' ps0 lanes and ps1 is the destination's own
-        // incoming ps1 (scalar writes preserve PS1).
-        var live = after;
-        if (Demanded(live, dest, lane: 0))
+        // The float ops the lifter can emit to an architectural FPR
+        // destination are all full-width .d writes in the emitted code
+        // (double fadd/fsub/fmul/fdiv plus frsp, fctiw, fctiwz, fneg,
+        // fabs): both result lanes are computed from both lanes of the
+        // operands, so root both lanes of both register operands when
+        // either destination lane is demanded and kill both lanes.
+        if (DoubleWidthBinaryOps.Contains(binary.Op))
         {
-            live = RootLanes(live, binary.Left, ps0: true, ps1: false);
-            live = RootLanes(live, binary.Right, ps0: true, ps1: false);
+            var live = after;
+            if (Demanded(live, dest, lane: 0) || Demanded(live, dest, lane: 1))
+            {
+                live = RootLanes(live, binary.Left, ps0: true, ps1: true);
+                live = RootLanes(live, binary.Right, ps0: true, ps1: true);
+            }
+            return Kill(live, dest, ps0: true, ps1: true);
         }
-        return Kill(live, dest, ps0: true, ps1: false);
+        // Any other op with an FPR destination falls back to the safe
+        // default: root both lanes of every FPR read, kill nothing.
+        return RootFprUses(after, binary);
     }
 
     private static LaneDemand TransferCall(
@@ -397,29 +409,15 @@ public static class GuestStateLaneLivenessAnalyzer
                 live = RootLanes(live, call.Arguments[0], ps0: true, ps1: false);
             return Kill(live, destFpr, ps0: true, ps1: true);
         }
-        if (target.Equals("PPC_PsToScalar", StringComparison.OrdinalIgnoreCase))
+        if (target.Equals("PPC_PsToScalar", StringComparison.OrdinalIgnoreCase) ||
+            ScalarSingleHelpers.Contains(target) ||
+            ScalarDoubleHelpers.Contains(target))
         {
-            // Produces a scalar: dest ps0 = source ps0; dest ps1 is the
-            // destination's own incoming ps1 (scalar result convention).
-            var live = after;
-            if (Demanded(live, destFpr, lane: 0) && call.Arguments.Count > 0)
-                live = RootLanes(live, call.Arguments[0], ps0: true, ps1: false);
-            return Kill(live, destFpr, ps0: true, ps1: false);
-        }
-        if (ScalarSingleHelpers.Contains(target))
-        {
-            // Single-precision scalar ops: dest ps0 from the arguments' ps0
-            // lanes; dest ps1 is the destination's own incoming ps1.
-            var live = after;
-            if (Demanded(live, destFpr, lane: 0))
-                foreach (var argument in call.Arguments)
-                    live = RootLanes(live, argument, ps0: true, ps1: false);
-            return Kill(live, destFpr, ps0: true, ps1: false);
-        }
-        if (ScalarDoubleHelpers.Contains(target))
-        {
-            // Double-precision scalar ops consume and produce the whole
-            // 64-bit double, i.e. both packed lanes of every argument.
+            // Double-width treatment: the single-precision helpers and
+            // PPC_PsToScalar take and return full doubles in the emitted
+            // code (ppc_isa_float.h), exactly like the double-precision
+            // helpers, so both packed lanes of every argument feed both
+            // result lanes.
             var live = after;
             if (Demanded(live, destFpr, lane: 0) || Demanded(live, destFpr, lane: 1))
                 foreach (var argument in call.Arguments)
@@ -452,6 +450,11 @@ public static class GuestStateLaneLivenessAnalyzer
             ["PPC_PsMerge10"] = (1, 0),
             ["PPC_PsMerge11"] = (1, 1)
         };
+
+    private static readonly HashSet<string> DoubleWidthBinaryOps = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "add", "sub", "mul", "fdiv", "frsp", "fctiw", "fctiwz", "fneg", "fabs"
+    };
 
     private static readonly HashSet<string> ScalarSingleHelpers = new(StringComparer.OrdinalIgnoreCase)
     {
