@@ -1065,6 +1065,11 @@ int RunTranslateRecursive(string[] argsTail)
                                $"inputs={StateFreeInputValueCount(planned)} outputs={StateFreeOutputValueCount(planned)}";
                     });
                 System.IO.File.WriteAllLines(plannedDumpPath, dumpLines);
+                var callSiteLines = stateLivenessByFunction
+                    .SelectMany(pair => pair.Value.DirectCalls.Select(call =>
+                        $"caller=0x{pair.Key:X8} target=0x{call.Target:X8} out_gpr=0x{call.Outputs.Gpr:X8} out_fpr=0x{call.Outputs.Fpr:X8}"))
+                    .OrderBy(static line => line, StringComparer.Ordinal);
+                System.IO.File.WriteAllLines(plannedDumpPath + ".calls", callSiteLines);
             }
 
             // Admit closed direct-call components as a unit. A region is
