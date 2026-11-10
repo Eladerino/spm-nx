@@ -86,6 +86,14 @@ if [[ $audit == 0 ]]; then
     # unflagged boot runs the bodies exactly as unpatched. See
     # patch-bboxcache.py for the anchors and the design.
     python3 "$root/switch/scripts/patch-bboxcache.py" "$work/wiicompiled/generated"
+
+    # Section 81: route the sqrt unit to the host native by renaming the
+    # copied __ieee754_sqrt body to func_80261BBC_orig and wrapping
+    # func_80261BBC with a call to mkw_sqrt_native (gate G3: no runtime
+    # registration reaches the static call sites on Switch). See
+    # patch-sqrt.py for the anchors; it hard-fails unless each anchor
+    # matches exactly once.
+    python3 "$root/switch/scripts/patch-sqrt.py" "$work/wiicompiled/generated"
 fi
 
 # Separate build folders: CMake caches SPM_SWITCH_AUDIT, so a full build in the audit's folder would
