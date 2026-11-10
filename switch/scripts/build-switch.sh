@@ -77,6 +77,15 @@ if [[ $audit == 0 ]]; then
     # otherwise trips the retail npcNameToPtr assert (npcdrv.c:7055) and kills
     # the session. See patch-npc-guard.py for the mechanism and handler list.
     python3 "$root/switch/scripts/patch-npc-guard.py" "$work/wiicompiled/generated"
+    # Give the copied hitGetMapEntryBbox its aggregate-result cache hooks
+    # (BBoxCacheTryServe / BBoxCacheShadowNote / BBoxCacheCapture /
+    # BBoxCacheShadowCompare in the runtime's bbox_cache.cpp) plus the five
+    # writer-generation bumps in the hit-family bodies: an entry block after
+    # the body's argument captures and a capture/compare block at the head of
+    # its common return block. Both diag switches default off, so an
+    # unflagged boot runs the bodies exactly as unpatched. See
+    # patch-bboxcache.py for the anchors and the design.
+    python3 "$root/switch/scripts/patch-bboxcache.py" "$work/wiicompiled/generated"
 fi
 
 # Separate build folders: CMake caches SPM_SWITCH_AUDIT, so a full build in the audit's folder would
