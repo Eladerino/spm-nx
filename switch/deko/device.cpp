@@ -45,6 +45,10 @@ extern "C" void spm_gxskip_set(bool enabled);
 // The runtime's display-list cache eligibility probe (gx_dl.cpp), declared here the same
 // way: diag_init and diag_set forward the "dlprobe" switch to it.
 extern "C" void spm_dlprobe_set(bool enabled);
+// The runtime's hitGetMapEntryBbox aggregate-result cache (bbox_cache.cpp), declared here the same
+// way: diag_init and diag_set forward the "bboxcache" and "bboxshadow" switches to it.
+extern "C" void spm_bboxcache_set(bool enabled);
+extern "C" void spm_bboxshadow_set(bool enabled);
 // The runtime's AXFX Hi reverb native experiment (ax_effects.cpp), declared here the same
 // way: diag_init and diag_set forward the "axfxnative" switch to it.
 extern "C" void spm_reverboff_set(bool enabled);  // ax_effects.cpp, the same pattern
@@ -141,6 +145,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"gxspin", &Diag::gxSpin},       {"gxfutex", &Diag::gxFutex},     {"gxsvclate", &Diag::gxSvcLate},
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
     {"hashcheck", &Diag::hashCheck},
+    {"bboxcache", &Diag::bboxCache},   {"bboxshadow", &Diag::bboxShadow},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -390,6 +395,13 @@ void diag_init() {
     // the start. The probe only hashes and counts, so boot and the title are measured the
     // same as gameplay; the first perftimer window is the warmup either way.
     if (g_diag.dlProbe) spm_dlprobe_set(true);
+    // A bboxcache=1 / bboxshadow=1 in dk_diag.txt arms the runtime's bbox
+    // aggregate-result cache (or its shadow proof mode) from the start. The
+    // helper only runs inside hitGetMapEntryBbox's translated body, so boot
+    // and the title are measured the same as gameplay; the switches are read
+    // on every call, so this only sets the initial state.
+    if (g_diag.bboxCache) spm_bboxcache_set(true);
+    if (g_diag.bboxShadow) spm_bboxshadow_set(true);
     // An axfxnative=1 in dk_diag.txt arms the runtime's AXFX Hi reverb native wrapper from
     // the start. The wrapper reads the switch on every callback, so this only sets the
     // initial state; the menu and the command channel flip it live.
@@ -467,6 +479,8 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "rttlog")) spm_rtt_log_set(on);
     else if (!std::strcmp(key, "gxskip")) spm_gxskip_set(on);
     else if (!std::strcmp(key, "dlprobe")) spm_dlprobe_set(on);
+    else if (!std::strcmp(key, "bboxcache")) spm_bboxcache_set(on);
+    else if (!std::strcmp(key, "bboxshadow")) spm_bboxshadow_set(on);
     else if (!std::strcmp(key, "axfxnative")) spm_axfx_native_set(on);
     else if (!std::strcmp(key, "reverboff")) spm_reverboff_set(on);
     else if (!std::strcmp(key, "godmode")) spm_godmode_set(on);

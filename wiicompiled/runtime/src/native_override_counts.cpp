@@ -7,6 +7,7 @@
 
 #include "hle_stubs.h"
 #include "dl_probe.h"
+#include "bbox_cache.h"
 
 #include <dolphin/gx/GXAurora.h>
 
@@ -54,6 +55,9 @@ void PrintNativeOverrideCounts(uint64_t firstFrame, uint64_t lastFrame) {
     // The dlprobe's line (dl_probe.h) shares it too; it prints nothing while the probe was off
     // for the whole window.
     DlProbe::PrintWindow(firstFrame, lastFrame);
+    // The bboxcache experiment's line (bbox_cache.h) shares it too; it prints nothing
+    // while both of its switches were off for the whole window.
+    BBoxCache::PrintWindow(firstFrame, lastFrame);
     // The vcache experiment's line (Aurora's command_processor.cpp) shares it too; it prints
     // nothing while the cache was off and idle for the whole window.
     AuroraVCachePrintWindow(firstFrame, lastFrame);
