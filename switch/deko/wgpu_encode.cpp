@@ -1449,6 +1449,7 @@ const CompiledStage* g_crtVs = nullptr;
 const CompiledStage* g_crtFs = nullptr;
 uint32_t g_crtUboSlot = 0;   // the fragment stage's uniform slot, from its bindings
 uint32_t g_crtTexSlot = 0;   // the fragment stage's texture slot, from its bindings
+uint32_t g_crtVsUboSlot = 0; // the vertex stage's uniform slot, from its bindings
 Block g_crtUniforms;         // a ring of UBO copies, one per in-flight present
 uint32_t g_crtRing = 0;
 uint32_t g_crtImageSlot = 0;  // the one image descriptor the pass owns
@@ -1470,7 +1471,11 @@ bool crt_init() {
         if (b.kind == SlotBinding::Kind::Uniform && !haveUbo) { g_crtUboSlot = b.slot; haveUbo = true; }
         if (b.kind == SlotBinding::Kind::Sampler && !haveTex) { g_crtTexSlot = b.slot; haveTex = true; }
     }
-    if (!haveUbo || !haveTex) {
+    bool haveVsUbo = false;
+    for (const SlotBinding& b : g_crtVs->bindings) {
+        if (b.kind == SlotBinding::Kind::Uniform && !haveVsUbo) { g_crtVsUboSlot = b.slot; haveVsUbo = true; }
+    }
+    if (!haveUbo || !haveTex || !haveVsUbo) {
         dklog("crt: the post shader's bindings are not the expected shape; the picture stays as shipped");
         return false;
     }
@@ -1544,6 +1549,14 @@ bool crt_present(const Tex& t, const DkImageView& dst, uint32_t fx, uint32_t fy,
     ds.depthWriteEnable = false;
     dkCmdBufBindDepthStencilState(R.cmd, &ds);
     const DkBufExtents ub = {uGpu, 256};
+    // The block is bound at BOTH stages: the vertex stage builds the strip
+    // from it (post.dst, and the framebuffer size in post.grade.zw). JSRF
+    // filled its vertices on the CPU, so its block was fragment-only; here an
+    // unbound vertex uniform reads zeros, dst/dw/dh collapse, and the strip
+    // rasterizes nothing at all (the Nov 10 hardware proof: the draw covered
+    // no pixel, and the diag magenta clear behind the picture showed through
+    // untouched at every step of both ladders).
+    dkCmdBufBindUniformBuffers(R.cmd, DkStage_Vertex, g_crtVsUboSlot, &ub, 1);
     dkCmdBufBindUniformBuffers(R.cmd, DkStage_Fragment, g_crtUboSlot, &ub, 1);
     const DkResHandle tex = dkMakeTextureHandle(g_crtImageSlot, kSamplerLinearClamp);
     dkCmdBufBindTextures(R.cmd, DkStage_Fragment, g_crtTexSlot, &tex, 1);
