@@ -27,6 +27,8 @@ namespace Translator.Core.Analysis;
 /// </summary>
 public static class GuestStateLaneLivenessAnalyzer
 {
+    public static (uint Ps0, uint Ps1) ProbeEntryDemand;
+
     /// <summary>Live-lane bitsets: bit N set means register fN's lane is demanded.</summary>
     private readonly record struct LaneDemand(uint Ps0, uint Ps1)
     {
@@ -97,6 +99,7 @@ public static class GuestStateLaneLivenessAnalyzer
         } while (changed);
 
         var entry = liveIn[function.EntryLabel];
+        ProbeEntryDemand = (entry.Ps0, entry.Ps1);
         return entry.Ps0 | entry.Ps1;
     }
 
@@ -206,10 +209,10 @@ public static class GuestStateLaneLivenessAnalyzer
             // fmr is a full copy: the lifter emits it as a full .d move
             // (f31.d = f1.d), so each destination lane comes from the
             // corresponding source lane (same shape as PPC_PsMr).
-            var live = after;
-            foreach (var lane in DemandedLanes(live, dest).ToArray())
-                live = RootLanes(live, source, ps0: lane == 0, ps1: lane == 1);
-            return Kill(live, dest, ps0: true, ps1: true);
+            var additions = LaneDemand.Empty;
+            foreach (var lane in DemandedLanes(after, dest).ToArray())
+                additions = RootLanes(additions, source, ps0: lane == 0, ps1: lane == 1);
+            return Kill(after, dest, ps0: true, ps1: true).Union(additions);
         }
         // Constant, GPR or temporary source: root the source value (both
         // lanes) before killing both destination lanes, so no
@@ -217,8 +220,8 @@ public static class GuestStateLaneLivenessAnalyzer
         // are also rooted at their own defining instruction, which is
         // unmodelled or non-FPR-destined and therefore roots its FPR reads
         // unconditionally.)
-        var rooted = RootLanes(after, assign.Value, ps0: true, ps1: true);
-        return Kill(rooted, dest, ps0: true, ps1: true);
+        var assignAdditions = RootLanes(LaneDemand.Empty, assign.Value, ps0: true, ps1: true);
+        return Kill(after, dest, ps0: true, ps1: true).Union(assignAdditions);
     }
 
     private static LaneDemand TransferBinary(IrBinary binary, LaneDemand after)
@@ -233,13 +236,13 @@ public static class GuestStateLaneLivenessAnalyzer
         // either destination lane is demanded and kill both lanes.
         if (DoubleWidthBinaryOps.Contains(binary.Op))
         {
-            var live = after;
-            if (Demanded(live, dest, lane: 0) || Demanded(live, dest, lane: 1))
+            var additions = LaneDemand.Empty;
+            if (Demanded(after, dest, lane: 0) || Demanded(after, dest, lane: 1))
             {
-                live = RootLanes(live, binary.Left, ps0: true, ps1: true);
-                live = RootLanes(live, binary.Right, ps0: true, ps1: true);
+                additions = RootLanes(additions, binary.Left, ps0: true, ps1: true);
+                additions = RootLanes(additions, binary.Right, ps0: true, ps1: true);
             }
-            return Kill(live, dest, ps0: true, ps1: true);
+            return Kill(after, dest, ps0: true, ps1: true).Union(additions);
         }
         // Any other op with an FPR destination falls back to the safe
         // default: root both lanes of every FPR read, kill nothing.
@@ -313,20 +316,20 @@ public static class GuestStateLaneLivenessAnalyzer
         // incoming lanes stay demanded (no kill).
         if (LaneWiseHelpers.Contains(target))
         {
-            var live = after;
-            foreach (var lane in DemandedLanes(live, destFpr))
+            var additions = LaneDemand.Empty;
+            foreach (var lane in DemandedLanes(after, destFpr))
                 foreach (var argument in call.Arguments)
-                    live = RootLanes(live, argument, ps0: lane == 0, ps1: lane == 1);
-            return Kill(live, destFpr, ps0: true, ps1: true);
+                    additions = RootLanes(additions, argument, ps0: lane == 0, ps1: lane == 1);
+            return Kill(after, destFpr, ps0: true, ps1: true).Union(additions);
         }
         if (target.Equals("PPC_PsMr", StringComparison.OrdinalIgnoreCase))
         {
             // ps_mr copies both lanes (paired move).
-            var live = after;
-            foreach (var lane in DemandedLanes(live, destFpr))
+            var additions = LaneDemand.Empty;
+            foreach (var lane in DemandedLanes(after, destFpr))
                 foreach (var argument in call.Arguments)
-                    live = RootLanes(live, argument, ps0: lane == 0, ps1: lane == 1);
-            return Kill(live, destFpr, ps0: true, ps1: true);
+                    additions = RootLanes(additions, argument, ps0: lane == 0, ps1: lane == 1);
+            return Kill(after, destFpr, ps0: true, ps1: true).Union(additions);
         }
         if (target.Equals("PPC_PsMuls0", StringComparison.OrdinalIgnoreCase) ||
             target.Equals("PPC_PsMadds0", StringComparison.OrdinalIgnoreCase))
@@ -334,80 +337,80 @@ public static class GuestStateLaneLivenessAnalyzer
             // Both dest lanes: arg0 lane-wise, the middle argument's ps0 is
             // broadcast, arg2 (madds only) lane-wise (ppc_isa_float.h:
             // PPC_PsMuls0Inline / PPC_PsMadds0Inline use BroadcastPs0).
-            var live = after;
-            var lanes = DemandedLanes(live, destFpr).ToArray();
+            var additions = LaneDemand.Empty;
+            var lanes = DemandedLanes(after, destFpr).ToArray();
             if (lanes.Length != 0)
             {
                 foreach (var lane in lanes)
                 {
-                    if (call.Arguments.Count > 0) live = RootLanes(live, call.Arguments[0], ps0: lane == 0, ps1: lane == 1);
-                    if (call.Arguments.Count > 2) live = RootLanes(live, call.Arguments[2], ps0: lane == 0, ps1: lane == 1);
+                    if (call.Arguments.Count > 0) additions = RootLanes(additions, call.Arguments[0], ps0: lane == 0, ps1: lane == 1);
+                    if (call.Arguments.Count > 2) additions = RootLanes(additions, call.Arguments[2], ps0: lane == 0, ps1: lane == 1);
                 }
-                if (call.Arguments.Count > 1) live = RootLanes(live, call.Arguments[1], ps0: true, ps1: false);
+                if (call.Arguments.Count > 1) additions = RootLanes(additions, call.Arguments[1], ps0: true, ps1: false);
             }
-            return Kill(live, destFpr, ps0: true, ps1: true);
+            return Kill(after, destFpr, ps0: true, ps1: true).Union(additions);
         }
         if (target.Equals("PPC_PsMuls1", StringComparison.OrdinalIgnoreCase) ||
             target.Equals("PPC_PsMadds1", StringComparison.OrdinalIgnoreCase))
         {
-            var live = after;
-            var lanes = DemandedLanes(live, destFpr).ToArray();
+            var additions = LaneDemand.Empty;
+            var lanes = DemandedLanes(after, destFpr).ToArray();
             if (lanes.Length != 0)
             {
                 foreach (var lane in lanes)
                 {
-                    if (call.Arguments.Count > 0) live = RootLanes(live, call.Arguments[0], ps0: lane == 0, ps1: lane == 1);
-                    if (call.Arguments.Count > 2) live = RootLanes(live, call.Arguments[2], ps0: lane == 0, ps1: lane == 1);
+                    if (call.Arguments.Count > 0) additions = RootLanes(additions, call.Arguments[0], ps0: lane == 0, ps1: lane == 1);
+                    if (call.Arguments.Count > 2) additions = RootLanes(additions, call.Arguments[2], ps0: lane == 0, ps1: lane == 1);
                 }
-                if (call.Arguments.Count > 1) live = RootLanes(live, call.Arguments[1], ps0: false, ps1: true);
+                if (call.Arguments.Count > 1) additions = RootLanes(additions, call.Arguments[1], ps0: false, ps1: true);
             }
-            return Kill(live, destFpr, ps0: true, ps1: true);
+            return Kill(after, destFpr, ps0: true, ps1: true).Union(additions);
         }
         if (target.Equals("PPC_PsSum0", StringComparison.OrdinalIgnoreCase))
         {
             // PPC_PsSum0Inline: ps0 = Ps0(a) + Ps1(b); ps1 = Ps1(c).
-            var live = after;
-            if (Demanded(live, destFpr, lane: 0))
+            var additions = LaneDemand.Empty;
+            if (Demanded(after, destFpr, lane: 0))
             {
-                if (call.Arguments.Count > 0) live = RootLanes(live, call.Arguments[0], ps0: true, ps1: false);
-                if (call.Arguments.Count > 1) live = RootLanes(live, call.Arguments[1], ps0: false, ps1: true);
+                if (call.Arguments.Count > 0) additions = RootLanes(additions, call.Arguments[0], ps0: true, ps1: false);
+                if (call.Arguments.Count > 1) additions = RootLanes(additions, call.Arguments[1], ps0: false, ps1: true);
             }
-            if (Demanded(live, destFpr, lane: 1) && call.Arguments.Count > 2)
-                live = RootLanes(live, call.Arguments[2], ps0: false, ps1: true);
-            return Kill(live, destFpr, ps0: true, ps1: true);
+            if (Demanded(after, destFpr, lane: 1) && call.Arguments.Count > 2)
+                additions = RootLanes(additions, call.Arguments[2], ps0: false, ps1: true);
+            return Kill(after, destFpr, ps0: true, ps1: true).Union(additions);
         }
         if (target.Equals("PPC_PsSum1", StringComparison.OrdinalIgnoreCase))
         {
             // PPC_PsSum1Inline: ps0 = Ps0(c); ps1 = Ps0(a) + Ps1(b).
-            var live = after;
-            if (Demanded(live, destFpr, lane: 0) && call.Arguments.Count > 2)
-                live = RootLanes(live, call.Arguments[2], ps0: true, ps1: false);
-            if (Demanded(live, destFpr, lane: 1))
+            var additions = LaneDemand.Empty;
+            if (Demanded(after, destFpr, lane: 0) && call.Arguments.Count > 2)
+                additions = RootLanes(additions, call.Arguments[2], ps0: true, ps1: false);
+            if (Demanded(after, destFpr, lane: 1))
             {
-                if (call.Arguments.Count > 0) live = RootLanes(live, call.Arguments[0], ps0: true, ps1: false);
-                if (call.Arguments.Count > 1) live = RootLanes(live, call.Arguments[1], ps0: false, ps1: true);
+                if (call.Arguments.Count > 0) additions = RootLanes(additions, call.Arguments[0], ps0: true, ps1: false);
+                if (call.Arguments.Count > 1) additions = RootLanes(additions, call.Arguments[1], ps0: false, ps1: true);
             }
-            return Kill(live, destFpr, ps0: true, ps1: true);
+            return Kill(after, destFpr, ps0: true, ps1: true).Union(additions);
         }
         if (MergeHelpers.TryGetValue(target, out var merge))
         {
             // PPC_PsMergeXYInline: dest ps0 = a's lane X, dest ps1 = b's
             // lane Y (ppc_isa_float.h merge block).
-            var live = after;
-            if (Demanded(live, destFpr, lane: 0) && call.Arguments.Count > 0)
-                live = RootLanes(live, call.Arguments[0], ps0: merge.Ps0FromA == 0, ps1: merge.Ps0FromA == 1);
-            if (Demanded(live, destFpr, lane: 1) && call.Arguments.Count > 1)
-                live = RootLanes(live, call.Arguments[1], ps0: merge.Ps1FromB == 0, ps1: merge.Ps1FromB == 1);
-            return Kill(live, destFpr, ps0: true, ps1: true);
+            var additions = LaneDemand.Empty;
+            if (Demanded(after, destFpr, lane: 0) && call.Arguments.Count > 0)
+                additions = RootLanes(additions, call.Arguments[0], ps0: merge.Ps0FromA == 0, ps1: merge.Ps0FromA == 1);
+            if (Demanded(after, destFpr, lane: 1) && call.Arguments.Count > 1)
+                additions = RootLanes(additions, call.Arguments[1], ps0: merge.Ps1FromB == 0, ps1: merge.Ps1FromB == 1);
+            return Kill(after, destFpr, ps0: true, ps1: true).Union(additions);
         }
         if (target.Equals("PPC_PsFromScalar", StringComparison.OrdinalIgnoreCase))
         {
             // PPC_PsFromScalarInline: both dest lanes = source ps0.
-            var live = after;
-            if ((Demanded(live, destFpr, lane: 0) || Demanded(live, destFpr, lane: 1)) &&
+            var additions = LaneDemand.Empty;
+            if ((Demanded(after, destFpr, lane: 0) || Demanded(after, destFpr, lane: 1)) &&
                 call.Arguments.Count > 0)
-                live = RootLanes(live, call.Arguments[0], ps0: true, ps1: false);
-            return Kill(live, destFpr, ps0: true, ps1: true);
+                additions = RootLanes(additions, call.Arguments[0], ps0: true, ps1: false);
+            return Kill(after, destFpr, ps0: true, ps1: true).Union(additions);
         }
         if (target.Equals("PPC_PsToScalar", StringComparison.OrdinalIgnoreCase) ||
             ScalarSingleHelpers.Contains(target) ||
@@ -418,11 +421,11 @@ public static class GuestStateLaneLivenessAnalyzer
             // code (ppc_isa_float.h), exactly like the double-precision
             // helpers, so both packed lanes of every argument feed both
             // result lanes.
-            var live = after;
-            if (Demanded(live, destFpr, lane: 0) || Demanded(live, destFpr, lane: 1))
+            var additions = LaneDemand.Empty;
+            if (Demanded(after, destFpr, lane: 0) || Demanded(after, destFpr, lane: 1))
                 foreach (var argument in call.Arguments)
-                    live = RootLanes(live, argument, ps0: true, ps1: true);
-            return Kill(live, destFpr, ps0: true, ps1: true);
+                    additions = RootLanes(additions, argument, ps0: true, ps1: true);
+            return Kill(after, destFpr, ps0: true, ps1: true).Union(additions);
         }
 
         // DEFAULT (the soundness anchor): an unmodelled FPR-writing helper
