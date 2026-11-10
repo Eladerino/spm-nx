@@ -639,6 +639,7 @@ public sealed partial class CxxLinearCodeGenerator
                 exactContract = exactContract with
                 {
                     GprPossibleWriteMask = exactContract.GprPossibleWriteMask & plannedContract.GprPossibleWriteMask,
+                    FprReadBeforeWriteMask = exactContract.FprReadBeforeWriteMask & plannedContract.FprReadBeforeWriteMask,
                     FprPossibleWriteMask = exactContract.FprPossibleWriteMask & plannedContract.FprPossibleWriteMask,
                     CrPossibleWriteMask = (byte)(exactContract.CrPossibleWriteMask & plannedContract.CrPossibleWriteMask),
                     MayWriteXer = exactContract.MayWriteXer && plannedContract.MayWriteXer,

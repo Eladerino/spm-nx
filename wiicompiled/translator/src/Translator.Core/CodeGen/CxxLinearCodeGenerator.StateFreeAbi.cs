@@ -58,6 +58,17 @@ public sealed partial class CxxLinearCodeGenerator
         public static readonly Regex PsqKnownInline = new(
             @"(PPC_Psq(?:L|St)Known(?:Resolved|Stack)?Inline<[^>]+>)\(ctx,\s*", Options);
 
+        // Gqr forms: the CpuContext overloads do not read the context. In
+        // ppc_isa_quantized.h they only null-check it and forward to the
+        // ctx-free overloads (load: ctx form at line 910 forwards to the
+        // form at line 881; store: line 1224 forwards to line 1196; see
+        // "The context is not read" at lines 906-908). Dropping the ctx
+        // argument is therefore the complete rewrite: the hoisted
+        // mkw_gqr<I> argument stays as-is, and the line defining it is
+        // rewritten to native_gqr<I> by the per-register replacements.
+        public static readonly Regex PsqGqrInline = new(
+            @"(PPC_Psq(?:L|St)GqrInline<[^>]+>)\(ctx,\s*", Options);
+
         public static readonly Regex BareReturn = new(@"\breturn\s*;", Options);
 
         public static readonly Regex AggregateReturn = new(@"\breturn\s*\{", Options);
@@ -734,6 +745,7 @@ public sealed partial class CxxLinearCodeGenerator
         body = StateFreePatterns.PsqStResolvedInline.Replace(body,
             static match => $"PPC_PsqStResolvedStateInline<{match.Groups["w"].Value}u, {match.Groups["i"].Value}u>(native_gqr{match.Groups["i"].Value}, ");
         body = StateFreePatterns.PsqKnownInline.Replace(body, "$1(nullptr, ");
+        body = StateFreePatterns.PsqGqrInline.Replace(body, "$1(");
 
         // The process-wide A/B gate belongs only at CpuContext-to-explicit-state
         // entry boundaries. Once execution is inside a context-free region its
