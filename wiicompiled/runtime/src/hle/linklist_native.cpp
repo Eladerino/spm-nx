@@ -30,7 +30,8 @@
 //    Then, iff the incoming flag in gpr[4] is signed-greater than 0, it
 //    frees this through guest operator delete (func_801A61FC). gpr[3]
 //    holds this on every exit path, and gpr[4] is 0 on the non-delete
-//    path. The generated prologue/epilogue stack-frame writes and lr
+//    path (null this leaves gpr[4] untouched, as generated). The
+//    generated prologue/epilogue stack-frame writes and lr
 //    juggling are not reproduced: that scratch is dead by the ABI.
 // The four deleting dtors of static LinkListImpl objects have no ctor
 // copy and run only at exit; they are deliberately not covered here.
