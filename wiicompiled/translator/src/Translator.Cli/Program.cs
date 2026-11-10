@@ -1001,6 +1001,27 @@ int RunTranslateRecursive(string[] argsTail)
                 BitOperations.PopCount((uint)contract.GqrPossibleWriteMask) +
                 BitOperations.PopCount((uint)contract.HidPossibleWriteMask);
 
+            // Lane-granular FPR input narrowing, memoized per address: the
+            // planned contract is re-evaluated during admission, seeding and
+            // refinement, and the lane fixpoint must not run per call. An FPR
+            // read-before-write bit survives only when the lane analysis
+            // demands either entry lane of that register given the demanded
+            // outputs (GuestStateLaneLivenessAnalyzer); the field is only
+            // ever narrowed, never widened beyond the public contract.
+            var plannedFprReadBeforeWrite = new Dictionary<uint, uint>();
+            uint LaneNarrowedFprReadBeforeWrite(uint address)
+            {
+                if (plannedFprReadBeforeWrite.TryGetValue(address, out var cached))
+                    return cached;
+                var contract = guestAbiContracts[address];
+                var demanded = demandedStateFreeOutputs.GetValueOrDefault(address);
+                var narrowed = contract.FprReadBeforeWriteMask &
+                    GuestStateLaneLivenessAnalyzer.RequiredFprInputs(
+                        canonicalGuestFunctions[address], guestAbiContracts, demanded.Fpr);
+                plannedFprReadBeforeWrite[address] = narrowed;
+                return narrowed;
+            }
+
             GuestAbiContract PlannedStateFreeContract(uint address)
             {
                 var publicContract = guestAbiContracts[address];
@@ -1014,6 +1035,7 @@ int RunTranslateRecursive(string[] argsTail)
                     GprReadBeforeWriteMask = GuestStateLivenessAnalyzer.RequiredStateFreeGprInputs(
                         publicContract, demandedOutputs.Gpr),
                     GprPossibleWriteMask = demandedGprOutputs,
+                    FprReadBeforeWriteMask = LaneNarrowedFprReadBeforeWrite(address),
                     FprPossibleWriteMask = publicContract.FprPossibleWriteMask & demandedOutputs.Fpr,
                     CrPossibleWriteMask = (byte)(publicContract.CrPossibleWriteMask & demandedOutputs.Cr),
                     MayWriteXer = publicContract.MayWriteXer && demandedOutputs.Xer,
@@ -1023,6 +1045,26 @@ int RunTranslateRecursive(string[] argsTail)
                     GqrPossibleWriteMask = (byte)(publicContract.GqrPossibleWriteMask & demandedOutputs.Gqr),
                     HidPossibleWriteMask = (byte)(publicContract.HidPossibleWriteMask & demandedOutputs.Hid)
                 };
+            }
+
+            // Census instrumentation for the lane-narrowing stream: with
+            // MKW_PLANNED_CONTRACT_DUMP set, record every directly called
+            // function's planned contract so corpus runs can be diffed
+            // exactly instead of inferred from emitted markers.
+            if (Environment.GetEnvironmentVariable("MKW_PLANNED_CONTRACT_DUMP") is { Length: > 0 } plannedDumpPath)
+            {
+                var dumpLines = emissionAddresses
+                    .Where(directlyCalledGuestFunctions.Contains)
+                    .Select(address =>
+                    {
+                        var planned = PlannedStateFreeContract(address);
+                        var demanded = demandedStateFreeOutputs.GetValueOrDefault(address);
+                        return $"0x{address:X8} public_fpr_rbw=0x{guestAbiContracts[address].FprReadBeforeWriteMask:X8} " +
+                               $"demanded_fpr=0x{demanded.Fpr:X8} planned_fpr_rbw=0x{planned.FprReadBeforeWriteMask:X8} " +
+                               $"planned_fpr_pw=0x{planned.FprPossibleWriteMask:X8} planned_gpr_rbw=0x{planned.GprReadBeforeWriteMask:X8} " +
+                               $"inputs={StateFreeInputValueCount(planned)} outputs={StateFreeOutputValueCount(planned)}";
+                    });
+                System.IO.File.WriteAllLines(plannedDumpPath, dumpLines);
             }
 
             // Admit closed direct-call components as a unit. A region is
@@ -1166,7 +1208,8 @@ int RunTranslateRecursive(string[] argsTail)
                 {
                     GprReadBeforeWriteMask = emitted.GprInputMask,
                     GprPossibleWriteMask = emitted.Contract.GprPossibleWriteMask & plannedContract.GprPossibleWriteMask,
-                    FprReadBeforeWriteMask = emitted.Contract.FprReadBeforeWriteMask,
+                    FprReadBeforeWriteMask = emitted.Contract.FprReadBeforeWriteMask &
+                        plannedContract.FprReadBeforeWriteMask,
                     FprPossibleWriteMask = emitted.Contract.FprPossibleWriteMask & plannedContract.FprPossibleWriteMask,
                     CrReadBeforeWriteMask = emitted.Contract.CrReadBeforeWriteMask,
                     GqrReadBeforeWriteMask = emitted.Contract.GqrReadBeforeWriteMask,
@@ -1270,10 +1313,16 @@ int RunTranslateRecursive(string[] argsTail)
                     var entryLive = GuestStateLivenessAnalyzer.Analyze(
                         targetFunction, stateFreeLivenessContracts, output).BlockLiveIn[targetFunction.EntryLabel];
                     var publicContract = guestAbiContracts[target];
+                    // Lane-narrow the variant's entry FPR demand the same way
+                    // as the union contract: a register kept live only in a
+                    // lane that this output group never demands (and no store
+                    // or call in the body roots) is not a variant input.
+                    var laneEntryFpr = GuestStateLaneLivenessAnalyzer.RequiredFprInputs(
+                        targetFunction, stateFreeLivenessContracts, output.Fpr);
                     var specializedContract = publicContract with
                     {
                         GprReadBeforeWriteMask = entryLive.Gpr,
-                        FprReadBeforeWriteMask = entryLive.Fpr,
+                        FprReadBeforeWriteMask = entryLive.Fpr & laneEntryFpr,
                         CrReadBeforeWriteMask = entryLive.Cr,
                         ReadsXerBeforeWrite = entryLive.Xer,
                         ReadsCtrBeforeWrite = entryLive.Ctr,
