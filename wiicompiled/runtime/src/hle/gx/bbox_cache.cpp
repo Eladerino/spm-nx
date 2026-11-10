@@ -31,6 +31,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <mutex>
 #include <thread>
 
 namespace BBoxCache {
@@ -72,7 +73,9 @@ Record g_records[kMaxSlots][kMaxGroups];
 
 // The single global generation. Every writer hook bumps it; a record is
 // servable only while its stamped generation equals it. Never reset.
-uint64_t g_generation = 0;
+// Atomic (relaxed) so a bump from any thread is a defined operation even
+// outside the s1.6 game-thread invariant (code review F2).
+std::atomic<uint64_t> g_generation{0};
 
 // ---- counters (design s3; windowed like DlProbe's, reset at each print) -------
 struct Counters {
@@ -97,17 +100,22 @@ Counters g_win;
 uint64_t g_mismatchTotal = 0; // cumulative: the first-16 detail lines gate on this
 
 // ---- thread guard (design s1.6) ------------------------------------------------
-bool g_ownerSet = false;
+// The owner is recorded through std::call_once (code review F2): two racing
+// first calls cannot both observe "no owner yet" and install the wrong one.
+std::once_flag g_ownerOnce;
 std::thread::id g_owner{};
+std::atomic<bool> g_ownerSet{false};
 
 bool OnOwnerThread(bool record) {
     const std::thread::id id = std::this_thread::get_id();
-    if (!g_ownerSet) {
-        if (!record) return false;
-        g_owner = id;
-        g_ownerSet = true;
-        return true;
+    if (record) {
+        std::call_once(g_ownerOnce, [&] {
+            g_owner = id;
+            g_ownerSet.store(true, std::memory_order_release);
+        });
+        return id == g_owner;
     }
+    if (!g_ownerSet.load(std::memory_order_acquire)) return false;
     return id == g_owner;
 }
 
@@ -134,23 +142,26 @@ Verdict Classify(CpuContext* ctx, uint32_t groupIdx, uint32_t outMin, uint32_t o
     scope.entriesBase = MemoryInline::FlatRead32(group + kGroupBaseOffset);
     scope.entryCount = static_cast<int32_t>(MemoryInline::FlatRead32(group + kGroupCountOffset));
     scope.groupIdx = groupIdx;
-    scope.generation = g_generation;
-    // Bounds/sanity BEFORE any records[] or record-state access (R1-F4).
+    // Bounds/sanity BEFORE any records[] or generation/record-state access
+    // (R1-F4 pinned order: scope -> bounds/sanity -> records[]/generation).
     if (scope.slotIdx >= kMaxSlots || groupIdx >= kMaxGroups) return Verdict::Unrepresentable;
     if (scope.workBase == 0 || scope.entryCount < 0 ||
         (scope.entriesBase == 0 && scope.entryCount > 0)) {
         return Verdict::Insane;
     }
+    scope.generation = g_generation.load(std::memory_order_relaxed);
     const Record& rec = g_records[scope.slotIdx][groupIdx];
     if (rec.valid && rec.workBase == scope.workBase && rec.slotIdx == scope.slotIdx &&
         rec.groupIdx == groupIdx && rec.entriesBase == scope.entriesBase &&
         rec.entryCount == scope.entryCount && rec.generation == scope.generation) {
-        // The served copy-out writes min then max as six sequential words;
-        // the original interleaves its writes, so overlapping out ranges
-        // decline even on an otherwise servable record (R1-F6). Two
-        // compares, still O(1). The walk then runs, but its result is an
-        // aliasing artefact of that call, so the entry path leaves the
-        // scope unkeyed and the capture stores nothing for it.
+        // The served copy-out interleaves min[i]/max[i] per index, like
+        // the original's alternating folds; overlapping out ranges still
+        // decline even on an otherwise servable record (R1-F6), because
+        // the original's result there is a specific interleaving artefact
+        // of its fold order, not of the copy-out's. Two compares, still
+        // O(1). The walk then runs, but its result is an aliasing artefact
+        // of that call, so the entry path leaves the scope unkeyed and
+        // the capture stores nothing for it.
         if (outMin < outMax + 12 && outMax < outMin + 12) return Verdict::Overlap;
         return Verdict::Servable;
     }
@@ -175,6 +186,17 @@ Scope g_callScope;
 bool g_callScopeOk = false;   // the entry hook classified a keyable scope
 bool g_callServed = false;    // the entry hook served this call (capture skips it)
 
+// ---- the per-call mode latch (code review F1) ----------------------------------
+// BBoxCacheCallBegin latches, at entry, that it ran for this call and which
+// mode was on. The return block consults ONLY this latch (through
+// BBoxCacheCallBegun / BBoxCacheCallShadow, closed by BBoxCacheCallEnd) and
+// never re-reads the diag flags, so a live flag flip landing mid-walk takes
+// effect from the next call's entry and can neither make the return block
+// act on stale per-call state from a previous call nor strand a shadow
+// stash into a later call's compare.
+bool g_callBegun = false;  // CallBegin ran for the call currently inside the body
+bool g_callShadow = false; // the latched mode of that call was shadow
+
 // ---- the shadow stash (design s3) ----------------------------------------------
 uint64_t g_callSeq = 0; // bumped by BBoxCacheCallBegin on every call while a mode is on
 uint64_t g_curSeq = 0;  // the sequence value of the call currently inside the body
@@ -196,17 +218,21 @@ bool Enabled() noexcept { return g_bboxCacheOn.load(std::memory_order_relaxed); 
 bool ShadowEnabled() noexcept { return g_bboxShadowOn.load(std::memory_order_relaxed); }
 
 void PrintWindow(uint64_t firstFrame, uint64_t lastFrame) {
-    const Counters win = g_win;
-    g_win = Counters{};
     // Bumps alone do not open a window line: the writer hooks fire in both
     // A/B arms (and with both keys off), and the key-off control must stay
     // quiet (design s3: nothing prints in windows where both keys were off
-    // throughout and nothing was counted by an active mode).
-    const bool anyActivity = win.calls != 0 || win.hits != 0 || win.recomputes != 0 ||
-                             win.declineOffthread != 0 || win.declineInsane != 0 ||
-                             win.declineUnrepresentable != 0 || win.declineOverlap != 0 ||
-                             win.shadowComparisons != 0 || win.shadowMismatches != 0;
+    // throughout and nothing was counted by an active mode). A suppressed
+    // window's counters are NOT reset (code review F5): in a suppressed
+    // window the only nonzero counters can be the bump counts, and those
+    // carry into the next printed window so the dirty-event census does
+    // not silently lose bump-only windows (e.g. a load/warp window).
+    const bool anyActivity = g_win.calls != 0 || g_win.hits != 0 || g_win.recomputes != 0 ||
+                             g_win.declineOffthread != 0 || g_win.declineInsane != 0 ||
+                             g_win.declineUnrepresentable != 0 || g_win.declineOverlap != 0 ||
+                             g_win.shadowComparisons != 0 || g_win.shadowMismatches != 0;
     if (!Enabled() && !ShadowEnabled() && !anyActivity) return;
+    const Counters win = g_win;
+    g_win = Counters{};
     const uint64_t serveAvgNs = win.hits != 0 ? win.serveNs / win.hits : 0;
     std::fprintf(stderr,
                  "[bboxcache] frames %llu-%llu: %llu calls, %llu hits, %llu recomputes, "
@@ -247,7 +273,26 @@ extern "C" uint64_t BBoxCacheCallBegin() {
     ++BBoxCache::g_win.calls;
     BBoxCache::g_callScopeOk = false;
     BBoxCache::g_callServed = false;
+    // Latch this call's mode at entry (code review F1). Any earlier stash
+    // was consumed (or discarded as stamp-foreign) by its own call's
+    // return block; clear the slot so none can outlive its call.
+    BBoxCache::g_callBegun = true;
+    BBoxCache::g_callShadow = BBoxCache::ShadowEnabled();
+    BBoxCache::g_stash.valid = false;
     return BBoxCache::g_curSeq;
+}
+
+extern "C" bool BBoxCacheCallBegun() { return BBoxCache::g_callBegun; }
+
+extern "C" bool BBoxCacheCallShadow() {
+    return BBoxCache::g_callBegun && BBoxCache::g_callShadow;
+}
+
+extern "C" void BBoxCacheCallEnd() {
+    BBoxCache::g_callBegun = false;
+    BBoxCache::g_callShadow = false;
+    BBoxCache::g_callScopeOk = false;
+    BBoxCache::g_callServed = false;
 }
 
 extern "C" bool BBoxCacheEnabled() { return BBoxCache::Enabled(); }
@@ -316,6 +361,7 @@ extern "C" void BBoxCacheShadowNote(CpuContext* ctx, uint32_t groupIdx, uint32_t
 
 extern "C" void BBoxCacheCapture(uint32_t outMin, uint32_t outMax) {
     using namespace BBoxCache;
+    if (!g_callBegun) return;      // no CallBegin for this call: no-op (F1 latch)
     if (g_callServed) return;      // served calls never ran the walk
     if (!g_callScopeOk) return;    // a decline keyed no scope; nothing to store
     if (!OnOwnerThread(false)) return;
@@ -335,13 +381,14 @@ extern "C" void BBoxCacheCapture(uint32_t outMin, uint32_t outMax) {
 
 extern "C" void BBoxCacheShadowCompare() {
     using namespace BBoxCache;
+    if (!g_callBegun || !g_callShadow) return; // latched-mode gate (F1)
     if (!OnOwnerThread(false)) return;
     Stash& stash = g_stash;
     if (!stash.valid) return;
     if (stash.stamp != g_curSeq) {
-        // Stale or foreign (a diag toggle mid-flight stranded it): discard
-        // it and count nothing. A stash is only ever compared by the call
-        // whose entry block produced it.
+        // Stale or foreign: discard it and count nothing. A stash is only
+        // ever compared by the call whose entry block produced it (with
+        // the F1 latch the return block runs for exactly that call).
         stash.valid = false;
         return;
     }
@@ -374,21 +421,21 @@ extern "C" void BBoxCacheShadowCompare() {
 }
 
 extern "C" void BBoxCacheBumpStructure() {
-    ++BBoxCache::g_generation;
+    BBoxCache::g_generation.fetch_add(1, std::memory_order_relaxed);
     ++BBoxCache::g_win.bumpsStructure;
 }
 
 extern "C" void BBoxCacheBumpMobj() {
-    ++BBoxCache::g_generation;
+    BBoxCache::g_generation.fetch_add(1, std::memory_order_relaxed);
     ++BBoxCache::g_win.bumpsMobj;
 }
 
 extern "C" void BBoxCacheBumpDelete() {
-    ++BBoxCache::g_generation;
+    BBoxCache::g_generation.fetch_add(1, std::memory_order_relaxed);
     ++BBoxCache::g_win.bumpsDelete;
 }
 
 extern "C" void BBoxCacheBumpRecalc() {
-    ++BBoxCache::g_generation;
+    BBoxCache::g_generation.fetch_add(1, std::memory_order_relaxed);
     ++BBoxCache::g_win.bumpsRecalc;
 }

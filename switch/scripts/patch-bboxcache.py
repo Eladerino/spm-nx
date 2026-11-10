@@ -16,13 +16,17 @@ func_80070298 (hitGetMapEntryBbox), two anchors:
   off nothing else runs (design v2 s1.5 hard requirement, R2-F8): shadow
   on -> BBoxCacheShadowNote (stash the would-be served bits, never
   jump); else bboxcache on -> BBoxCacheTryServe, and on a serve it jumps
-  to the common return block. Both on: shadow wins.
+  to the common return block. Both on: shadow wins. BBoxCacheCallBegin
+  latches the mode it found at entry (code review F1).
   RETURN: the head of the common return block loc_8007045C, the body's
   only exit, immediately after its label line (the block that follows
   restores r27/r28 from the stack, so the out pointers are still live in
-  the locals there). The inserted block is gated on either flag: capture
-  the walked result into the record, then in shadow mode compare the
-  stash. With both keys off it does nothing at all.
+  the locals there). The inserted block consults ONLY the entry latch
+  (BBoxCacheCallBegun / BBoxCacheCallShadow, closed by BBoxCacheCallEnd)
+  and never re-reads the diag flags, so a live flag flip mid-walk takes
+  effect from the next call's entry: capture the walked result into the
+  record, then in latched shadow mode compare the stash. With both keys
+  off at entry the latch is unset and the block does nothing at all.
 
 Writer hooks, one anchored insert per site, each a bare call to a bump
 entry point with NO guest-state argument (design v2 s1.3: a bump is one
@@ -61,6 +65,9 @@ import sys
 
 DECLS_BBOX = [
     'extern "C" uint64_t BBoxCacheCallBegin();',
+    'extern "C" bool BBoxCacheCallBegun();',
+    'extern "C" bool BBoxCacheCallShadow();',
+    'extern "C" void BBoxCacheCallEnd();',
     'extern "C" bool BBoxCacheEnabled();',
     'extern "C" bool BBoxCacheShadowEnabled();',
     'extern "C" bool BBoxCacheTryServe(CpuContext* ctx, uint32_t groupIdx, uint32_t outMin, uint32_t outMax);',
@@ -78,13 +85,14 @@ BBOX_DEFN = 'extern "C" void func_80070298(CpuContext* MKW_RESTRICT ctx)'
 ENTRY_ANCHOR = "    r28 = r5;"
 ENTRY_BLOCK = (
     "    { if (BBoxCacheShadowEnabled() || BBoxCacheEnabled()) { (void)BBoxCacheCallBegin(); "
-    "if (BBoxCacheShadowEnabled()) { BBoxCacheShadowNote(ctx, r30, r27, r28); } "
+    "if (BBoxCacheCallShadow()) { BBoxCacheShadowNote(ctx, r30, r27, r28); } "
     "else if (BBoxCacheTryServe(ctx, r30, r27, r28)) { goto loc_8007045C; } } }"
 )
 RETURN_LABEL = "loc_8007045C:"
 RETURN_BLOCK = (
-    "    { if (BBoxCacheEnabled() || BBoxCacheShadowEnabled()) { "
-    "BBoxCacheCapture(r27, r28); if (BBoxCacheShadowEnabled()) { BBoxCacheShadowCompare(); } } }"
+    "    { if (BBoxCacheCallBegun()) { "
+    "BBoxCacheCapture(r27, r28); if (BBoxCacheCallShadow()) { BBoxCacheShadowCompare(); } "
+    "BBoxCacheCallEnd(); } }"
 )
 
 # Writer sites: (function, defn, kind, anchor, block, decl)

@@ -24,9 +24,14 @@ struct CpuContext;
 // bits when the record is servable, the walk always runs, and a compare at the
 // body's return block counts a comparison or a bit-exact mismatch. Both
 // switches on: shadow wins. Both off: the patched body runs exactly as
-// unpatched (design v2 s1.5 hard requirement) - the entry and return blocks
-// dispatch on the flags first, and BBoxCacheCallBegin / BBoxCacheCapture do
-// no work at all while both are off.
+// unpatched (design v2 s1.5 hard requirement) - no helper work beyond the
+// gating predicates is reachable: two flag-predicate calls at the entry
+// block (BBoxCacheShadowEnabled / BBoxCacheEnabled, each one relaxed
+// atomic load behind an extern "C" call) and one latch call at the return
+// block (BBoxCacheCallBegun). BBoxCacheCallBegin runs only when a mode is
+// on at entry, and it latches the mode for the call: the return block
+// consults only that latch, never the flags again, so a live flag flip
+// mid-walk takes effect from the next call's entry (code review F1).
 
 namespace BBoxCache {
 
@@ -57,8 +62,18 @@ extern "C" void spm_bboxshadow_set(bool enabled);
 // Bumps the per-call sequence counter and counts the call. The patched entry
 // block calls this ONLY when a mode is on (design v2 s1.5, R2-F8), so a
 // shadow stash can only ever be compared by the call that produced it and the
-// key-off body carries no stamp cost.
+// key-off body carries no stamp cost. It also latches the call's mode
+// (begun / shadow) for the return block (code review F1).
 extern "C" uint64_t BBoxCacheCallBegin();
+
+// The return block's latch accessors (code review F1): BBoxCacheCallBegun
+// reports whether BBoxCacheCallBegin ran for the call now reaching the
+// return block; BBoxCacheCallShadow reports the mode latched at its entry.
+// BBoxCacheCallEnd closes the latch at the end of the return block. None of
+// them reads the diag flags.
+extern "C" bool BBoxCacheCallBegun();
+extern "C" bool BBoxCacheCallShadow();
+extern "C" void BBoxCacheCallEnd();
 
 // The patched entry block's mode predicates.
 extern "C" bool BBoxCacheEnabled();
@@ -74,11 +89,15 @@ extern "C" bool BBoxCacheTryServe(CpuContext* ctx, uint32_t groupIdx, uint32_t o
 // current call's sequence value. A decline or a recompute stashes nothing.
 extern "C" void BBoxCacheShadowNote(CpuContext* ctx, uint32_t groupIdx, uint32_t outMin, uint32_t outMax);
 
-// Recompute capture, at the head of the return block: runs on every call
-// that executed the original walk while a mode is on (a served call skips
-// it). Reads the six floats the walk just wrote through the out pointers and
+// Recompute capture, at the head of the return block: invoked on every call
+// that reached the return block with the entry latch set. A served call is
+// invoked too (it jumps to the same return label) and returns immediately
+// on the served latch, before any guest read - that extra call sits
+// outside BBoxCacheTryServe's serve-time accounting. On a walked call it
+// reads the six floats the walk just wrote through the out pointers and
 // stores them as the record for this call's entry-time scope, stamped with
-// the entry-time generation.
+// the entry-time generation. With no latch set (CallBegin never ran for
+// this call) it is a no-op.
 extern "C" void BBoxCacheCapture(uint32_t outMin, uint32_t outMax);
 
 // Shadow compare, after the capture in the return block: consumes a stash
