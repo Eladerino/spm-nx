@@ -49,6 +49,10 @@ extern "C" void spm_dlprobe_set(bool enabled);
 // way: diag_init and diag_set forward the "bboxcache" and "bboxshadow" switches to it.
 extern "C" void spm_bboxcache_set(bool enabled);
 extern "C" void spm_bboxshadow_set(bool enabled);
+// The runtime's hitNameToPtr persistent index (hit_index.cpp), declared here the same
+// way: diag_init and diag_set forward the "hitindex" and "hitindexshadow" switches to it.
+extern "C" void spm_hitindex_set(bool enabled);
+extern "C" void spm_hitindexshadow_set(bool enabled);
 // The runtime's AXFX Hi reverb native experiment (ax_effects.cpp), declared here the same
 // way: diag_init and diag_set forward the "axfxnative" switch to it.
 extern "C" void spm_reverboff_set(bool enabled);  // ax_effects.cpp, the same pattern
@@ -146,6 +150,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
     {"hashcheck", &Diag::hashCheck},
     {"bboxcache", &Diag::bboxCache},   {"bboxshadow", &Diag::bboxShadow},
+    {"hitindex", &Diag::hitIndex},   {"hitindexshadow", &Diag::hitIndexShadow},
 };
 
 const DiagKey* find_diag_key(const char* name) {
@@ -402,6 +407,8 @@ void diag_init() {
     // on every call, so this only sets the initial state.
     if (g_diag.bboxCache) spm_bboxcache_set(true);
     if (g_diag.bboxShadow) spm_bboxshadow_set(true);
+    if (g_diag.hitIndex) spm_hitindex_set(true);
+    if (g_diag.hitIndexShadow) spm_hitindexshadow_set(true);
     // An axfxnative=1 in dk_diag.txt arms the runtime's AXFX Hi reverb native wrapper from
     // the start. The wrapper reads the switch on every callback, so this only sets the
     // initial state; the menu and the command channel flip it live.
@@ -481,6 +488,8 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "dlprobe")) spm_dlprobe_set(on);
     else if (!std::strcmp(key, "bboxcache")) spm_bboxcache_set(on);
     else if (!std::strcmp(key, "bboxshadow")) spm_bboxshadow_set(on);
+    else if (!std::strcmp(key, "hitindex")) spm_hitindex_set(on);
+    else if (!std::strcmp(key, "hitindexshadow")) spm_hitindexshadow_set(on);
     else if (!std::strcmp(key, "axfxnative")) spm_axfx_native_set(on);
     else if (!std::strcmp(key, "reverboff")) spm_reverboff_set(on);
     else if (!std::strcmp(key, "godmode")) spm_godmode_set(on);
