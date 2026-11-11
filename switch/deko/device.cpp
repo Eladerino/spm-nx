@@ -426,8 +426,8 @@ void diag_init() {
     // start. The check only recomputes and counts, so boot and the title are checked
     // the same as gameplay.
     if (g_diag.hashCheck) spm_hashcheck_set(true);
-    // An applymemo=1 in dk_diag.txt arms the runtime's display-list apply memo
-    // from the start. The memo is consulted per display-list call, so this
+    // The display-list apply memo is on unless dk_diag.txt says applymemo=0
+    // (the Diag default). The memo is consulted per display-list call, so this
     // only sets the initial state; the menu flips it live.
     if (g_diag.applyMemo) spm_applymemo_set(true);
     // A dstep=1 in dk_diag.txt arms the runtime's double-step mode from the start. The
