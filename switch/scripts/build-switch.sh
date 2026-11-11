@@ -99,8 +99,9 @@ if [[ $audit == 0 ]]; then
     # hit_index.cpp) plus the eleven writer-generation bumps in the
     # hit-family bodies: an entry block after the body's argument capture
     # and a compare block at the head of its common return block. Both diag
-    # switches default off, so an unflagged boot runs the bodies exactly as
-    # unpatched. See patch-hitindex.py for the anchors and the design.
+    # switches gate it: hitindex defaults on since v0.4.0, hitindexshadow off,
+    # so an unflagged boot serves from the index. See patch-hitindex.py for the
+    # anchors and the design.
     python3 "$root/switch/scripts/patch-hitindex.py" "$work/wiicompiled/generated"
 fi
 
