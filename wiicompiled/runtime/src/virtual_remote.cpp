@@ -808,6 +808,23 @@ void UpdatePointer(WiiRemoteInput::KpadSample& sample) {
                 const float viewW = std::min(pictureW, pictureH * (DisplaySettings::GameWidescreen() ? 16.0f / 9.0f : 4.0f / 3.0f));
                 pos[0] = (fingerX * static_cast<float>(surfaceW) - surfaceW * 0.5f) / (viewW * 0.5f);
                 pos[1] = (fingerY * static_cast<float>(surfaceH) - surfaceH * 0.5f) / (pictureH * 0.5f);
+                // Calibration (Brandon's hands-on, Nov 10): with the identity feed
+                // above, the pointer overshot the finger horizontally by a
+                // centre-referenced gain of about 4/3 - exact at centre, ~107 px
+                // off at the quarter points, pinned to the panel edge for edge
+                // touches - while vertically it tracked exactly. The feed itself
+                // is the mouse's own arithmetic and reduces to the identity map
+                // on this panel, so the gain sits in the game's own pointer
+                // conversion, whose one width duality in the whole stack is 4:3
+                // against 16:9 (the ratio viewW's cap above encodes). Pre-divide
+                // X by that ratio when the game booted widescreen, so the game's
+                // conversion lands the pointer on the finger; a 4:3 boot's
+                // mapping already agrees with its canvas and is left alone. Y
+                // needs no correction and is untouched.
+                if (DisplaySettings::GameWidescreen()) {
+                    constexpr float kTouchPointerXScale = 3.0f / 4.0f;
+                    pos[0] *= kTouchPointerXScale;
+                }
                 touchDown = true;
             }
         } else {
