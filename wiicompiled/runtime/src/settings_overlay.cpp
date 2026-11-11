@@ -5122,6 +5122,15 @@ std::vector<OptRow> OptionsRows(int tab) {
                 PADControlAllMotors(stopAll.data());
             }
         }, "Controller rumble."});
+#if defined(__SWITCH__)
+        // Handheld touchscreen aiming for Tippi's pointer (issue #13): a drag aims,
+        // letting go examines. Off by default; the row writes [input] touch_tippi,
+        // the same store the neighbouring input rows use.
+        const bool touchTippi = RuntimeConfigFile::TouchTippi(false);
+        rows.push_back({"Touch Tippi", OnOff(touchTippi), [touchTippi](int) {
+            RuntimeConfigFile::SetTouchTippi(!touchTippi);
+        }, "Handheld only. Drag on the touchscreen to aim Tippi's pointer; let go to examine what it points at. In the arcade games, letting go does not examine."});
+#endif
 #if !defined(__SWITCH__)
         const int capturing = Keybinds::Capturing();
         for (int action = 0; action < Keybinds::kActionCount; ++action) {

@@ -55,6 +55,7 @@ struct RuntimeUserConfig {
     std::optional<bool> textureDumps;
     std::optional<bool> showFps;
     std::optional<bool> mousePointer;   // [input] mouse_pointer: the mouse aims the Wii pointer (default on)
+    std::optional<bool> touchTippi;     // [input] touch_tippi: a touchscreen drag aims the Wii pointer (default off)
     std::optional<bool> spinningCoins;  // NSMBW: [video] spinning_coins, animated tiles
     std::optional<bool> frameGraph;     // NSMBW: [video] frame_graph, frame times under the FPS counter
     std::optional<bool> showDeveloperOptions;  // [dev] show_developer_options: the Switch menu's Developer section gate
@@ -625,6 +626,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
     config.showDeveloperOptions = FindConfigValue<bool>(document, "dev", "show_developer_options");
     config.mousePointer = FindConfigValue<bool>(document, "input", "mouse_pointer");
+    config.touchTippi = FindConfigValue<bool>(document, "input", "touch_tippi");
     config.spinningCoins = FindConfigValue<bool>(document, "video", "spinning_coins");
     config.frameGraph = FindConfigValue<bool>(document, "video", "frame_graph");
     config.vsync = FindConfigValue<bool>(document, "video", "vsync");
@@ -924,6 +926,15 @@ inline bool MousePointer(bool fallback = true) {
 inline bool SetMousePointer(bool value) {
     Mutable().mousePointer = value;
     return WriteSetting("input", "mouse_pointer", value ? "true" : "false");
+}
+
+inline bool TouchTippi(bool fallback = false) {
+    return Get().touchTippi.value_or(fallback);
+}
+
+inline bool SetTouchTippi(bool value) {
+    Mutable().touchTippi = value;
+    return WriteSetting("input", "touch_tippi", value ? "true" : "false");
 }
 
 inline bool SpinningCoins(bool fallback = true) {
