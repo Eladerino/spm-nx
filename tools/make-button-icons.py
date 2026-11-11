@@ -185,6 +185,16 @@ def solid(color, mask):
 # face is 83% of the diameter, so the letter takes about 57% of it).
 LETTER_FRACTION = 0.47
 
+# A drawn disc sits this share of its radius below its TEXTURES spot. The spots centre a disc
+# on the baked button, and the button rides high in its artwork (the falling prompt's button
+# sits in the top half of a tall bubble), so a centred disc reads as perched at the top of the
+# picture; the drop settles it into the art. The share is small enough that every baked letter
+# in the table stays covered (the letters sit well inside their discs), and the letter is
+# printed at the dropped centre, so disc and letter move together. texture_replacement.cpp
+# mirrors this as kCompositeDiscDrop, so the runtime's binding-true discs sit exactly where
+# the shipped ones do.
+DISC_DROP = 0.185
+
 
 def letter_image(style, name, height):
     """A button's letter as a mask, fitted to `height` px tall with its natural
@@ -356,19 +366,32 @@ def render_overlay(kind, buttons, style, w, h):
             continue
         if kind == "disc":
             r = fr * max(w, h)
+            cx, cy = fx * w, fy * h + DISC_DROP * r
             # Drawn the plaindisc way (one ink ring, white face, the letter in ink) rather
             # than disc(): Kenney's button brings a thick border of its own, which stacked
             # with disc()'s ring to about 17-20% of the diameter against the plaindiscs'
             # roughly 10, and the two kinds sit side by side in the game's menus.
-            box = (fx * w - r, fy * h - r, fx * w + r, fy * h + r)
-            d = ImageDraw.Draw(img)
-            bw = box[2] - box[0]
-            band = bw * 0.085
-            d.ellipse(box, fill="#141414")
-            d.ellipse([box[0] + band, box[1] + band, box[2] - band, box[3] - band], fill="#FFFFFF")
-            letter = letter_image(style, name, bw * LETTER_FRACTION)
+            # The ellipses are drawn on a 4x layer and scaled down, which feathers the rim
+            # the way the runtime's feathered fill does (texture_replacement.cpp): a hard
+            # 1x ellipse stair-steps against the artwork under it at display size. The
+            # layer's clear pixels carry the ink colour so the scale-down cannot pull
+            # black into the feather. The outer ellipse is drawn half a pixel large: an
+            # area-true scale-down reaches full coverage half a pixel inside the edge it
+            # draws, so the half pixel puts the shipped disc's full coverage where the
+            # runtime's feather puts its own, and the edge's half-coverage contour stays
+            # on the true circle either way.
+            ss = 4
+            layer = Image.new("RGBA", (w * ss, h * ss), (20, 20, 20, 0))
+            d = ImageDraw.Draw(layer)
+            band = 2 * r * 0.085
+            d.ellipse([ss * (cx - r - 0.5), ss * (cy - r - 0.5), ss * (cx + r + 0.5), ss * (cy + r + 0.5)],
+                      fill="#141414")
+            d.ellipse([ss * (cx - r + band), ss * (cy - r + band), ss * (cx + r - band), ss * (cy + r - band)],
+                      fill="#FFFFFF")
+            img.alpha_composite(layer.resize((w, h), Image.BILINEAR))
+            letter = letter_image(style, name, 2 * r * LETTER_FRACTION)
             img.alpha_composite(solid((20, 20, 20, 255), letter),
-                                (int(fx * w - letter.width / 2), int(fy * h - letter.height / 2)))
+                                (int(cx - letter.width / 2), int(cy - letter.height / 2)))
         elif kind == "face":
             size = int(3 * fr * max(w, h))
             sym = holes(render_svg(style, name, size))
