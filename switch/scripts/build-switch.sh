@@ -94,6 +94,14 @@ if [[ $audit == 0 ]]; then
     # patch-sqrt.py for the anchors; it hard-fails unless each anchor
     # matches exactly once.
     python3 "$root/switch/scripts/patch-sqrt.py" "$work/wiicompiled/generated"
+    # Give the copied hitNameToPtr its persistent-index hooks (HitIndexTry /
+    # HitIndexShadowNote / HitIndexShadowCompare in the runtime's
+    # hit_index.cpp) plus the eleven writer-generation bumps in the
+    # hit-family bodies: an entry block after the body's argument capture
+    # and a compare block at the head of its common return block. Both diag
+    # switches default off, so an unflagged boot runs the bodies exactly as
+    # unpatched. See patch-hitindex.py for the anchors and the design.
+    python3 "$root/switch/scripts/patch-hitindex.py" "$work/wiicompiled/generated"
 fi
 
 # Separate build folders: CMake caches SPM_SWITCH_AUDIT, so a full build in the audit's folder would

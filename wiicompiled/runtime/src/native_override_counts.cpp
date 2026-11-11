@@ -8,6 +8,7 @@
 #include "hle_stubs.h"
 #include "dl_probe.h"
 #include "bbox_cache.h"
+#include "hit_index.h"
 
 #include <dolphin/gx/GXAurora.h>
 
@@ -58,6 +59,9 @@ void PrintNativeOverrideCounts(uint64_t firstFrame, uint64_t lastFrame) {
     // The bboxcache experiment's line (bbox_cache.h) shares it too; it prints nothing
     // while both of its switches were off for the whole window.
     BBoxCache::PrintWindow(firstFrame, lastFrame);
+    // The hitindex experiment's line (hit_index.h) shares it too; it prints nothing
+    // while both of its switches were off for the whole window.
+    HitIndex::PrintWindow(firstFrame, lastFrame);
     // The vcache experiment's line (Aurora's command_processor.cpp) shares it too; it prints
     // nothing while the cache was off and idle for the whole window.
     AuroraVCachePrintWindow(firstFrame, lastFrame);
