@@ -376,7 +376,12 @@ extern "C" void GX__SetArray_8016e32c(uint32_t a, uint32_t ba, uint32_t str) {
                 return;
             }
         }
-        g_hleGxState.vtxArray[attr].base=ba; g_hleGxState.vtxArray[attr].stride=str;
+        auto& array = g_hleGxState.vtxArray[attr];
+        if (array.base != ba || array.stride != str) {
+            array.base = ba;
+            array.stride = str;
+            ++g_hleGxState.vtxArrayGeneration;
+        }
     }
 }
 PPC_NATIVE_OVERRIDE_VOID(8028c5c0, GX__SetArray_8016e32c, (uint32_t a, uint32_t ba, uint32_t str), (a, ba, str));

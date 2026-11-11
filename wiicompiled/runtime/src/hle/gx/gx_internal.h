@@ -339,6 +339,17 @@ struct HleGxState {
         uint32_t stride = 0;
     };
     VtxArray vtxArray[26]{};
+    // Bumped on every real vtxArray base/stride change. The only field-wise
+    // writers of those entries are the CP array-register decoder
+    // (gx_cp_decode.h, regs 0xA0-0xBF) and the guest GXSetArray setter
+    // (gx_vertex.cpp), and both compare before they bump; the one wholesale
+    // writer (gx_dl.cpp's RestoreGxVertexState) bumps vtxStateGeneration
+    // instead, which consumers key on alongside this counter.
+    // vtxStateGeneration does not cover the arrays (they are not part of the
+    // vertex layout), so the display-list apply memo in gx_dl.cpp keys its
+    // arrays half on this counter to notice when a list's arrays must be
+    // re-applied.
+    uint32_t vtxArrayGeneration = 0;
 
     GXVtxFmt currentVtxFmt = GX_VTXFMT0;
     GXPrimitive currentPrim = GX_TRIANGLES;

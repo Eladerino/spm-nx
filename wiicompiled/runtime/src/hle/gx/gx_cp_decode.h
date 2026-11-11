@@ -170,14 +170,23 @@ inline void ApplyCpRegWrite(uint8_t reg, uint32_t value) {
     if (reg >= 0xA0 && reg <= 0xAF) {
         const int attr = (reg - 0xA0) + GX_VA_POS;
         if (attr >= 0 && attr < 26) {
-            g_hleGxState.vtxArray[attr].base = DecodeCpArrayBaseGuestAddress(value);
+            auto& array = g_hleGxState.vtxArray[attr];
+            const uint32_t base = DecodeCpArrayBaseGuestAddress(value);
+            if (array.base != base) {
+                array.base = base;
+                ++g_hleGxState.vtxArrayGeneration;
+            }
         }
         return;
     }
     if (reg >= 0xB0 && reg <= 0xBF) {
         const int attr = (reg - 0xB0) + GX_VA_POS;
         if (attr >= 0 && attr < 26) {
-            g_hleGxState.vtxArray[attr].stride = value;
+            auto& array = g_hleGxState.vtxArray[attr];
+            if (array.stride != value) {
+                array.stride = value;
+                ++g_hleGxState.vtxArrayGeneration;
+            }
         }
         return;
     }
