@@ -3268,8 +3268,10 @@ void ReleaseControllers() noexcept {
 // in that window the remote's button faces sit uncovered (the model body
 // already renders as nothing). Holding the opaque card through a short fade
 // covers the window. The panel never blocks game input, so the hold costs
-// no input feel.
-constexpr int kControlsPanelCloseHoldMs = 250;
+// no input feel. 1250 ms, not the original 250: at 250 the game's own menu
+// remnants were still visible as the panel dropped (Brandon, Nov 10), so the
+// hold now lasts a second longer.
+constexpr int kControlsPanelCloseHoldMs = 1250;
 
 void DrawControlsPanel() {
     const int style = aurora_button_icon_style();

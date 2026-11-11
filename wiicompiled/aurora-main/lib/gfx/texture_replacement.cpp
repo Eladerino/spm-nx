@@ -93,6 +93,10 @@ std::array<absl::flat_hash_map<RuntimeTextureKey, ReplacementIndexEntry>, 4> s_b
 struct CompositeIndexEntry {
   std::filesystem::path path;
   std::string kind; // the generator's word for the prompt (disc, face, glyph, plaindisc); kept for log lines
+  // Hash of the manifest line and the shipped overlay's bytes, taken at index time. The
+  // composite disk cache keys on it, so a regenerated overlay (kind, specs or art) can
+  // never be served a composite built from an older generation of the same prompt.
+  std::string overlayTag;
   // The buttons the prompt holds, from the manifest's <button>:<cx>:<cy>:<radius> specs:
   // the gamepad action each Wii button routes to (Keybinds order, the runtime's table) and
   // where it sits, as fractions of the texture. With these the overlay's letters can be
@@ -698,6 +702,16 @@ void build_index() noexcept {
             .fr = std::strtof(std::string(parts[3]).c_str(), nullptr),
         });
       }
+      {
+        // The tag covers the whole manifest line (filename, kind, every button spec)
+        // plus the shipped overlay's bytes: either changing is a new generation.
+        std::string tagInput = line;
+        tagInput += '\n';
+        if (std::ifstream overlayFile(entry.path, std::ios::binary); overlayFile) {
+          tagInput.append(std::istreambuf_iterator<char>(overlayFile), std::istreambuf_iterator<char>());
+        }
+        entry.overlayTag = fmt::format("{:016x}", XXH64(tagInput.data(), tagInput.size(), 0));
+      }
       s_compositeIndex[style].try_emplace(*parsed, std::move(entry));
     }
     if (!s_compositeIndex[style].empty()) {
@@ -913,9 +927,12 @@ std::string composite_bindings_tag() noexcept {
   return fmt::format("{:016x}", XXH64(joined.data(), joined.size(), 0));
 }
 
-std::filesystem::path composite_cache_path(const RuntimeTextureKey& key, bool packBase) noexcept {
+std::filesystem::path composite_cache_path(const RuntimeTextureKey& key, bool packBase,
+                                           const std::string& overlayTag) noexcept {
   const char* styleName = s_appliedButtonIconStyle >= 0 ? kButtonIconStyles[s_appliedButtonIconStyle] : "common";
-  auto dir = s_compositeCacheRoot / (std::string(styleName) + "-" + composite_bindings_tag()) / (packBase ? "pack" : "guest");
+  auto dir = s_compositeCacheRoot /
+             (std::string(styleName) + "-" + composite_bindings_tag() + "-" + overlayTag) /
+             (packBase ? "pack" : "guest");
   return dir / format_replacement_filename(key);
 }
 
@@ -924,6 +941,18 @@ std::filesystem::path composite_cache_path(const RuntimeTextureKey& key, bool pa
 // The geometry constants mirror the generator's (LETTER_FRACTION and the per-kind recipes);
 // the shipped overlay stays the fallback for any button whose binding has no mask.
 constexpr float kCompositeLetterFraction = 0.47f; // LETTER_FRACTION in make-button-icons.py
+
+// A drawn disc sits this share of its radius below the manifest's spot (DISC_DROP in
+// make-button-icons.py). The spots centre a disc on the baked button, and the button rides
+// high in its artwork (the falling prompt's button is in the top half of a tall bubble), so a
+// centred disc reads as perched at the top of the picture; the drop settles it into the art.
+// The share is small enough that the baked letter stays covered on every disc texture (the
+// letters sit well inside their discs), and the letter is drawn at the dropped centre, so a
+// disc and its letter move together whatever button the action is bound to.
+constexpr float kCompositeDiscDrop = 0.185f; // DISC_DROP in make-button-icons.py
+// A drawn disc's edge feathers across this many pixels instead of stepping from full
+// coverage to none in one pixel, so the rim does not alias against the art under it.
+constexpr float kCompositeEdgeFeather = 1.25f;
 
 void overlay_fill_ellipse(ConvertedTexture& img, float cx, float cy, float rx, float ry,
                           uint8_t red, uint8_t green, uint8_t blue) noexcept {
@@ -949,6 +978,52 @@ void overlay_fill_ellipse(ConvertedTexture& img, float cx, float cy, float rx, f
       d[1] = green;
       d[2] = blue;
       d[3] = 255;
+    }
+  }
+}
+
+// overlay_fill_ellipse with a feathered edge: a pixel's coverage falls off across the
+// outermost kCompositeEdgeFeather pixels of the radius (measured along the ray from the
+// centre, exact for the circles the disc path draws), and partial coverage blends over
+// the canvas the way overlay_draw_mask blends. A pixel more than half the feather inside
+// the edge stays fully opaque; only the rim's own outermost band goes partial.
+void overlay_fill_ellipse_aa(ConvertedTexture& img, float cx, float cy, float rx, float ry,
+                             uint8_t red, uint8_t green, uint8_t blue) noexcept {
+  if (rx <= 0.0f || ry <= 0.0f) {
+    return;
+  }
+  const int bw = static_cast<int>(img.width);
+  const int bh = static_cast<int>(img.height);
+  const int x0 = std::max(0, static_cast<int>(std::floor(cx - rx - 1.0f)));
+  const int x1 = std::min(bw - 1, static_cast<int>(std::ceil(cx + rx + 1.0f)));
+  const int y0 = std::max(0, static_cast<int>(std::floor(cy - ry - 1.0f)));
+  const int y1 = std::min(bh - 1, static_cast<int>(std::ceil(cy + ry + 1.0f)));
+  uint8_t* const dst = img.data.data();
+  for (int y = y0; y <= y1; ++y) {
+    for (int x = x0; x <= x1; ++x) {
+      const float dx = static_cast<float>(x) + 0.5f - cx;
+      const float dy = static_cast<float>(y) + 0.5f - cy;
+      const float q = (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry);
+      const float radial = std::sqrt(dx * dx + dy * dy);
+      // Pixels from this pixel's centre to the edge, measured along the ray from the
+      // centre (exact for circles); at the centre itself the edge is a full radius away.
+      const float dist = q > 0.0f ? radial / std::sqrt(q) - radial : std::min(rx, ry);
+      const float oa = std::clamp(0.5f + dist / kCompositeEdgeFeather, 0.0f, 1.0f);
+      if (oa <= 0.0f) {
+        continue;
+      }
+      uint8_t* const d = dst + (y * bw + x) * 4;
+      const float da = static_cast<float>(d[3]) / 255.0f;
+      const float outA = oa + da * (1.0f - oa);
+      if (outA <= 0.0f) {
+        d[0] = d[1] = d[2] = d[3] = 0;
+        continue;
+      }
+      const float sr = static_cast<float>(red), sg = static_cast<float>(green), sb = static_cast<float>(blue);
+      d[0] = static_cast<uint8_t>((sr * oa + static_cast<float>(d[0]) * da * (1.0f - oa)) / outA + 0.5f);
+      d[1] = static_cast<uint8_t>((sg * oa + static_cast<float>(d[1]) * da * (1.0f - oa)) / outA + 0.5f);
+      d[2] = static_cast<uint8_t>((sb * oa + static_cast<float>(d[2]) * da * (1.0f - oa)) / outA + 0.5f);
+      d[3] = static_cast<uint8_t>(outA * 255.0f + 0.5f);
     }
   }
 }
@@ -1057,10 +1132,10 @@ std::optional<ConvertedTexture> build_dynamic_overlay(const CompositeIndexEntry&
     const float maskAspect = static_cast<float>(mask.width) / static_cast<float>(mask.height);
     if (entry.kind == "disc") {
       const float r = button.fr * std::max(w, h);
-      const float cx = button.fx * w, cy = button.fy * h;
-      overlay_fill_ellipse(img, cx, cy, r, r, 20, 20, 20);
+      const float cx = button.fx * w, cy = button.fy * h + kCompositeDiscDrop * r;
+      overlay_fill_ellipse_aa(img, cx, cy, r, r, 20, 20, 20);
       const float inner = r - 2.0f * r * 0.085f;
-      overlay_fill_ellipse(img, cx, cy, inner, inner, 255, 255, 255);
+      overlay_fill_ellipse_aa(img, cx, cy, inner, inner, 255, 255, 255);
       const float letterH = 2.0f * r * kCompositeLetterFraction;
       overlay_draw_mask(img, mask, cx - letterH * maskAspect / 2.0f, cy - letterH / 2.0f, letterH * maskAspect,
                         letterH, 20, 20, 20);
@@ -1110,7 +1185,7 @@ gfx::TextureHandle load_composited_texture(const RuntimeTextureKey& key, const G
   }
   const uint8_t marker = entry != nullptr ? entry->marker : 0;
 
-  const auto cachePath = composite_cache_path(key, entry != nullptr);
+  const auto cachePath = composite_cache_path(key, entry != nullptr, overlayEntry.overlayTag);
   std::error_code ec;
   if (std::filesystem::is_regular_file(cachePath, ec)) {
     if (auto cached = load_texture_file(cachePath); cached.has_value() &&
