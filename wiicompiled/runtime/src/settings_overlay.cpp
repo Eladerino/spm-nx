@@ -442,6 +442,10 @@ int g_displayMode = [] {
 }();
 bool g_skipUnreadyPipelines = RuntimeConfigFile::SkipUnreadyPipelines(true);
 bool g_disableCopyFilter = RuntimeConfigFile::DisableCopyFilter(true);
+#if defined(__SWITCH__)
+int g_crtFilter = RuntimeConfigFile::CrtFilter(0);
+int g_crtVignette = RuntimeConfigFile::CrtVignette(0);
+#endif
 bool g_showFps = RuntimeConfigFile::ShowFps(false);  // off unless turned on
 bool g_frameGraph = RuntimeConfigFile::FrameGraph(false);
 std::atomic<bool> g_vsync{RuntimeConfigFile::VSync(true)};  // default on: no tearing
@@ -3067,6 +3071,10 @@ void InitializeRuntimeSettings() noexcept {
     aurora_set_display_mode(static_cast<AuroraDisplayMode>(g_displayMode));
     g_displayMode = static_cast<int>(aurora_get_display_mode());
     aurora_set_disable_copy_filter(g_disableCopyFilter);
+#if defined(__SWITCH__)
+    aurora_set_crt_filter(g_crtFilter);
+    aurora_set_crt_vignette(g_crtVignette);
+#endif
     aurora_set_skip_unready_pipelines(g_skipUnreadyPipelines);
     g_strapInputAccepted.store(false, std::memory_order_relaxed);
     g_startupDismissFrame.store(UINT64_MAX, std::memory_order_relaxed);
@@ -4561,6 +4569,12 @@ void ResetAllSettings() {
     g_disableCopyFilter = true;
     aurora_set_disable_copy_filter(true);
     RuntimeConfigFile::SetDisableCopyFilter(true);
+    g_crtFilter = 0;
+    aurora_set_crt_filter(0);
+    RuntimeConfigFile::SetCrtFilter(0);
+    g_crtVignette = 0;
+    aurora_set_crt_vignette(0);
+    RuntimeConfigFile::SetCrtVignette(0);
     g_skipUnreadyPipelines = true;
     aurora_set_skip_unready_pipelines(true);
     RuntimeConfigFile::SetSkipUnreadyPipelines(true);
@@ -4786,6 +4800,28 @@ std::vector<OptRow> OptionsRows(int tab) {
                         "No screen tearing. Turn off only if your screen has its own sync (G-Sync, FreeSync)."});
 #endif
         rows.push_back({"FPS counter", OnOff(g_showFps), [](int) { SetShowFps(!g_showFps); }, "Shows the frame rate in the corner of the screen. Applies at once."});
+#if defined(__SWITCH__)
+        // The CRT post filter and its companion vignette, applied by the deko3d
+        // present to the finished picture: JSRF NX's steps and scale, off by
+        // default, live on the next frame. This menu calls its graphics page
+        // Display; the rows sit with the other picture rows, the same reason
+        // Texture replacements moved here from Developer.
+        {
+            static constexpr const char* kCrtLevels[] = {"Off", "Low", "Med", "High", "Max"};
+            const int crtFilter = RuntimeConfigFile::CrtFilter(0);
+            rows.push_back({"CRT filter", kCrtLevels[crtFilter], [crtFilter](int d) {
+                const int next = Cycle(crtFilter, d == 0 ? 1 : d, 5);
+                aurora_set_crt_filter(next);
+                RuntimeConfigFile::SetCrtFilter(next);
+            }, "A CRT look for the picture: scanlines, an aperture grille and a colour grade, in five steps. Applies at once; off costs nothing."});
+            const int crtVignette = RuntimeConfigFile::CrtVignette(0);
+            rows.push_back({"Vignette", kCrtLevels[crtVignette], [crtVignette](int d) {
+                const int next = Cycle(crtVignette, d == 0 ? 1 : d, 5);
+                aurora_set_crt_vignette(next);
+                RuntimeConfigFile::SetCrtVignette(next);
+            }, "Darkens the corners of the picture, the CRT filter's companion. Applies at once."});
+        }
+#endif
 #if defined(__SWITCH__)
         // Texture replacements lived on the Developer page until Nov 2026. It gates the button
         // icons and prompt pictures a player sees, so it belongs with the other picture rows;

@@ -2410,6 +2410,26 @@ const AuroraBackend* aurora_get_available_backends(size_t* count) {
 void aurora_set_log_level(AuroraLogLevel level) { aurora::g_config.logLevel = level; }
 void aurora_set_pause_on_focus_lost(bool value) { aurora::g_config.pauseOnFocusLost = value; }
 void aurora_set_disable_copy_filter(bool disabled) { aurora::g_config.disableCopyFilter = disabled; }
+
+namespace {
+std::atomic<int> g_crtFilterLevel{0};
+std::atomic<int> g_crtVignetteLevel{0};
+int clamp_crt_level(int level) { return level < 0 ? 0 : level > 4 ? 4 : level; }
+}  // namespace
+void aurora_set_crt_filter(int level) {
+  g_crtFilterLevel.store(clamp_crt_level(level));
+#if defined(__SWITCH__)
+  aurora_switch_dk_set_crt_filter(g_crtFilterLevel.load());
+#endif
+}
+int aurora_get_crt_filter() { return g_crtFilterLevel.load(); }
+void aurora_set_crt_vignette(int level) {
+  g_crtVignetteLevel.store(clamp_crt_level(level));
+#if defined(__SWITCH__)
+  aurora_switch_dk_set_crt_vignette(g_crtVignetteLevel.load());
+#endif
+}
+int aurora_get_crt_vignette() { return g_crtVignetteLevel.load(); }
 bool aurora_get_disable_copy_filter() { return aurora::g_config.disableCopyFilter; }
 void aurora_set_background_input(bool value) {
   aurora::g_config.allowJoystickBackgroundEvents = value;

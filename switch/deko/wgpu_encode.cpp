@@ -1340,6 +1340,232 @@ void __wrap_wgpuQueueWriteTexture(WGPUQueue queue, WGPUTexelCopyTextureInfo cons
 // The runtime's word on whether the frame being presented is gameplay (in a map, no
 // Prepare sweep running), kept current on the game thread (spm_prepare_graphics.cpp).
 bool spm_gameplay_present();
+
+// ---- the CRT post filter (Options > Graphics > CRT filter / Vignette) --------------------------
+// Copied from Brandon's JSRF NX port (src/nv2a_dk/nv2a_dk.c, the post pass of
+// Build J as fixed by the postpass fix), where it is proven on this same
+// deko3d present shape: when a step is on, the present's scaled blit of
+// Aurora's finished picture is replaced by one fullscreen triangle strip
+// sampling the picture, over the same dst rect the blit would fill. Both
+// steps at 0 the blit is recorded exactly as before. The one structural
+// difference from JSRF: Aurora's picture already has the settings menu and
+// the FPS counter drawn into it (dk_aurora.h), so while the menu is open it
+// is filtered along with the game; JSRF drew its menu after the pass. There
+// is no later seam on this path: this present is the only one.
+// The tables are the JSRF postpass-fix values verbatim (the diagnosis
+// rebalance: luminance-neutral grille capped at 4%, brightness the scanline's
+// own 1/(1-depth/2) compensation capped at 1.25, the saturation/contrast
+// grade the first version lacked, vignette corners over a 0.90 radius at
+// exponent 2.6 so the falloff lives in the corners). The scanline period is
+// in presented pixels and scales with the swapchain's height (2 px at 720p,
+// 3 px at 1080p): the raster belongs to the screen, not to the picture.
+std::atomic<int> g_crtFilter{0};
+std::atomic<int> g_crtVignette{0};
+
+void aurora_switch_dk_set_crt_filter(int level) {
+    g_crtFilter.store(level < 0 ? 0 : level > 4 ? 4 : level);
+}
+void aurora_switch_dk_set_crt_vignette(int level) {
+    g_crtVignette.store(level < 0 ? 0 : level > 4 ? 4 : level);
+}
+
+namespace {
+
+constexpr float kCrtTab[5][3] = {  // depth, grille, brightness
+    {0.00f, 0.00f, 1.00f}, {0.15f, 0.01f, 1.08f}, {0.28f, 0.02f, 1.17f},
+    {0.40f, 0.03f, 1.25f}, {0.55f, 0.04f, 1.25f},
+};
+constexpr float kCrtGradeTab[5][2] = {  // saturation, contrast, by CRT step
+    {1.00f, 1.00f}, {1.05f, 1.02f}, {1.10f, 1.04f}, {1.18f, 1.07f}, {1.28f, 1.10f},
+};
+constexpr float kCrtVigTab[5] = {1.00f, 0.82f, 0.64f, 0.42f, 0.18f};
+constexpr float kCrtVigExp = 2.6f;
+constexpr float kCrtVigRad = 0.90f;
+
+// JSRF's GLSL pair, transcribed to WGSL for this renderer's shader route
+// (compile_stage: Tint, then uam -- the same compiler JSRF's pair met, one
+// translation earlier). The vertex stage builds JSRF's CPU-filled strip in
+// the shader from the vertex index instead: the same four corners in the
+// same order, the same clip transform (y up, the picture's first row at +1),
+// the same per-vertex framebuffer pixel. No vertex buffer, no attributes.
+constexpr char kCrtWgsl[] = R"WGSL(
+struct Post {
+    dst: vec4<f32>,
+    crt: vec4<f32>,
+    vig: vec4<f32>,
+    grade: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> post: Post;
+@group(0) @binding(1) var picture: texture_2d<f32>;
+@group(0) @binding(2) var picture_sampler: sampler;
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) pix: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32) -> VOut {
+    let cx = f32(i & 1u);
+    let cy = f32((i >> 1u) & 1u);
+    let px = post.dst.x + cx * post.dst.z;
+    let py = post.dst.y + cy * post.dst.w;
+    var o: VOut;
+    o.uv = vec2<f32>(cx, cy);
+    o.pix = vec2<f32>(px, py);
+    o.pos = vec4<f32>(px * 2.0 / post.grade.z - 1.0, 1.0 - py * 2.0 / post.grade.w, 0.0, 1.0);
+    return o;
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+    var c = textureSample(picture, picture_sampler, in.uv).rgb;
+    let lp = in.pix - post.dst.xy;
+    let scan = 1.0 - post.crt.y * step(1.0 - 1.0 / post.crt.x, fract(lp.y / post.crt.x));
+    var grille = vec3<f32>(1.0 - post.crt.z);
+    let gph = lp.x - 3.0 * floor(lp.x / 3.0);
+    if (gph < 1.0) {
+        grille.r = 1.0 + 2.0 * post.crt.z;
+    } else if (gph < 2.0) {
+        grille.g = 1.0 + 2.0 * post.crt.z;
+    } else {
+        grille.b = 1.0 + 2.0 * post.crt.z;
+    }
+    c = c * (scan * grille * post.crt.w);
+    let lum = dot(c, vec3<f32>(0.299, 0.587, 0.114));
+    c = mix(vec3<f32>(lum), c, post.grade.x);
+    c = (c - 0.5) * post.grade.y + 0.5;
+    let q = vec2<f32>((lp.x - 0.5 * post.dst.z) / (post.dst.z * post.vig.z),
+                      (lp.y - 0.5 * post.dst.w) / (post.dst.w * post.vig.z));
+    let r = clamp(length(q), 0.0, 1.0);
+    c = c * (1.0 - (1.0 - post.vig.x) * pow(r, post.vig.y));
+    return vec4<f32>(c, 1.0);
+}
+)WGSL";
+
+int g_crtState = 0;  // 0 untried, 1 ready, -1 failed for the session (the blit stays)
+const CompiledStage* g_crtVs = nullptr;
+const CompiledStage* g_crtFs = nullptr;
+uint32_t g_crtUboSlot = 0;   // the fragment stage's uniform slot, from its bindings
+uint32_t g_crtTexSlot = 0;   // the fragment stage's texture slot, from its bindings
+uint32_t g_crtVsUboSlot = 0; // the vertex stage's uniform slot, from its bindings
+Block g_crtUniforms;         // a ring of UBO copies, one per in-flight present
+uint32_t g_crtRing = 0;
+uint32_t g_crtImageSlot = 0;  // the one image descriptor the pass owns
+const DkImage* g_crtSrcImage = nullptr;  // the descriptor's current key (JSRF's four-part key:
+void* g_crtSrcMem = nullptr;             // image, storage, width, height -- pooled pictures are
+uint32_t g_crtSrcW = 0, g_crtSrcH = 0;   // recreated in place at a new shape)
+
+bool crt_init() {
+    if (g_crtState) return g_crtState > 0;
+    g_crtState = -1;
+    g_crtVs = compile_stage(kCrtWgsl, "vs_main", ShaderStage::Vertex);
+    g_crtFs = compile_stage(kCrtWgsl, "fs_main", ShaderStage::Fragment);
+    if (!g_crtVs || !g_crtFs) {
+        dklog("crt: the post shader could not be built; the picture stays as shipped");
+        return false;
+    }
+    bool haveUbo = false, haveTex = false;
+    for (const SlotBinding& b : g_crtFs->bindings) {
+        if (b.kind == SlotBinding::Kind::Uniform && !haveUbo) { g_crtUboSlot = b.slot; haveUbo = true; }
+        if (b.kind == SlotBinding::Kind::Sampler && !haveTex) { g_crtTexSlot = b.slot; haveTex = true; }
+    }
+    bool haveVsUbo = false;
+    for (const SlotBinding& b : g_crtVs->bindings) {
+        if (b.kind == SlotBinding::Kind::Uniform && !haveVsUbo) { g_crtVsUboSlot = b.slot; haveVsUbo = true; }
+    }
+    if (!haveUbo || !haveTex || !haveVsUbo) {
+        dklog("crt: the post shader's bindings are not the expected shape; the picture stays as shipped");
+        return false;
+    }
+    g_crtUniforms = block_create(8 * 256, "crt post uniforms");
+    if (!g_crtUniforms) return false;
+    g_crtImageSlot = image_slot_alloc();
+    if (!g_crtImageSlot) return false;
+    g_crtState = 1;
+    dklog("crt: post pass ready (Graphics: CRT filter / Vignette)");
+    return true;
+}
+
+// Draw the picture into the swapchain image through the post pass, over the
+// same dst rect the blit would fill. False -- and the caller records the
+// blit instead -- when both steps are off or the pass could not be built.
+bool crt_present(const Tex& t, const DkImageView& dst, uint32_t fx, uint32_t fy, uint32_t fw,
+                 uint32_t fh, uint32_t dw, uint32_t dh) {
+    const int crt = g_crtFilter.load(std::memory_order_relaxed);
+    const int vig = g_crtVignette.load(std::memory_order_relaxed);
+    if (!crt && !vig) return false;
+    if (!crt_init()) return false;
+
+    // The descriptor names the picture's image; rewritten only when the
+    // picture moves (the cache key is all four parts, as in JSRF's fix).
+    if (g_crtSrcImage != &t.image || g_crtSrcMem != t.mem.block || g_crtSrcW != t.width ||
+        g_crtSrcH != t.height) {
+        write_image_view_descriptor(g_crtImageSlot, level_view(t, 0));
+        dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Descriptors);
+        g_crtSrcImage = &t.image;
+        g_crtSrcMem = t.mem.block;
+        g_crtSrcW = t.width;
+        g_crtSrcH = t.height;
+    }
+
+    float u[16] = {};
+    u[0] = float(fx); u[1] = float(fy); u[2] = float(fw); u[3] = float(fh);
+    u[4] = 2.0f * float(dh) / 720.0f;
+    u[5] = kCrtTab[crt][0]; u[6] = kCrtTab[crt][1]; u[7] = kCrtTab[crt][2];
+    u[8] = kCrtVigTab[vig]; u[9] = kCrtVigExp; u[10] = kCrtVigRad;
+    u[12] = kCrtGradeTab[crt][0]; u[13] = kCrtGradeTab[crt][1];
+    u[14] = float(dw); u[15] = float(dh);
+    const uint32_t ring = (g_crtRing++) % 8;
+    const DkGpuAddr uGpu = g_crtUniforms.gpu + ring * 256;
+    dkCmdBufPushData(R.cmd, uGpu, u, sizeof u);
+
+    const DkImageView* targets[1] = {&dst};
+    dkCmdBufBindRenderTargets(R.cmd, targets, 1, nullptr);
+    const DkViewport vp = {0.0f, 0.0f, float(dw), float(dh), 0.0f, 1.0f};
+    dkCmdBufSetViewports(R.cmd, 0, &vp, 1);
+    const DkScissor sc = {0, 0, dw, dh};
+    dkCmdBufSetScissors(R.cmd, 0, &sc, 1);
+    const DkShader* sh[2] = {&g_crtVs->shader, &g_crtFs->shader};
+    dkCmdBufBindShaders(R.cmd, DkStageFlag_GraphicsMask, sh, 2);
+    DkRasterizerState rs;
+    dkRasterizerStateDefaults(&rs);
+    rs.cullMode = DkFace_None;
+    dkCmdBufBindRasterizerState(R.cmd, &rs);
+    DkColorState cs;
+    dkColorStateDefaults(&cs);
+    dkColorStateSetBlendEnable(&cs, 0, false);
+    dkCmdBufBindColorState(R.cmd, &cs);
+    DkColorWriteState cw;
+    dkColorWriteStateDefaults(&cw);
+    dkCmdBufBindColorWriteState(R.cmd, &cw);
+    DkBlendState bs;
+    dkBlendStateDefaults(&bs);
+    dkCmdBufBindBlendStates(R.cmd, 0, &bs, 1);
+    DkDepthStencilState ds;
+    dkDepthStencilStateDefaults(&ds);
+    ds.depthTestEnable = false;
+    ds.depthWriteEnable = false;
+    dkCmdBufBindDepthStencilState(R.cmd, &ds);
+    const DkBufExtents ub = {uGpu, 256};
+    // The block is bound at BOTH stages: the vertex stage builds the strip
+    // from it (post.dst, and the framebuffer size in post.grade.zw). JSRF
+    // filled its vertices on the CPU, so its block was fragment-only; here an
+    // unbound vertex uniform reads zeros, dst/dw/dh collapse, and the strip
+    // rasterizes nothing at all (the Nov 10 hardware proof: the draw covered
+    // no pixel, and the diag magenta clear behind the picture showed through
+    // untouched at every step of both ladders).
+    dkCmdBufBindUniformBuffers(R.cmd, DkStage_Vertex, g_crtVsUboSlot, &ub, 1);
+    dkCmdBufBindUniformBuffers(R.cmd, DkStage_Fragment, g_crtUboSlot, &ub, 1);
+    const DkResHandle tex = dkMakeTextureHandle(g_crtImageSlot, kSamplerLinearClamp);
+    dkCmdBufBindTextures(R.cmd, DkStage_Fragment, g_crtTexSlot, &tex, 1);
+    dkCmdBufDraw(R.cmd, DkPrimitive_TriangleStrip, 4, 1, 0, 0);
+    return true;
+}
+
+}  // namespace
+
 bool aurora_switch_dk_present(void* texture) {
     auto t = g_textures.get(texture);
     if (!R.device || !t || !t->valid || !t->fmt.can2d) {
@@ -1435,7 +1661,10 @@ bool aurora_switch_dk_present(void* texture) {
     const DkImageView src = level_view(*t, 0);
     const DkImageRect sr = {0, 0, 0, sw, sh, 1};
     const DkImageRect dr = {fx, fy, 0, fw, fh, 1};
-    dkCmdBufBlitImage(R.cmd, &src, &sr, &dst, &dr, DkBlitFlag_FilterLinear, 0);
+    // The CRT post filter replaces the blit while a step is on (crt_present
+    // above); off, or if the pass could not be built, the blit stands.
+    if (!crt_present(*t, dst, fx, fy, fw, fh, dw, dh))
+        dkCmdBufBlitImage(R.cmd, &src, &sr, &dst, &dr, DkBlitFlag_FilterLinear, 0);
     g_copyRun = true;  // the next draw into Aurora's picture waits for the blit
     keep_until_done(std::static_pointer_cast<void>(t));
     flush();

@@ -19,6 +19,13 @@ void aurora_switch_dk_init(void);
 // if the texture has no deko3d shadow (logged once).
 bool aurora_switch_dk_present(void* texture);
 
+// The CRT post filter (Options > Graphics > CRT filter / Vignette): two stepped
+// levels, 0 (off) to 4 (MAX), forwarded by Aurora's aurora_set_crt_filter and
+// aurora_set_crt_vignette. The renderer reads them at every present, so a change
+// applies to the next presented frame; no restart, no rebuild of anything.
+void aurora_switch_dk_set_crt_filter(int level);
+void aurora_switch_dk_set_crt_vignette(int level);
+
 // Waits for the GPU and gives the window back (Aurora's shutdown).
 void aurora_switch_dk_shutdown(void);
 
