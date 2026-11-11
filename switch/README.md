@@ -155,7 +155,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   fresh-install defaults, through the same setters the rows themselves use. Saves, mods and
   the shader cache are not settings and are not touched. Aspect and texture replacements
   apply at the next launch, exactly as they do from their own rows.
-- **Controls** remaps the gamepad, and holds the vibration setting. Player 1's actions
+- **Controls** remaps the gamepad, and holds the vibration setting and the Touch Tippi switch (off by default: in handheld mode, drag on the touchscreen to aim Tippi, and let go to examine what she points at). Player 1's actions
   sit under Movement, Actions and System headings, as a table: one row per action,
   with a column for the first slot and a column for the second. Ten actions are shown
   (the config table has twelve; the Tilt left/right pair is not shown, because the
@@ -167,7 +167,7 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   left stick puts that slot's built-in binding back. Changes apply immediately,
   no restart. The PC build's separate Controller rows for players 2 to 4 are not shown
   on Switch: this game is single-player, and player 1 is this list.
-- **Display** holds Resolution, Aspect ratio, the FPS counter and Texture replacements
+- **Display** holds Resolution, Aspect ratio, the FPS counter, the CRT filter and Vignette (post effects on the finished picture, both off by default) and Texture replacements
   (the master switch for the replacement button icons and prompt pictures; takes effect
   after a restart). **Sound** holds the Master, Music, Sound effects, Voices and UI
   volumes, and Mute.
@@ -178,20 +178,18 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   texture to `Cache/texture_dumps` under the name a replacement would use, for making
   new replacement pictures; takes effect after a restart),
   and a Clear shader cache row (deletes the compiled shader cache on the next launch; the
-  recovery step for a cache that has gone wrong). Diagnostics holds thirty-six of the
+  recovery step for a cache that has gone wrong). Diagnostics holds the
   renderer's diagnostic switches, grouped under the same headings dk_diag.txt uses
   (each flip also writes all of them back to
   `UserData/dk_diag.txt`, the file the same switches are read from at boot), and Flush logs
-  and Mark log rows for test runs. The file knows forty-six keys in all; ten have no row
-  on the page. Four of them are boot-time only: zcull, which is read once when the render queue is created (change it by editing the
+  and Mark log rows for test runs. Some of the file's keys have no row on the page. Four of them are boot-time only: zcull, which is read once when the render queue is created (change it by editing the
   `zcull` line in dk_diag.txt), guestcore, which the thread starter reads from the
   file before the diag system exists (edit the `guestcore` line), dkserver, which
   starts the debug server below (edit the `dkserver` line), and rttlog, which logs
   the state the file select waits on when Return to Title hangs, and the state at
-  the moment Return to Title is chosen (edit the `rttlog` line). Five more are set
-  from the file only: wiisuppress (the tutorial Wii Remote suppression, on by
+  the moment Return to Title is chosen (edit the `rttlog` line). Others are set from the file only: wiisuppress (the tutorial Wii Remote suppression, on by
   default), gxfutex and gxsvclate (the GX worker switches described below), and
-  padrec and padreplay (the input recorder and its replay). The tenth is abtoggle,
+  padrec and padreplay (the input recorder and its replay), and the hit index and bounds cache switches described below. One more is abtoggle,
   which carries parameters and is covered in its own paragraph below. One of the page's rows is a display option rather than a
   check: 30 fps cap (`fps30`), under Performance, shows gameplay frames one in two
   for a locked 30 fps while the game keeps its own pace; the title screen and the
@@ -304,6 +302,18 @@ bindings, no window size row, no open-folder rows, and no quit-to-desktop row.
   Horizon's address arbiter instead of a condition variable, so a publish can
   never lose its wake (a lost one costs the frame up to 1 ms). It does remove
   the lost wakes and measures frame-time neutral, so it stays a switch.
+  The hit index (`hitindex`, on by default, file only) answers the game's hit-object
+  name lookups from a persistent index instead of scanning the whole table on every
+  call. The index tracks every write that can change the table, and it was proven
+  against the original scan in shadow mode (471,878 comparisons, no wrong answers)
+  before it was switched on. `hitindex=0` in dk_diag.txt brings the scan back;
+  `hitindexshadow=1` runs the proof mode instead, where the scan always runs and
+  the two answers are compared.
+  The bounds cache (`bboxcache`, off by default, file only) is an experiment of the
+  same shape for collision bounds checks: it remembers a collision object's combined
+  bounds instead of re-walking its shapes on every check. It removed real work but
+  measured no change in frame rate, so it stays off unless you turn it on;
+  `bboxshadow=1` is its proof mode.
   One more switch has no row at all, and is a measuring instrument rather than a way
   to play: automatic A/B (`abtoggle=<switch>` in dk_diag.txt, or
   `abtoggle=<switch>:<windows>`) flips the named switch on and off by itself at the
