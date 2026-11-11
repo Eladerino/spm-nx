@@ -389,6 +389,10 @@ inline void PublishAuroraVtxState(GXVtxFmt fmt, const AuroraVtxPublishOptions& o
     // gxdedup (gx_internal.h): Aurora's vertex state now holds exactly what was
     // published above, so the setters' mirror of it is re-synced here.
     GxDedup::NoteVtxPublish(static_cast<int>(fmt), options.fmtLoopFirst, options.fmtLoopLast);
+    // applymemo (gx_internal.h): the display-list apply memo counts this
+    // publish in its divergence epoch, since Aurora now holds a vertex
+    // publish the bundle's mirrors never saw.
+    GxNoteAuroraVtxPublish();
 }
 
 } // namespace GxStream

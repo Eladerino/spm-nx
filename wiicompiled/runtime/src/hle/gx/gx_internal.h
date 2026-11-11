@@ -442,6 +442,16 @@ void SpmBBoxPosition(const float* p, int count);
 // Flushes the shadow cursor/count back into guest memory and stops recording.
 void EndDisplayListRecording();
 
+// ---- the Aurora divergence epoch (gx_dl.cpp; lever B apply memo) -------------
+// GxStream::PublishAuroraVtxState (gx_stream_common.h) calls
+// GxNoteAuroraVtxPublish() after every publish, beside
+// GxDedup::NoteVtxPublish: Aurora's vertex shadow may then hold a publish the
+// display-list bundle's mirrors never saw, so gx_dl.cpp's apply memo counts
+// the event and keys its desc/fmt half on the count. Defined in gx_dl.cpp,
+// with the memo it serves.
+void GxNoteAuroraVtxPublish() noexcept;
+uint32_t GxAuroraVtxDivergenceEpoch() noexcept;
+
 // ---- gxdedup: GX setter no-change early-out (Switch Diagnostics "gxdedup") ----
 // While the switch is on, the vertex setters in gx_vertex.cpp skip re-emitting a
 // value Aurora's CP state is known to already hold. The mirror of that state lives

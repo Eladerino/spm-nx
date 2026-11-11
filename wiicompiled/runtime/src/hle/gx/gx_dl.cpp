@@ -497,6 +497,10 @@ struct DlScanCacheRecord {
     DlScanCacheEntry result{};
     // Answer of DisplayListMayContainDraw for these bytes
     bool mayContainDraw = false;
+    // Answer of ListHasAuroraCommand for these bytes (lever B L2): a pure
+    // function of the same bytes, cached so a validated hit does not re-walk
+    // the list head to learn it.
+    bool hasAuroraCommand = false;
     uint64_t contentDigest = 0;
     uint64_t writeGeneration = kDlWriteGenerationUntracked;
     std::vector<DlCpWrite> cpWrites{};
@@ -667,7 +671,8 @@ static size_t DlScanCacheRecordBytes(const DlScanCacheRecord& record) {
 
 static void StoreDlScanCache(uint32_t listAddr, uint32_t nbytes, uint64_t layoutHash,
                              uint64_t contentDigest, uint64_t writeGeneration,
-                             bool mayContainDraw, const DlScanCacheEntry& entry,
+                             bool mayContainDraw, bool hasAuroraCommand,
+                             const DlScanCacheEntry& entry,
                              std::vector<DlCpWrite>&& cpWrites, const uint8_t* flattened,
                              uint32_t flattenedBytes) {
     auto& s_cache = DlScanCache();
@@ -687,6 +692,7 @@ static void StoreDlScanCache(uint32_t listAddr, uint32_t nbytes, uint64_t layout
     DlScanCacheRecord record{};
     record.result = entry;
     record.mayContainDraw = mayContainDraw;
+    record.hasAuroraCommand = hasAuroraCommand;
     record.result.listAddr = CanonicalizeGxMainRamAddress(listAddr);
     record.result.nbytes = nbytes;
     record.result.layoutHash = layoutHash;
@@ -1146,6 +1152,90 @@ static std::array<AppliedArrayState, GX_VA_MAX_ATTR> s_appliedArrays{};
 static bool s_appliedVtxStateMatchesHle = false;
 static uint32_t s_appliedVtxStateGeneration = 0;
 
+// ---- the apply memo (lever B L4; Switch Diagnostics "applymemo") -----------
+//
+// A global last-publish memo over the apply bundle below. After a successful
+// bundle hand-off, the two halves record the exact inputs that hand-off's
+// applies consumed; a later scan-cache hit whose halves still match skips
+// those applies, because Aurora provably still holds what they would emit.
+// The halves hit independently: the desc/fmt half is keyed only on state any
+// list's hand-off republishes (so it survives list changes), while the arrays
+// half is additionally keyed on the one list whose arrays were applied. The
+// copy-out of the scan entry is skipped only when both halves hit.
+//
+// With the switch off, nothing here is consulted or stamped: the submit path
+// runs the unmemoised code and pays one atomic load per display-list call.
+static std::atomic<bool> s_applyMemoEnabled{false};
+
+static bool ApplyMemoEnabled() {
+    return s_applyMemoEnabled.load(std::memory_order_relaxed);
+}
+
+struct ApplyMemoDescFmtHalf {
+    bool valid = false;
+    uint32_t vtxStateGeneration = 0;
+    uint32_t divergenceEpoch = 0;
+    GXVtxFmt dlVtxFmt = GX_MAX_VTXFMT;
+    bool dlVtxFmtMixed = false;
+};
+
+struct ApplyMemoArraysHalf {
+    bool valid = false;
+    // The scan-cache record whose arrays were applied. An opaque value,
+    // compared for equality only and never dereferenced: the skip path
+    // dereferences the record the probe returned this call, and the
+    // (writeGeneration, contentDigest) pair below pins its contents even if
+    // the cache replaced the record in place (DlScanCacheState::Assign).
+    const DlScanCacheRecord* record = nullptr;
+    uint64_t writeGeneration = 0;
+    uint64_t contentDigest = 0;
+    uint32_t vtxArrayGeneration = 0;
+    uint32_t vtxStateGeneration = 0;
+    GXVtxFmt currentVtxFmt = GX_MAX_VTXFMT;
+    GXVtxFmt dlVtxFmt = GX_MAX_VTXFMT;
+    bool dlVtxFmtMixed = false;
+    // False when the stamping run saw an indexed array that needed the
+    // stride>0xFF pack path: the packed copy's host buffer cycles between two
+    // slots, so it is not stable state a later call may assume Aurora holds.
+    bool noPack = false;
+};
+
+static ApplyMemoDescFmtHalf s_applyMemoDescFmt{};
+static ApplyMemoArraysHalf s_applyMemoArrays{};
+
+// First-mismatch tallies: per evaluation, each half counts the first field
+// (in check order) that failed, so a window says WHY the memo missed.
+enum ApplyMemoDescFmtMismatch : size_t {
+    kApplyMemoDescInvalid = 0,
+    kApplyMemoDescVtxStateGen,
+    kApplyMemoDescEpoch,
+    kApplyMemoDescFmt,
+    kApplyMemoDescMismatchCount
+};
+enum ApplyMemoArraysMismatch : size_t {
+    kApplyMemoArraysInvalid = 0,
+    kApplyMemoArraysRecord,
+    kApplyMemoArraysWriteGen,
+    kApplyMemoArraysDigest,
+    kApplyMemoArraysArrayGen,
+    kApplyMemoArraysVtxStateGen,
+    kApplyMemoArraysCurrentFmt,
+    kApplyMemoArraysFmt,
+    kApplyMemoArraysPack,
+    kApplyMemoArraysMismatchCount
+};
+
+static std::atomic<uint64_t> s_applyMemoEvals{0};
+static std::atomic<uint64_t> s_applyMemoDescFmtHits{0};
+static std::atomic<uint64_t> s_applyMemoArraysHits{0};
+static std::atomic<uint64_t> s_applyMemoFullSkips{0};
+static std::atomic<uint64_t> s_applyMemoDisagreements{0};
+static std::atomic<uint64_t> s_applyMemoExclScanBad{0};
+static std::atomic<uint64_t> s_applyMemoExclCpWrites{0};
+static std::atomic<uint64_t> s_applyMemoExclFlatten{0};
+static std::atomic<uint64_t> s_applyMemoDescFmtMismatch[kApplyMemoDescMismatchCount]{};
+static std::atomic<uint64_t> s_applyMemoArraysMismatch[kApplyMemoArraysMismatchCount]{};
+
 static void InvalidateAppliedAuroraState() {
     s_appliedVtxDescValid = false;
     s_appliedVtxAttrFmtValid = false;
@@ -1153,6 +1243,13 @@ static void InvalidateAppliedAuroraState() {
     for (auto& array : s_appliedArrays) {
         array.valid = false;
     }
+    // The paths that land here parse the list themselves, so nothing the
+    // apply memo stamped describes Aurora any more; the parse is also a
+    // foreign vertex-state writer, so the divergence epoch moves with the
+    // clear (gx_internal.h's GxNoteAuroraVtxPublish).
+    s_applyMemoDescFmt.valid = false;
+    s_applyMemoArrays.valid = false;
+    GxNoteAuroraVtxPublish();
 }
 
 static void SyncAppliedVtxStateFromHleReal() {
@@ -1372,6 +1469,124 @@ static bool ApplyAuroraIndexedXFArraysForDisplayList(const std::array<uint32_t, 
     return ok;
 }
 
+// Whether re-applying this list's arrays would take the stride>0xFF pack path
+// for any seen indexed attribute, recomputed from the same live state
+// ApplyAuroraArraysForDisplayList reads. The XF arrays apply has no pack path.
+static bool ApplyMemoNeedsPack(const std::array<bool, GX_VA_MAX_ATTR>& sawIdx) {
+    for (int attr = 0; attr < 26; ++attr) {
+        const GXAttrType type = g_hleGxState.vtxDesc[attr];
+        if (type != GX_INDEX8 && type != GX_INDEX16) continue;
+        if (!sawIdx[attr]) continue;
+        if (g_hleGxState.vtxArray[attr].stride > 0xffu) return true;
+    }
+    return false;
+}
+
+// Stamps both memo halves after a successful full-bundle hand-off: the
+// hand-off just published exactly these inputs, so Aurora holds them now.
+// A list whose replay writes CP registers is never stamped (its writes move
+// HLE state mid-call, so it can never legitimately skip), and reaching this
+// point at all certifies the stamping run's arraysOk && xfOk.
+static void ApplyMemoStamp(const DlScanCacheRecord* record, uint64_t writeGeneration,
+                           uint64_t contentDigest, GXVtxFmt dlVtxFmt, bool dlVtxFmtMixed,
+                           const std::array<bool, GX_VA_MAX_ATTR>& sawIdx, bool dlHasCpWrites) {
+    if (!ApplyMemoEnabled() || dlHasCpWrites) return;
+    s_applyMemoDescFmt.valid = true;
+    s_applyMemoDescFmt.vtxStateGeneration = g_hleGxState.vtxStateGeneration;
+    s_applyMemoDescFmt.divergenceEpoch = GxAuroraVtxDivergenceEpoch();
+    s_applyMemoDescFmt.dlVtxFmt = dlVtxFmt;
+    s_applyMemoDescFmt.dlVtxFmtMixed = dlVtxFmtMixed;
+    if (record == nullptr) return;
+    s_applyMemoArrays.valid = true;
+    s_applyMemoArrays.record = record;
+    s_applyMemoArrays.writeGeneration = writeGeneration;
+    s_applyMemoArrays.contentDigest = contentDigest;
+    s_applyMemoArrays.vtxArrayGeneration = g_hleGxState.vtxArrayGeneration;
+    s_applyMemoArrays.vtxStateGeneration = g_hleGxState.vtxStateGeneration;
+    s_applyMemoArrays.currentVtxFmt = g_hleGxState.currentVtxFmt;
+    s_applyMemoArrays.dlVtxFmt = dlVtxFmt;
+    s_applyMemoArrays.dlVtxFmtMixed = dlVtxFmtMixed;
+    s_applyMemoArrays.noPack = !ApplyMemoNeedsPack(sawIdx);
+}
+
+struct ApplyMemoDecision {
+    bool skipDescFmt = false;
+    bool skipArrays = false;
+};
+
+// Evaluates the memo for one scan-cache hit on the draw path, counting the
+// outcome. Eligibility first (the entry's stamped facts); then each half in
+// field order, tallying the first mismatch. On a desc/fmt hit the design's
+// live-read check runs too: Aurora's own registers are re-read for the
+// indexed attributes, exactly as the unskipped apply would check them, and
+// any disagreement with the skip decision is counted (proof runs require 0).
+static ApplyMemoDecision ApplyMemoEvaluate(const DlScanCacheRecord* cached,
+                                           const DlScanCacheProbe& probe,
+                                           const DlScanCacheEntry& entry) {
+    ApplyMemoDecision decision{};
+    s_applyMemoEvals.fetch_add(1, std::memory_order_relaxed);
+    if (!entry.scanOk) {
+        s_applyMemoExclScanBad.fetch_add(1, std::memory_order_relaxed);
+        return decision;
+    }
+    if (entry.dlHasCpWrites) {
+        s_applyMemoExclCpWrites.fetch_add(1, std::memory_order_relaxed);
+        return decision;
+    }
+    if (entry.needsFlatten && !entry.flattenOk) {
+        s_applyMemoExclFlatten.fetch_add(1, std::memory_order_relaxed);
+        return decision;
+    }
+    const auto& descFmt = s_applyMemoDescFmt;
+    if (!descFmt.valid) {
+        s_applyMemoDescFmtMismatch[kApplyMemoDescInvalid].fetch_add(1, std::memory_order_relaxed);
+    } else if (descFmt.vtxStateGeneration != g_hleGxState.vtxStateGeneration) {
+        s_applyMemoDescFmtMismatch[kApplyMemoDescVtxStateGen].fetch_add(1, std::memory_order_relaxed);
+    } else if (descFmt.divergenceEpoch != GxAuroraVtxDivergenceEpoch()) {
+        s_applyMemoDescFmtMismatch[kApplyMemoDescEpoch].fetch_add(1, std::memory_order_relaxed);
+    } else if (descFmt.dlVtxFmt != entry.dlVtxFmt || descFmt.dlVtxFmtMixed != entry.dlVtxFmtMixed) {
+        s_applyMemoDescFmtMismatch[kApplyMemoDescFmt].fetch_add(1, std::memory_order_relaxed);
+    } else {
+        decision.skipDescFmt = true;
+        s_applyMemoDescFmtHits.fetch_add(1, std::memory_order_relaxed);
+        for (int attr = 0; attr < 26; ++attr) {
+            if (attr == GX_VA_NBT) continue;
+            const GXAttr gxAttr = static_cast<GXAttr>(attr);
+            const GXAttrType type = g_hleGxState.vtxDesc[attr];
+            if (IsMatrixIndexAttr(gxAttr) || gxAttr > GX_VA_TEX7) continue;
+            if (type != GX_INDEX8 && type != GX_INDEX16) continue;
+            if (!AuroraVtxDescMatchesLive(gxAttr, type)) {
+                s_applyMemoDisagreements.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+        }
+    }
+    const auto& arrays = s_applyMemoArrays;
+    if (!arrays.valid) {
+        s_applyMemoArraysMismatch[kApplyMemoArraysInvalid].fetch_add(1, std::memory_order_relaxed);
+    } else if (arrays.record != cached) {
+        s_applyMemoArraysMismatch[kApplyMemoArraysRecord].fetch_add(1, std::memory_order_relaxed);
+    } else if (arrays.writeGeneration != probe.writeGeneration) {
+        s_applyMemoArraysMismatch[kApplyMemoArraysWriteGen].fetch_add(1, std::memory_order_relaxed);
+    } else if (arrays.contentDigest != cached->contentDigest) {
+        s_applyMemoArraysMismatch[kApplyMemoArraysDigest].fetch_add(1, std::memory_order_relaxed);
+    } else if (arrays.vtxArrayGeneration != g_hleGxState.vtxArrayGeneration) {
+        s_applyMemoArraysMismatch[kApplyMemoArraysArrayGen].fetch_add(1, std::memory_order_relaxed);
+    } else if (arrays.vtxStateGeneration != g_hleGxState.vtxStateGeneration) {
+        s_applyMemoArraysMismatch[kApplyMemoArraysVtxStateGen].fetch_add(1, std::memory_order_relaxed);
+    } else if (arrays.currentVtxFmt != g_hleGxState.currentVtxFmt) {
+        s_applyMemoArraysMismatch[kApplyMemoArraysCurrentFmt].fetch_add(1, std::memory_order_relaxed);
+    } else if (arrays.dlVtxFmt != entry.dlVtxFmt || arrays.dlVtxFmtMixed != entry.dlVtxFmtMixed) {
+        s_applyMemoArraysMismatch[kApplyMemoArraysFmt].fetch_add(1, std::memory_order_relaxed);
+    } else if (!arrays.noPack) {
+        s_applyMemoArraysMismatch[kApplyMemoArraysPack].fetch_add(1, std::memory_order_relaxed);
+    } else {
+        decision.skipArrays = true;
+        s_applyMemoArraysHits.fetch_add(1, std::memory_order_relaxed);
+    }
+    return decision;
+}
+
 } // namespace
 
 extern "C" unsigned g_spmAudit[8];  // aurora command_processor (SPM diagnostics)
@@ -1380,6 +1595,28 @@ extern "C" int g_spmSweepDump;
 // the same shape as spm_dlprobe_set: diag_init and diag_set forward the switch here.
 extern "C" void spm_hashcheck_set(bool enabled) {
     s_hashCheckEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+// The Aurora divergence epoch (lever B design 3.3): bumped through
+// GxNoteAuroraVtxPublish from inside GxStream::PublishAuroraVtxState (every
+// foreign publish of Aurora's vertex state inherits the hook) and beside the
+// memo clear in InvalidateAppliedAuroraState. Over-bumping only loses memo
+// hits; under-bumping is the bug, so the hook lives in the shared helper.
+static std::atomic<uint32_t> s_auroraVtxDivergenceEpoch{0};
+
+void GxNoteAuroraVtxPublish() noexcept {
+    s_auroraVtxDivergenceEpoch.fetch_add(1, std::memory_order_relaxed);
+}
+
+uint32_t GxAuroraVtxDivergenceEpoch() noexcept {
+    return s_auroraVtxDivergenceEpoch.load(std::memory_order_relaxed);
+}
+
+// The deko diag channel's door for the applymemo experiment
+// (switch/deko/device.cpp), the same shape as spm_hashcheck_set: diag_init
+// and diag_set forward the switch here.
+extern "C" void spm_applymemo_set(bool enabled) {
+    s_applyMemoEnabled.store(enabled, std::memory_order_relaxed);
 }
 
 namespace GxWorker {
@@ -1399,6 +1636,73 @@ void PrintHashCheckWindow(uint64_t firstFrame, uint64_t lastFrame) {
                  static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
                  static_cast<unsigned long long>(windowChecks),
                  static_cast<unsigned long long>(windowDisagreements));
+}
+
+static uint64_t s_applyMemoPrintedEvals = 0;
+static uint64_t s_applyMemoPrintedDescFmtHits = 0;
+static uint64_t s_applyMemoPrintedArraysHits = 0;
+static uint64_t s_applyMemoPrintedFullSkips = 0;
+static uint64_t s_applyMemoPrintedDisagreements = 0;
+static uint64_t s_applyMemoPrintedExclScanBad = 0;
+static uint64_t s_applyMemoPrintedExclCpWrites = 0;
+static uint64_t s_applyMemoPrintedExclFlatten = 0;
+static uint64_t s_applyMemoPrintedDescFmtMismatch[kApplyMemoDescMismatchCount]{};
+static uint64_t s_applyMemoPrintedArraysMismatch[kApplyMemoArraysMismatchCount]{};
+
+void PrintApplyMemoWindow(uint64_t firstFrame, uint64_t lastFrame) {
+    if (lastFrame < firstFrame) return;
+    const auto delta = [](const std::atomic<uint64_t>& counter, uint64_t& printed) {
+        const uint64_t now = counter.load(std::memory_order_relaxed);
+        const uint64_t window = now - printed;
+        printed = now;
+        return window;
+    };
+    const uint64_t evals = delta(s_applyMemoEvals, s_applyMemoPrintedEvals);
+    const uint64_t descFmtHits = delta(s_applyMemoDescFmtHits, s_applyMemoPrintedDescFmtHits);
+    const uint64_t arraysHits = delta(s_applyMemoArraysHits, s_applyMemoPrintedArraysHits);
+    const uint64_t fullSkips = delta(s_applyMemoFullSkips, s_applyMemoPrintedFullSkips);
+    const uint64_t disagreements = delta(s_applyMemoDisagreements, s_applyMemoPrintedDisagreements);
+    const uint64_t exclScanBad = delta(s_applyMemoExclScanBad, s_applyMemoPrintedExclScanBad);
+    const uint64_t exclCpWrites = delta(s_applyMemoExclCpWrites, s_applyMemoPrintedExclCpWrites);
+    const uint64_t exclFlatten = delta(s_applyMemoExclFlatten, s_applyMemoPrintedExclFlatten);
+    uint64_t descMismatch[kApplyMemoDescMismatchCount];
+    uint64_t arraysMismatch[kApplyMemoArraysMismatchCount];
+    for (size_t i = 0; i < kApplyMemoDescMismatchCount; ++i) {
+        descMismatch[i] = delta(s_applyMemoDescFmtMismatch[i], s_applyMemoPrintedDescFmtMismatch[i]);
+    }
+    for (size_t i = 0; i < kApplyMemoArraysMismatchCount; ++i) {
+        arraysMismatch[i] = delta(s_applyMemoArraysMismatch[i], s_applyMemoPrintedArraysMismatch[i]);
+    }
+    if (evals == 0) {
+        return;  // the switch was off (or no scan-cache hit ran) for this whole window
+    }
+    std::fprintf(stderr,
+                 "[applymemo] frames %llu-%llu: %llu evals, %llu desc/fmt hits, %llu arrays hits, "
+                 "%llu full skips, %llu disagreements; exclusions scanbad %llu cpwrites %llu flatten %llu\n",
+                 static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                 static_cast<unsigned long long>(evals), static_cast<unsigned long long>(descFmtHits),
+                 static_cast<unsigned long long>(arraysHits), static_cast<unsigned long long>(fullSkips),
+                 static_cast<unsigned long long>(disagreements),
+                 static_cast<unsigned long long>(exclScanBad),
+                 static_cast<unsigned long long>(exclCpWrites),
+                 static_cast<unsigned long long>(exclFlatten));
+    std::fprintf(stderr,
+                 "[applymemo]   first mismatch desc/fmt: invalid %llu vtxgen %llu epoch %llu fmt %llu; "
+                 "arrays: invalid %llu record %llu writegen %llu digest %llu arraygen %llu vtxgen %llu "
+                 "curfmt %llu fmt %llu pack %llu\n",
+                 static_cast<unsigned long long>(descMismatch[kApplyMemoDescInvalid]),
+                 static_cast<unsigned long long>(descMismatch[kApplyMemoDescVtxStateGen]),
+                 static_cast<unsigned long long>(descMismatch[kApplyMemoDescEpoch]),
+                 static_cast<unsigned long long>(descMismatch[kApplyMemoDescFmt]),
+                 static_cast<unsigned long long>(arraysMismatch[kApplyMemoArraysInvalid]),
+                 static_cast<unsigned long long>(arraysMismatch[kApplyMemoArraysRecord]),
+                 static_cast<unsigned long long>(arraysMismatch[kApplyMemoArraysWriteGen]),
+                 static_cast<unsigned long long>(arraysMismatch[kApplyMemoArraysDigest]),
+                 static_cast<unsigned long long>(arraysMismatch[kApplyMemoArraysArrayGen]),
+                 static_cast<unsigned long long>(arraysMismatch[kApplyMemoArraysVtxStateGen]),
+                 static_cast<unsigned long long>(arraysMismatch[kApplyMemoArraysCurrentFmt]),
+                 static_cast<unsigned long long>(arraysMismatch[kApplyMemoArraysFmt]),
+                 static_cast<unsigned long long>(arraysMismatch[kApplyMemoArraysPack]));
 }
 }  // namespace GxWorker
 
@@ -1692,10 +1996,17 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
 
         // The scan a cached record came from already walked the list for this,
         // so only a miss pays for DisplayListMayContainDraw.
-        const bool auroraList = ListHasAuroraCommand(list, nbytes);
+        // With applymemo on, a validated hit takes the Aurora-command verdict
+        // from its scan-cache record (lever B L2) instead of re-walking the
+        // list head; the verdict is a pure function of the certified bytes,
+        // and the [spmdl] log below stays on the miss path that computes it.
+        const bool applyMemoOn = ApplyMemoEnabled();
+        const bool auroraList = (applyMemoOn && cached != nullptr)
+                                    ? cached->hasAuroraCommand
+                                    : ListHasAuroraCommand(list, nbytes);
         if (auroraList) g_boundTexMaps.fill(BoundTexInfo{});
         { static int s_callLog = 0;
-          if (s_callLog++ < 60) RT_LOGF(RT_TAG_GX, "[spmdl] call 0x%08X %u bytes aurora=%d\n", listAddr, nbytes, auroraList ? 1 : 0); }  // the list rebinds textures behind the cache
+          if (cached == nullptr && s_callLog++ < 60) RT_LOGF(RT_TAG_GX, "[spmdl] call 0x%08X %u bytes aurora=%d\n", listAddr, nbytes, auroraList ? 1 : 0); }  // the list rebinds textures behind the cache
         const bool mayContainDraw = auroraList ? false
             : (cached != nullptr) ? cached->mayContainDraw : DisplayListMayContainDraw(list, nbytes);
         if (!mayContainDraw) {
@@ -1726,8 +2037,48 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
         bool flattenOk = false;
         const uint8_t* auroraStream = nullptr;
         uint32_t auroraStreamBytes = 0;
+        // applymemo: the halves' verdicts for this call (both false unless the
+        // switch is on and this is a scan-cache hit), and the record/digest a
+        // stamp after a successful hand-off keys on: the probe's record on a
+        // hit, the just-stored record on a miss.
+        bool memoSkipDescFmt = false;
+        bool memoSkipArrays = false;
+        const DlScanCacheRecord* stampRecord = cached;
+        uint64_t stampDigest = (cached != nullptr) ? cached->contentDigest : 0;
         if (cached != nullptr) {
             const auto& entry = cached->result;
+            if (applyMemoOn) {
+                const ApplyMemoDecision decision = ApplyMemoEvaluate(cached, probe, entry);
+                memoSkipDescFmt = decision.skipDescFmt;
+                memoSkipArrays = decision.skipArrays;
+                if (memoSkipDescFmt && memoSkipArrays) {
+                    // Both halves hit: the copies and the bundle would only
+                    // re-emit what Aurora already holds, so hand the list
+                    // straight over, with the stream taken from the entry
+                    // exactly as the copy-out below would set it.
+                    const uint8_t* stream = list;
+                    uint32_t streamBytes = nbytes;
+                    bool streamOk = true;
+                    if (entry.needsFlatten && !entry.flattenVerbatim) {
+                        if (!cached->flattened.empty()) {
+                            stream = cached->flattened.data();
+                            streamBytes = static_cast<uint32_t>(cached->flattened.size());
+                        } else {
+                            streamOk = false;
+                        }
+                    }
+                    if (streamOk) {
+                        s_applyMemoFullSkips.fetch_add(1, std::memory_order_relaxed);
+                        EnsureAuroraFrameActive();
+                        GXMarkFrameWork();
+                        GXCallDisplayList(stream, streamBytes);
+                        SyncAppliedVtxStateFromHleReal();
+                        return;
+                    }
+                    memoSkipDescFmt = false;
+                    memoSkipArrays = false;
+                }
+            }
             scanOk = entry.scanOk;
             maxIdx = entry.maxIdx;
             sawIdx = entry.sawIdx;
@@ -1812,20 +2163,25 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
                 const uint64_t contentDigest =
                     probe.digestValid ? probe.contentDigest : DlContentDigest(list, nbytes);
                 StoreDlScanCache(listAddr, nbytes, scanLayoutHash, contentDigest,
-                                 probe.writeGeneration, mayContainDraw, entry, std::move(cpWrites),
+                                 probe.writeGeneration, mayContainDraw, auroraList, entry,
+                                 std::move(cpWrites),
                                  storeFlattened ? flattened.data() : nullptr,
                                  storeFlattened ? static_cast<uint32_t>(flattened.size()) : 0u);
+                stampRecord = DlScanCache().Find(DlScanCacheKey(listAddr, nbytes, scanLayoutHash));
+                stampDigest = contentDigest;
             }
         }
 
         if (needsFlatten) {
             bool flattenApplyOk = flattenOk && scanOk && auroraStream != nullptr && auroraStreamBytes != 0;
             if (flattenApplyOk) {
-                ApplyAuroraVtxDesc();
-                ApplyAuroraVtxAttrFmtForDisplayList(dlVtxFmt, dlVtxFmtMixed);
-                const bool flattenArraysOk =
+                if (!memoSkipDescFmt) {
+                    ApplyAuroraVtxDesc();
+                    ApplyAuroraVtxAttrFmtForDisplayList(dlVtxFmt, dlVtxFmtMixed);
+                }
+                const bool flattenArraysOk = memoSkipArrays ||
                     ApplyAuroraArraysForDisplayList(maxIdx, sawIdx, dlVtxFmt, dlVtxFmtMixed);
-                const bool flattenXfOk =
+                const bool flattenXfOk = memoSkipArrays ||
                     ApplyAuroraIndexedXFArraysForDisplayList(maxXfIdx, maxXfBytes, sawXfIdx);
                 flattenApplyOk = flattenArraysOk && flattenXfOk;
             }
@@ -1835,6 +2191,8 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
                 GXCallDisplayList(auroraStream, auroraStreamBytes);
                 // No flip back to GX_DIRECT here
                 SyncAppliedVtxStateFromHleReal();
+                ApplyMemoStamp(stampRecord, probe.writeGeneration, stampDigest, dlVtxFmt,
+                               dlVtxFmtMixed, sawIdx, dlHasCpWrites);
                 return;
             }
 
@@ -1843,10 +2201,14 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
             bool arraysOk = false;
             bool xfOk = false;
             if (scanOk) {
-                ApplyAuroraVtxDesc();
-                ApplyAuroraVtxAttrFmtForDisplayList(dlVtxFmt, dlVtxFmtMixed);
-                arraysOk = ApplyAuroraArraysForDisplayList(maxIdx, sawIdx, dlVtxFmt, dlVtxFmtMixed);
-                xfOk = ApplyAuroraIndexedXFArraysForDisplayList(maxXfIdx, maxXfBytes, sawXfIdx);
+                if (!memoSkipDescFmt) {
+                    ApplyAuroraVtxDesc();
+                    ApplyAuroraVtxAttrFmtForDisplayList(dlVtxFmt, dlVtxFmtMixed);
+                }
+                arraysOk = memoSkipArrays ||
+                    ApplyAuroraArraysForDisplayList(maxIdx, sawIdx, dlVtxFmt, dlVtxFmtMixed);
+                xfOk = memoSkipArrays ||
+                    ApplyAuroraIndexedXFArraysForDisplayList(maxXfIdx, maxXfBytes, sawXfIdx);
                 applyOk = arraysOk && xfOk;
             }
             if (applyOk) {
@@ -1855,6 +2217,8 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
                 GXCallDisplayList(list, nbytes);
 
                 SyncAppliedVtxStateFromHleReal();
+                ApplyMemoStamp(stampRecord, probe.writeGeneration, stampDigest, dlVtxFmt,
+                               dlVtxFmtMixed, sawIdx, dlHasCpWrites);
                 return;
             }
 

@@ -196,6 +196,19 @@ void PrintGxDedupWindow(uint64_t firstFrame, uint64_t lastFrame);
 // nothing while no check ran.
 void PrintHashCheckWindow(uint64_t firstFrame, uint64_t lastFrame);
 
+// ---- the applymemo experiment (Switch Diagnostics "applymemo"; state in gx_dl.cpp) ----------
+//
+// While the switch is on, a display-list scan-cache hit can skip the apply
+// bundle (vertex descriptors, formats and arrays) when the memo's two halves
+// both still match the state the last successful hand-off published. The
+// [applymemo] line for a perftimer window, printed with the [calls] lines:
+// evaluations, desc/fmt-half and arrays-half hits, full skips, eligibility
+// exclusions, first-mismatch tallies and live-read disagreements. A nonzero
+// disagreement count means the memo skipped a desc apply Aurora did not
+// already hold — the design's kill signal. Prints nothing while no
+// evaluation ran.
+void PrintApplyMemoWindow(uint64_t firstFrame, uint64_t lastFrame);
+
 // ---- the dstep mode (Switch Diagnostics "dstep"; state in gx_worker.cpp) ----------------------
 //
 // The double-step full-speed mode, built on the gxskip sink: while the switch is on and the

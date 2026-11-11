@@ -71,6 +71,9 @@ void PrintNativeOverrideCounts(uint64_t firstFrame, uint64_t lastFrame) {
     // The hashcheck diagnostic's line (gx_worker.h) shares it too; it prints nothing
     // while no layout-hash check ran in the window (the switch was off).
     GxWorker::PrintHashCheckWindow(firstFrame, lastFrame);
+    // The applymemo experiment's line (gx_worker.h) shares it too; it prints nothing
+    // while no memo evaluation ran in the window (the switch was off).
+    GxWorker::PrintApplyMemoWindow(firstFrame, lastFrame);
     // The dstep mode's line (gx_worker.h) shares it too; it prints nothing while no tick in
     // the window was sunk by the mode.
     GxWorker::PrintDstepWindow(firstFrame, lastFrame);

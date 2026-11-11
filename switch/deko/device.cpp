@@ -65,6 +65,10 @@ extern "C" void spm_gxdedup_set(bool enabled);
 // diag_init and diag_set forward the "hashcheck" switch to it.
 extern "C" void spm_hashcheck_set(bool enabled);
 
+// The runtime's display-list apply memo (gx_dl.cpp), declared here the same way:
+// diag_init and diag_set forward the "applymemo" switch to it.
+extern "C" void spm_applymemo_set(bool enabled);
+
 // The runtime's double-step mode (gx_worker.cpp), declared here the same way:
 // diag_init and diag_set forward the "dstep" switch to it.
 extern "C" void spm_dstep_set(bool enabled);
@@ -149,6 +153,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"gxspin", &Diag::gxSpin},       {"gxfutex", &Diag::gxFutex},     {"gxsvclate", &Diag::gxSvcLate},
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
     {"hashcheck", &Diag::hashCheck},
+    {"applymemo", &Diag::applyMemo},
     {"bboxcache", &Diag::bboxCache},   {"bboxshadow", &Diag::bboxShadow},
     {"hitindex", &Diag::hitIndex},   {"hitindexshadow", &Diag::hitIndexShadow},
 };
@@ -421,6 +426,10 @@ void diag_init() {
     // start. The check only recomputes and counts, so boot and the title are checked
     // the same as gameplay.
     if (g_diag.hashCheck) spm_hashcheck_set(true);
+    // An applymemo=1 in dk_diag.txt arms the runtime's display-list apply memo
+    // from the start. The memo is consulted per display-list call, so this
+    // only sets the initial state; the menu flips it live.
+    if (g_diag.applyMemo) spm_applymemo_set(true);
     // A dstep=1 in dk_diag.txt arms the runtime's double-step mode from the start. The
     // runtime only doubles frames while its gameplay gate is open, so boot and the title
     // are untouched either way.
@@ -495,6 +504,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "godmode")) spm_godmode_set(on);
     else if (!std::strcmp(key, "gxdedup")) spm_gxdedup_set(on);
     else if (!std::strcmp(key, "hashcheck")) spm_hashcheck_set(on);
+    else if (!std::strcmp(key, "applymemo")) spm_applymemo_set(on);
     else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
     else if (!std::strcmp(key, "dflushcoal")) spm_dflushcoal_set(on);
     else if (!std::strcmp(key, "dcnosync")) spm_dcnosync_set(on);
