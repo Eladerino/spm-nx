@@ -93,6 +93,10 @@ std::array<absl::flat_hash_map<RuntimeTextureKey, ReplacementIndexEntry>, 4> s_b
 struct CompositeIndexEntry {
   std::filesystem::path path;
   std::string kind; // the generator's word for the prompt (disc, face, glyph, plaindisc); kept for log lines
+  // Hash of the manifest line and the shipped overlay's bytes, taken at index time. The
+  // composite disk cache keys on it, so a regenerated overlay (kind, specs or art) can
+  // never be served a composite built from an older generation of the same prompt.
+  std::string overlayTag;
   // The buttons the prompt holds, from the manifest's <button>:<cx>:<cy>:<radius> specs:
   // the gamepad action each Wii button routes to (Keybinds order, the runtime's table) and
   // where it sits, as fractions of the texture. With these the overlay's letters can be
@@ -698,6 +702,16 @@ void build_index() noexcept {
             .fr = std::strtof(std::string(parts[3]).c_str(), nullptr),
         });
       }
+      {
+        // The tag covers the whole manifest line (filename, kind, every button spec)
+        // plus the shipped overlay's bytes: either changing is a new generation.
+        std::string tagInput = line;
+        tagInput += '\n';
+        if (std::ifstream overlayFile(entry.path, std::ios::binary); overlayFile) {
+          tagInput.append(std::istreambuf_iterator<char>(overlayFile), std::istreambuf_iterator<char>());
+        }
+        entry.overlayTag = fmt::format("{:016x}", XXH64(tagInput.data(), tagInput.size(), 0));
+      }
       s_compositeIndex[style].try_emplace(*parsed, std::move(entry));
     }
     if (!s_compositeIndex[style].empty()) {
@@ -913,9 +927,12 @@ std::string composite_bindings_tag() noexcept {
   return fmt::format("{:016x}", XXH64(joined.data(), joined.size(), 0));
 }
 
-std::filesystem::path composite_cache_path(const RuntimeTextureKey& key, bool packBase) noexcept {
+std::filesystem::path composite_cache_path(const RuntimeTextureKey& key, bool packBase,
+                                           const std::string& overlayTag) noexcept {
   const char* styleName = s_appliedButtonIconStyle >= 0 ? kButtonIconStyles[s_appliedButtonIconStyle] : "common";
-  auto dir = s_compositeCacheRoot / (std::string(styleName) + "-" + composite_bindings_tag()) / (packBase ? "pack" : "guest");
+  auto dir = s_compositeCacheRoot /
+             (std::string(styleName) + "-" + composite_bindings_tag() + "-" + overlayTag) /
+             (packBase ? "pack" : "guest");
   return dir / format_replacement_filename(key);
 }
 
@@ -1110,7 +1127,7 @@ gfx::TextureHandle load_composited_texture(const RuntimeTextureKey& key, const G
   }
   const uint8_t marker = entry != nullptr ? entry->marker : 0;
 
-  const auto cachePath = composite_cache_path(key, entry != nullptr);
+  const auto cachePath = composite_cache_path(key, entry != nullptr, overlayEntry.overlayTag);
   std::error_code ec;
   if (std::filesystem::is_regular_file(cachePath, ec)) {
     if (auto cached = load_texture_file(cachePath); cached.has_value() &&
