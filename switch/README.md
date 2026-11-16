@@ -89,19 +89,8 @@ package seeds it with `button_icons/`; the game creates the rest on the first ru
 delete that folder to "clean up": your saves and the caches that make later launches fast
 are in it.
 
-**Updating:** unzip the new release over the old `switch/spm-nx/` folder, **merging**, and
-replace the NRO and its companion files. Never delete the `spm-nx` folder and replace it:
-`UserData/` and `game/` are yours and must carry over, saves, settings and caches included,
-and a fresh folder starts with none of them. The one release-owned corner is
-`UserData/button_icons/`, which the unzip refreshes so a stale icon set cannot win over the
-current one.
-
-> [!IMPORTANT]
-> **One manual step when updating from a build that had the tutorial prompt experiment:**
-> if `UserData/button_icons/nintendo/marker7` exists on your card, delete that folder by
-> hand. Unzipping a release cannot delete files, so without this step the old marker files
-> stay live: the Shooting Star aiming cursor stays hidden and they can misfire elsewhere.
-> Current builds stage no marker7 at all.
+**Updating:** replace the .nro file with the new one. Nothing else needs to change unless
+the release notes say so.
 
 One catch: the game never rewrites an existing
 `UserData/Config.toml`, so an install that started on an older release keeps the settings it
