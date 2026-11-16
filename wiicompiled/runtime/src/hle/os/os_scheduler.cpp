@@ -323,6 +323,8 @@ static void SelectThreadSwitch(CpuContext* cpu, uint32_t runningContext, bool re
                 if (::Memory::Read32(kSchedulerPendingFlagAddr) != 0) {
                     break;
                 }
+                // sealdefer (gx_worker.h): a pending seal whose copy has replayed runs while nothing is runnable
+                GxWorker::FireSealIfReady(GxWorker::SealFire::Idle);
                 VI_HLE_WaitForNextRetracePoll();
             }
 

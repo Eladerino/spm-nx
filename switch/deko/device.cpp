@@ -68,6 +68,9 @@ extern "C" void spm_hashcheck_set(bool enabled);
 // The runtime's display-list apply memo (gx_dl.cpp), declared here the same way:
 // diag_init and diag_set forward the "applymemo" switch to it.
 extern "C" void spm_applymemo_set(bool enabled);
+// The runtime's sealdefer switch lives in gx_worker.cpp (g_sealDeferRequested, default off there);
+// diag_init and diag_set forward the "sealdefer" switch to it.
+extern "C" void spm_sealdefer_set(bool enabled);
 
 // The runtime's double-step mode (gx_worker.cpp), declared here the same way:
 // diag_init and diag_set forward the "dstep" switch to it.
@@ -154,6 +157,7 @@ constexpr DiagKey kDiagKeys[] = {
     {"padrec", &Diag::padRecord},     {"padreplay", &Diag::padReplay},
     {"hashcheck", &Diag::hashCheck},
     {"applymemo", &Diag::applyMemo},
+    {"sealdefer", &Diag::sealDefer},
     {"bboxcache", &Diag::bboxCache},   {"bboxshadow", &Diag::bboxShadow},
     {"hitindex", &Diag::hitIndex},   {"hitindexshadow", &Diag::hitIndexShadow},
 };
@@ -430,6 +434,7 @@ void diag_init() {
     // (the Diag default). The memo is consulted per display-list call, so this
     // only sets the initial state; the menu flips it live.
     if (g_diag.applyMemo) spm_applymemo_set(true);
+    if (g_diag.sealDefer) spm_sealdefer_set(true);
     // A dstep=1 in dk_diag.txt arms the runtime's double-step mode from the start. The
     // runtime only doubles frames while its gameplay gate is open, so boot and the title
     // are untouched either way.
@@ -505,6 +510,7 @@ bool diag_set(const char* key, bool on) {
     else if (!std::strcmp(key, "gxdedup")) spm_gxdedup_set(on);
     else if (!std::strcmp(key, "hashcheck")) spm_hashcheck_set(on);
     else if (!std::strcmp(key, "applymemo")) spm_applymemo_set(on);
+    else if (!std::strcmp(key, "sealdefer")) spm_sealdefer_set(on);
     else if (!std::strcmp(key, "dstep")) spm_dstep_set(on);
     else if (!std::strcmp(key, "dflushcoal")) spm_dflushcoal_set(on);
     else if (!std::strcmp(key, "dcnosync")) spm_dcnosync_set(on);

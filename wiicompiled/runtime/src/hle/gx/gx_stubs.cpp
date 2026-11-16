@@ -130,7 +130,15 @@ PPC_NATIVE_OVERRIDE_VOID(8028d058, GX__FinishInterruptHandler_8016ed94, (), ());
 
 extern "C" void GX__DrawDone_8016eab0() {
     try { Memory::Write8(kGxDrawDoneFlagAddr, 0); } catch (...) {}
-    GXDrawDone(); GX__FinishInterruptHandler_8016ed94();
+    // sealdefer (gx_worker.h, NoSyncIfSealPending): right after the copy, with the seal pending and
+    // nothing recorded since, Aurora's GXDrawDone is left to the pending seal's own sync; the guest's
+    // flags are written either way
+    if (GxWorker::SealPendingAtMark()) {
+        GxWorker::NoteDrawDoneDeferred();
+    } else {
+        GXDrawDone();
+    }
+    GX__FinishInterruptHandler_8016ed94();
 }
 PPC_NATIVE_OVERRIDE_VOID(8028cd50, GX__DrawDone_8016eab0, (), ());
 

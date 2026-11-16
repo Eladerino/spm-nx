@@ -190,6 +190,11 @@ uint64_t g_newestFrameMark = 0;
 uint64_t g_prevFrameMark = 0;
 bool g_reserved = false;         // between Reserve and Commit
 bool g_draining = false;
+// sealdefer (gx_worker.h): the pending seal, game thread only
+bool g_sealPending = false;
+uint64_t g_sealMark = 0;
+void (*g_sealFn)() = nullptr;
+std::chrono::steady_clock::time_point g_sealArmedAt{};
 // Written only by the owner at a frame boundary; read by the perftimer's printing thread too.
 std::atomic<uint8_t> g_mode{static_cast<uint8_t>(Mode::Off)};
 std::atomic<uint8_t> g_requestedMode{static_cast<uint8_t>(Mode::Off)};
@@ -300,6 +305,17 @@ Stat g_workerBlockedMicros[kWorkerBlockedSites];
 // interval since it (under 20 ms, 20-30, 30-40, 40 or more), so an average of 1.68 retraces can be
 // told apart from a steady cadence.
 Stat g_framesByRetraces[4];
+// sealdefer: the same retrace histogram, split by the switch's state at each frame boundary
+Stat g_sdByRetraces[2][4];
+Stat g_sdDeferred, g_sdDrawDoneDeferred, g_sdFireMarkPassed, g_sdLagMicros, g_sdLatchMicros, g_sdSyncMicros,
+    g_sdEndFrameMicros;
+Stat g_sdFires[static_cast<size_t>(SealFire::Count)];
+uint64_t g_sdLagMaxMicros = 0;
+struct SdDrainCause {
+    uint32_t cause = 0;
+    Stat count;
+};
+SdDrainCause g_sdDrainCauses[8];
 Stat g_framesByInterval[4];
 Stat g_ownerServiceSkips;    // gxsvclate: timeouts that skipped the service (waited under the threshold)
 
@@ -875,6 +891,11 @@ void DrainUpTo(uint32_t cause, uint64_t target) {
     if (!t_owner) {
         return;
     }
+    // sealdefer: a drain needs the pending seal first (never from inside a drain: the seal's own
+    // latch drains, with the pending flag already cleared)
+    if (g_sealPending && !g_draining) {
+        FireSeal(SealFire::Drain, cause);
+    }
     if (cause == kDcFlushRangeCause && DcFlushRedundant()) {
         // dflushcoal: an earlier flush this frame already drained, and nothing has
         // been recorded since, so there is nothing new for this flush to wait out.
@@ -1024,6 +1045,11 @@ void WaitForFrameMark() {
 }
 
 void* Reserve(ReplayFn replay, size_t size, size_t align) {
+    // sealdefer: the next frame's first record waits for the pending seal (its GX calls must reach
+    // Aurora after the previous frame's end_frame)
+    if (g_sealPending && t_owner && !g_draining) {
+        FireSeal(SealFire::Record);
+    }
     if (align > kAlign || size > kRingBytes / 4) {
         return nullptr;
     }
@@ -1117,6 +1143,75 @@ bool DiagnosticsActive() noexcept {
            g_dstepRequested.load(std::memory_order_relaxed);
 }
 
+// ---- sealdefer (gx_worker.h) ------------------------------------------------------------------
+std::atomic<bool> g_sealDeferRequested{false};
+bool SealDeferRequested() noexcept { return g_sealDeferRequested.load(std::memory_order_relaxed); }
+bool SealPending() noexcept { return g_sealPending; }
+bool SealPendingAtMark() noexcept { return g_sealPending && SealDeferRequested() && t_owner && g_write == g_sealMark; }
+bool SealDeferEligible() noexcept {
+    return SealDeferRequested() && t_owner && Threaded() && !DiagnosticsActive() && !g_draining && !g_sealPending;
+}
+void SealDeferArm(void (*seal)()) noexcept {
+    g_sealFn = seal;
+    g_sealMark = g_newestFrameMark;
+    g_sealArmedAt = std::chrono::steady_clock::now();
+    g_sealPending = true;
+    g_sdDeferred.Add();
+}
+void SealDeferTake() noexcept { g_sealPending = false; }
+void FireSeal(SealFire why, uint32_t drainCause) noexcept {
+    if (!g_sealPending || !t_owner || g_sealFn == nullptr) {
+        return;
+    }
+    g_sdFires[static_cast<size_t>(why)].Add();
+    if (why == SealFire::Drain) {
+        // the drain causes behind need-fires, up to eight distinct ones a run
+        bool noted = false;
+        for (auto& c : g_sdDrainCauses) {
+            if (c.count.value.load(std::memory_order_relaxed) != 0 && c.cause == drainCause) {
+                c.count.Add();
+                noted = true;
+                break;
+            }
+        }
+        if (!noted) {
+            for (auto& c : g_sdDrainCauses) {
+                if (c.count.value.load(std::memory_order_relaxed) == 0) {
+                    c.cause = drainCause;
+                    c.count.Add();
+                    break;
+                }
+            }
+        }
+    }
+    const bool passed = Threaded() ? ConsumedCounter() >= g_sealMark : g_drainMark >= g_sealMark;
+    if (passed) {
+        g_sdFireMarkPassed.Add();
+    }
+    const uint64_t lag = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - g_sealArmedAt).count());
+    g_sdLagMicros.Add(lag);
+    if (lag > g_sdLagMaxMicros) {
+        g_sdLagMaxMicros = lag;
+    }
+    g_sealFn();
+}
+void FireSealIfReady(SealFire why) noexcept {
+    if (!g_sealPending || !t_owner) {
+        return;
+    }
+    if (Threaded() ? ConsumedCounter() < g_sealMark : g_drainMark < g_sealMark) {
+        return;
+    }
+    FireSeal(why);
+}
+void NoteSealWaits(uint64_t latchMicros, uint64_t syncMicros, uint64_t endFrameMicros) noexcept {
+    g_sdLatchMicros.Add(latchMicros);
+    g_sdSyncMicros.Add(syncMicros);
+    g_sdEndFrameMicros.Add(endFrameMicros);
+}
+void NoteDrawDoneDeferred() noexcept { g_sdDrawDoneDeferred.Add(); }
+
 void FrameBoundary() {
     if (!g_hasOwner) {
         g_hasOwner = true;
@@ -1133,6 +1228,7 @@ void FrameBoundary() {
         const auto intervalMicros =
             std::chrono::duration_cast<std::chrono::microseconds>(boundary - s_lastBoundary).count();
         g_framesByRetraces[std::min<uint64_t>(retraces - s_lastRetraces, 3)].Add();
+        g_sdByRetraces[SealDeferRequested() ? 1 : 0][std::min<uint64_t>(retraces - s_lastRetraces, 3)].Add();
         g_framesByInterval[intervalMicros < 20000 ? 0 : intervalMicros < 30000 ? 1 : intervalMicros < 40000 ? 2 : 3].Add();
         s_lastRetraces = retraces;
         s_lastBoundary = boundary;
@@ -1449,6 +1545,71 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                      static_cast<unsigned long long>(byInterval[0]), static_cast<unsigned long long>(byInterval[1]),
                      static_cast<unsigned long long>(byInterval[2]), static_cast<unsigned long long>(byInterval[3]));
     }
+    {
+        // [sealdefer]: printed while the switch is on or anything was deferred this window
+        const uint64_t deferred = g_sdDeferred.TakeDelta();
+        uint64_t fires[static_cast<size_t>(SealFire::Count)];
+        uint64_t fireTotal = 0;
+        for (size_t i = 0; i < static_cast<size_t>(SealFire::Count); ++i) {
+            fires[i] = g_sdFires[i].TakeDelta();
+            fireTotal += fires[i];
+        }
+        const uint64_t drawDone = g_sdDrawDoneDeferred.TakeDelta();
+        const uint64_t passed = g_sdFireMarkPassed.TakeDelta();
+        const uint64_t lagMicros = g_sdLagMicros.TakeDelta();
+        const uint64_t latchMicros = g_sdLatchMicros.TakeDelta();
+        const uint64_t syncMicros = g_sdSyncMicros.TakeDelta();
+        const uint64_t endMicros = g_sdEndFrameMicros.TakeDelta();
+        uint64_t sdRetraces[2][4];
+        for (int s = 0; s < 2; ++s) {
+            for (int i = 0; i < 4; ++i) {
+                sdRetraces[s][i] = g_sdByRetraces[s][i].TakeDelta();
+            }
+        }
+        if (SealDeferRequested() || deferred != 0 || fireTotal != 0) {
+            const double f = fireTotal ? static_cast<double>(fireTotal) : 1.0;
+            char drains[256];
+            int at = 0;
+            drains[0] = '\0';
+            for (auto& c : g_sdDrainCauses) {
+                const uint64_t n = c.count.TakeDelta();
+                if (n != 0 && at < static_cast<int>(sizeof drains) - 40) {
+                    const char* name = FixedCauseName(c.cause);
+                    if (name != nullptr) {
+                        at += std::snprintf(drains + at, sizeof drains - at, " drain:%s %llu", name,
+                                            static_cast<unsigned long long>(n));
+                    } else {
+                        at += std::snprintf(drains + at, sizeof drains - at, " drain:0x%08X %llu",
+                                            static_cast<unsigned>(c.cause), static_cast<unsigned long long>(n));
+                    }
+                }
+            }
+            std::fprintf(stderr,
+                         "[sealdefer] frames %llu-%llu: switch %d, seals deferred %llu, drawdone-deferred %llu; fires idle %llu "
+                         "pace %llu viwait %llu record %llu drain %llu ensure %llu present %llu retrace %llu exit %llu (by drain "
+                         "cause:%s); present to fire %.2f ms mean (max %.2f ms this run); seal waits ms per fire: latch %.3f, "
+                         "sync %.3f, end_frame %.3f; mark already passed at %.1f%% of fires\n",
+                         static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                         SealDeferRequested() ? 1 : 0, static_cast<unsigned long long>(deferred),
+                         static_cast<unsigned long long>(drawDone), static_cast<unsigned long long>(fires[0]),
+                         static_cast<unsigned long long>(fires[1]), static_cast<unsigned long long>(fires[2]),
+                         static_cast<unsigned long long>(fires[3]), static_cast<unsigned long long>(fires[4]),
+                         static_cast<unsigned long long>(fires[5]), static_cast<unsigned long long>(fires[6]),
+                         static_cast<unsigned long long>(fires[7]), static_cast<unsigned long long>(fires[8]),
+                         at ? drains : " none", static_cast<double>(lagMicros) / 1000.0 / f,
+                         static_cast<double>(g_sdLagMaxMicros) / 1000.0, static_cast<double>(latchMicros) / 1000.0 / f,
+                         static_cast<double>(syncMicros) / 1000.0 / f, static_cast<double>(endMicros) / 1000.0 / f,
+                         fireTotal ? 100.0 * static_cast<double>(passed) / f : 0.0);
+            std::fprintf(stderr,
+                         "[sealdefer] frames %llu-%llu: frames by retraces with sealdefer off 0:%llu 1:%llu 2:%llu 3+:%llu, "
+                         "on 0:%llu 1:%llu 2:%llu 3+:%llu\n",
+                         static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                         static_cast<unsigned long long>(sdRetraces[0][0]), static_cast<unsigned long long>(sdRetraces[0][1]),
+                         static_cast<unsigned long long>(sdRetraces[0][2]), static_cast<unsigned long long>(sdRetraces[0][3]),
+                         static_cast<unsigned long long>(sdRetraces[1][0]), static_cast<unsigned long long>(sdRetraces[1][1]),
+                         static_cast<unsigned long long>(sdRetraces[1][2]), static_cast<unsigned long long>(sdRetraces[1][3]));
+        }
+    }
     if (natSkips != 0) {
         // natnosync's scoreboard: non-GX natives reached with records pending that ran without
         // draining. The wait-by-cause lines below say where the wait landed instead.
@@ -1650,4 +1811,11 @@ extern "C" uint32_t SpmGxWorkerThreadHandle(void) {
 // The invtexq experiment's hook, the same pattern: QueueIfAsked calls read it at dispatch.
 extern "C" void spm_invtexq_set(bool enabled) {
     GxWorker::g_queueIfAskedRequested.store(enabled, std::memory_order_relaxed);
+}
+
+// The sealdefer switch's hook (dk_diag "sealdefer", forwarded by the deko3d diag layer): read at
+// each present, so a flip takes effect at the next one.
+extern "C" void spm_sealdefer_set(bool enabled) {
+    GxWorker::g_sealDeferRequested.store(enabled, std::memory_order_relaxed);
+    std::fprintf(stderr, "[sealdefer] switch %s\n", enabled ? "on" : "off");
 }

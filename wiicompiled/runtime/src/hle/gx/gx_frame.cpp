@@ -1,4 +1,5 @@
 #include "gx_internal.h"
+#include "gx_worker.h"
 #include "runtime_log.h"
 
 #include <cstdio>
@@ -88,6 +89,7 @@ void BeginNextAuroraFrameWithRetry(std::chrono::milliseconds timeout) {
 }
 
 void EnsureAuroraFrameActive() {
+    GxWorker::FireSeal(GxWorker::SealFire::Ensure);  // sealdefer: GX work for the next frame needs the seal
     if (!g_auroraFrameActive.load(std::memory_order_acquire)) {
         BeginNextAuroraFrameWithRetry();
     }

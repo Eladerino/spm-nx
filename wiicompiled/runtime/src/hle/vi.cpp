@@ -18,6 +18,8 @@
 #include "guest_profiler.h"
 #include "spm_map_sweep.h"
 #include "save_state.h"
+#include "gx_worker.h"
+#include "netplay_session.h"
 
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
@@ -789,6 +791,8 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
             }
             // Outside startup, VI black remains a pure black presentation.
             // Unpaced: this present already runs in retrace context.
+            // sealdefer: the pending seal goes before this present
+            GxWorker::FireSeal(GxWorker::SealFire::Retrace);
             VI_HLE_PresentFrame(shouldPresentXfb, false);
         } else if (g_auroraFrameHadWork.load(std::memory_order_acquire) && !shouldPresentXfb && !isBlack) {
             // GX work is in progress but frame not complete - just poll window events
@@ -959,6 +963,8 @@ void PaceToRetraceBoundary(Clock::time_point deadline) {
         if (now >= deadline) {
             break;
         }
+        // sealdefer: a pending seal whose copy has replayed runs here, inside time spent waiting anyway
+        GxWorker::FireSealIfReady(GxWorker::SealFire::Pace);
         if (deadline - now > kServiceSlice + kFinalSpinWindow) {
             SleepPreciselyUntil(now + kServiceSlice);
             OS_HLE_ProcessAlarmsDeferred(8);
@@ -1002,7 +1008,98 @@ uint64_t DvdReadNanosTotal();
 extern uint64_t g_copyDispWorkerWaitNanos;  // gx_copy.cpp
 uint32_t DvdReadCount();
 
+// ---- sealdefer (gx_worker.h): the seal half of a present, run at once or deferred -------------
+// A present is two halves. The game half (the frame boundary, the gxskip/dstep hooks, the timers,
+// the schedule computed, the XFB flags cleared, the pacing) runs at the present. The seal half (the
+// copy latch, AuroraGxSync and the draw-dump counters, the schedule applied, aurora_end_frame, the
+// overlay's frame advance, the next frame's pre-warm) runs right after it, or, with sealdefer on
+// and the present eligible, later at a fire point on this same thread (GxWorker::FireSeal).
+struct PresentSchedule {
+    bool paced = false;
+    bool producerPaced = true;
+    uint64_t anchorNanos = 0, intervalNanos = 0;
+};
+struct PendingSeal {
+    bool presentedXfb = true;
+    PresentSchedule schedule;
+};
+static PendingSeal s_pendingSeal;  // game thread only
+
+static void ApplyPresentSchedule(const PresentSchedule& s) {
+    if (s.paced) {
+        aurora_report_producer_paced(s.producerPaced);
+        aurora_set_present_schedule(s.anchorNanos, s.intervalNanos);
+    } else {
+        aurora_set_present_schedule(0, 0);
+    }
+}
+
+// The draw-dump and draw-limit counters are Aurora's decoder's: with its decode thread on, let it
+// finish the frame first (GXCopyDisp usually has already).
+static void PresentXfbBookkeeping() {
+    AuroraGxSync();
+    const uint32_t pf = ++s_presentedXfbFrames;
+    static const int32_t dumpTarget = [] { std::ifstream in("drawdump.txt"); int32_t f = -1; in >> f; return f; }();
+    static const bool cullTest = std::ifstream("depth_test.txt").good();
+    g_spmDrawDump = ((dumpTarget >= 0 && pf == static_cast<uint32_t>(dumpTarget)) || g_spmSweepDump) ? 1 : 0;
+    static const int envTest = [] { const char* e = std::getenv("SPM_CULL_TEST"); return e ? std::atoi(e) : 0; }();  // 1 = no culling, 2 = no depth test (diagnostic)
+    static const unsigned drawLimit = [] { const char* e = std::getenv("SPM_DRAW_LIMIT"); return e ? static_cast<unsigned>(std::atoi(e)) : ~0u; }();
+    g_spmDrawLimit = drawLimit;
+    g_spmDrawIdx = 0;
+    g_spmCullOff = envTest ? envTest : ((cullTest && pf >= 6900u) ? 2 : 0);
+}
+
+// The deferred seal, run by GxWorker::FireSeal on the game thread. The pending flag is cleared
+// first, so nothing it calls (the latch's drain, the pre-warm) can fire it again.
+static void SealNow() {
+    GxWorker::SealDeferTake();
+    const PendingSeal seal = s_pendingSeal;
+    struct Abandon {
+        bool done = false;
+        ~Abandon() {
+            if (!done) {
+                GxWorker::NotePresentAbandoned();
+            }
+        }
+    } abandon;
+    const auto us = [](std::chrono::steady_clock::duration d) {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(d).count());
+    };
+    const auto t0 = std::chrono::steady_clock::now();
+    GxWorker::WaitForFrameMark();
+    const auto t1 = std::chrono::steady_clock::now();
+    if (seal.presentedXfb) {
+        PresentXfbBookkeeping();
+    }
+    const auto t2 = std::chrono::steady_clock::now();
+    ApplyPresentSchedule(seal.schedule);
+    aurora_end_frame();
+    GxWorker::NoteSealCompleted();
+    abandon.done = true;
+    const auto t3 = std::chrono::steady_clock::now();
+    GxWorker::NoteSealWaits(us(t1 - t0), us(t2 - t1), us(t3 - t2));
+    if (!RuntimeFrontend::Active()) settings_overlay::AdvancePresentedFrame();
+    g_auroraFrameActive.store(false, std::memory_order_release);
+    g_auroraFrameHadWork.store(false, std::memory_order_release);
+    UpdateAuroraAndProcessEvents();
+    if (BeginAuroraFrame()) {
+        g_auroraFrameActive.store(true, std::memory_order_release);
+    }
+}
+
+// The vi-side conditions under which a present may defer its seal (gx_worker.h adds its own).
+static bool SealDeferEligibleHere(bool presentedXfb) {
+    if (!presentedXfb || !GxWorker::SealDeferEligible()) return false;
+    if (DetClock::Enabled() || RuntimeFrontend::Active() || NetplaySession::Active()) return false;
+    if (aurora_get_frame_interpolation_fps() != 0) return false;
+    static const bool drawDumpFile = std::ifstream("drawdump.txt").good();
+    if (drawDumpFile || g_spmSweepDump) return false;
+    return true;
+}
+
 void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
+    // sealdefer: the previous present's pending seal goes first
+    GxWorker::FireSeal(GxWorker::SealFire::Present);
     if (s_presentSequenceActive.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
@@ -1057,21 +1154,14 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     // still clears the sequence flag), after the sink hooks and before AuroraGxSync and
     // the seal, until replay has passed the newest frame's copy: the copy's resolve
     // annotation must land in its own frame's pass list before aurora_end_frame seals it.
-    GxWorker::WaitForFrameMark();
+    // sealdefer: an eligible XFB present skips the latch here and leaves its seal pending
+    const bool deferSeal = SealDeferEligibleHere(presentedXfb);
+    if (!deferSeal) {
+        GxWorker::WaitForFrameMark();
+    }
     if (presentedXfb) {
-        {
-            // The draw-dump and draw-limit counters below are Aurora's decoder's: with its decode
-            // thread on, let it finish the frame first (GXCopyDisp usually has already).
-            AuroraGxSync();
-            const uint32_t pf = ++s_presentedXfbFrames;
-            static const int32_t dumpTarget = [] { std::ifstream in("drawdump.txt"); int32_t f = -1; in >> f; return f; }();
-            static const bool cullTest = std::ifstream("depth_test.txt").good();
-            g_spmDrawDump = ((dumpTarget >= 0 && pf == static_cast<uint32_t>(dumpTarget)) || g_spmSweepDump) ? 1 : 0;
-            static const int envTest = [] { const char* e = std::getenv("SPM_CULL_TEST"); return e ? std::atoi(e) : 0; }();  // 1 = no culling, 2 = no depth test (diagnostic)
-            static const unsigned drawLimit = [] { const char* e = std::getenv("SPM_DRAW_LIMIT"); return e ? static_cast<unsigned>(std::atoi(e)) : ~0u; }();
-            g_spmDrawLimit = drawLimit;
-            g_spmDrawIdx = 0;
-            g_spmCullOff = envTest ? envTest : ((cullTest && pf >= 6900u) ? 2 : 0);
+        if (!deferSeal) {
+            PresentXfbBookkeeping();
         }
         // SPM bring-up: with drawdump.txt present, report any guest write into the DOL's
         // read-only sections (.rodata/.sdata2) once the game has been running a while.
@@ -1106,6 +1196,7 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     }
     Clock::time_point paceDeadline{};
     bool paceThisFrame = false;
+    PresentSchedule schedule;
     // Deterministic mode paces in the scheduler's idle wait instead, and must not deliver the
     // retrace from here (PaceToRetraceBoundary does), so frames present as soon as they are sealed.
     if (DetClock::Enabled() || RuntimeFrontend::Active()) {
@@ -1142,7 +1233,8 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
         // slots (a windowed backstop lowers the slot target only under sustained overload).
         // Room changes and file loads always overrun; counting them took the inserted frames away after every door.
         const int seq = SpmMapSweep::Seq();
-        aurora_report_producer_paced(retracesElapsed <= 1 || seq == 3 || seq == 5);
+        schedule.paced = true;
+        schedule.producerPaced = retracesElapsed <= 1 || seq == 3 || seq == 5;
         // Stamp the sealed frame's presentation schedule so Aurora paces interpolated slots against
         // this same VI timeline. Anchor to the NEXT retrace boundary, not the period just produced,
         // since slots anchored to the current period would already be expired by seal time. Encoding
@@ -1155,21 +1247,29 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
             anchorNanos = s_lastPresentAnchorNanos + intervalNanos;
         }
         s_lastPresentAnchorNanos = anchorNanos;
-        aurora_set_present_schedule(anchorNanos, intervalNanos);
+        schedule.anchorNanos = anchorNanos;
+        schedule.intervalNanos = intervalNanos;
     } else {
         // Retrace-context presents (VI black, boot) have no display period of
         // their own to subdivide; present as soon as the frame is ready. The
         // schedule grid is gone, so the anchor cursor must not constrain the
         // next paced frame.
         s_lastPresentAnchorNanos = 0;
-        aurora_set_present_schedule(0, 0);
     }
 
     const Clock::time_point endFrameStart = Clock::now();
-    aurora_end_frame();
-    // The seal witness's completed half (gx_worker.h).
-    GxWorker::NoteSealCompleted();
-    sealGuard.sealed = true;
+    if (deferSeal) {
+        // sealdefer: the seal half runs later (SealNow); its own guard counts an abandoned seal
+        s_pendingSeal = PendingSeal{presentedXfb, schedule};
+        GxWorker::SealDeferArm(&SealNow);
+        sealGuard.sealed = true;
+    } else {
+        ApplyPresentSchedule(schedule);
+        aurora_end_frame();
+        // The seal witness's completed half (gx_worker.h).
+        GxWorker::NoteSealCompleted();
+        sealGuard.sealed = true;
+    }
     const Clock::time_point paceStart = Clock::now();
     if (paceThisFrame) {
         PaceToRetraceBoundary(paceDeadline);
@@ -1270,16 +1370,19 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
             times.lastPresentEnd = now;
         }
     }
-    if (!RuntimeFrontend::Active()) settings_overlay::AdvancePresentedFrame();
-    g_auroraFrameActive.store(false, std::memory_order_release);
-    g_auroraFrameHadWork.store(false, std::memory_order_release);
+    if (!deferSeal) {
+        if (!RuntimeFrontend::Active()) settings_overlay::AdvancePresentedFrame();
+        g_auroraFrameActive.store(false, std::memory_order_release);
+        g_auroraFrameHadWork.store(false, std::memory_order_release);
+    }
     if (presentedXfb) {
         std::lock_guard<std::mutex> lock(g_viMutex);
         g_vi.hasValidXfb = false;
         g_vi.readyXfb = 0;
     }
-    // Pre-warm the next frame so subsequent GX work has a valid frame context.
-    {
+    // Pre-warm the next frame so subsequent GX work has a valid frame context (with the seal
+    // deferred, SealNow does it after the frame's end_frame).
+    if (!deferSeal) {
         UpdateAuroraAndProcessEvents();
         if (BeginAuroraFrame()) {
             g_auroraFrameActive.store(true, std::memory_order_release);
@@ -1635,6 +1738,8 @@ extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
 
         do {
             cpu->gpr[3] = kViRetraceQueueAddr;
+            // sealdefer: the main ready-in-idle fire point (the guest is about to sleep to the retrace)
+            GxWorker::FireSealIfReady(GxWorker::SealFire::ViWait);
             if (continuing) {
                 OS_HLE_SleepResume(cpu, resumedRunning, 0);  // the sleep ran with interrupts already off
                 continuing = false;
@@ -1662,6 +1767,7 @@ extern "C" void VIWaitForRetrace_HLE_801b99ec(CpuContext* ctx)
             target = g_vi.lastRetrace + interval;
         }
 
+        GxWorker::FireSealIfReady(GxWorker::SealFire::ViWait);
         const auto now = Clock::now();
         if (now < target) {
             SleepPreciselyUntil(target, true);
@@ -1682,6 +1788,7 @@ uint32_t SpmPresentedFrames() { return g_spmFramesFn(); }
 
 // Called only after guest producers stop, before the next content session starts.
 void VI_HLE_ResetFrontend() {
+    GxWorker::FireSeal(GxWorker::SealFire::Exit);  // sealdefer: a pending seal never outlives the session
     std::lock_guard lock(g_viMutex);
     g_vi = ViState{};
     g_auroraFrameActive = false;

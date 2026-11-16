@@ -32,7 +32,41 @@
 
 namespace GxWorker {
 
-enum class Kind : uint8_t { Inline, Queue, SelfDefer, NoSync, QueueIfAsked, NoSyncIfAsked };
+enum class Kind : uint8_t { Inline, Queue, SelfDefer, NoSync, QueueIfAsked, NoSyncIfAsked, NoSyncIfSealDefer,
+                            NoSyncIfSealPending };
+
+// ---- sealdefer (dk_diag "sealdefer", default on; state in gx_worker.cpp, the seal in vi.cpp) ----
+// The deferred seal: while on, an eligible XFB present (Threaded mode, no
+// frame-owning diagnostic, not inside a drain; vi.cpp adds its own conditions) does not wait at
+// the copy latch. It stores the seal (the latch, AuroraGxSync, the schedule, aurora_end_frame,
+// the next frame's pre-warm) as pending, and the game thread runs that later at a fire point:
+// ready-in-idle (the guest scheduler's idle wait, the retrace pacing, the VIWaitForRetrace loop,
+// each only once replay has passed the frame's copy) or need (the first record or drain of the
+// next frame, EnsureAuroraFrameActive, the next present, the retrace-context present, shutdown).
+//   NoSyncIfSealDefer   NoSync while sealdefer is on, Inline otherwise (VISetNextFrameBuffer,
+//                       VISetBlack, VIFlush, VIWaitForRetrace: their bodies touch only g_vi under
+//                       g_viMutex, guest memory and the guest scheduler).
+//   NoSyncIfSealPending NoSync while a seal is pending and nothing has been recorded since the
+//                       copy (GXDrawDone right after GXCopyDisp: its body then writes the guest's
+//                       draw-done flags and leaves Aurora's GXDrawDone to the pending seal's sync).
+enum class SealFire : uint8_t { Idle, Pace, ViWait, Record, Drain, Ensure, Present, Retrace, Exit, Count };
+bool SealDeferRequested() noexcept;
+bool SealPending() noexcept;
+bool SealPendingAtMark() noexcept;
+// Game thread, at an XFB present: true when this present may defer its seal (the worker-side
+// conditions: the switch, this thread owns the ring, Threaded mode, no diagnostic, no drain).
+bool SealDeferEligible() noexcept;
+// vi.cpp: the present deferred its seal at the newest frame mark; `seal` runs it later.
+void SealDeferArm(void (*seal)()) noexcept;
+// vi.cpp's seal: the pending flag is cleared before the seal runs, so it never re-enters.
+void SealDeferTake() noexcept;
+// Fire points (game thread): run the pending seal now, if there is one. FireSealIfReady only
+// when replay has already passed the frame's copy (the idle points), so it never waits.
+void FireSeal(SealFire why, uint32_t drainCause = 0) noexcept;
+void FireSealIfReady(SealFire why) noexcept;
+// The seal's own waits, for the [sealdefer] line (vi.cpp).
+void NoteSealWaits(uint64_t latchMicros, uint64_t syncMicros, uint64_t endFrameMicros) noexcept;
+void NoteDrawDoneDeferred() noexcept;
 
 // NoSyncIfAsked: a non-GX native held back behind the kpadnosync experiment (Switch Diagnostics
 // "kpadnosync"): NoSync while the switch is on, Inline while it is off.
@@ -338,9 +372,22 @@ bool NatNoSyncRequested() noexcept;
 // Counts one drain skipped under the switch, with records pending, for the [gxworker] block.
 void NoteNatNoSync() noexcept;
 
+// The kind table (KindOf, defined with gx_call_kinds.inc below), declared here for NativeSyncPoint.
+template <uint32_t Address>
+struct KindOf;
+
 // The Inline sync point of a native registered at `Address` from a file classified `GxLayer`.
 template <uint32_t Address, bool GxLayer>
 inline void NativeSyncPoint() {
+    if constexpr (KindOf<Address>::kKind == Kind::NoSyncIfSealDefer) {
+        if (SealDeferRequested()) {
+            return;
+        }
+    } else if constexpr (KindOf<Address>::kKind == Kind::NoSyncIfSealPending) {
+        if (SealPendingAtMark()) {
+            return;
+        }
+    }
     if constexpr (!GxLayer && !IsGxLayerAddress(Address)) {
         if (NatNoSyncRequested()) {
             if (Pending()) {
@@ -479,6 +526,16 @@ inline bool DispatchCall(A... args) {
         return false;
     } else if constexpr (kind == Kind::NoSyncIfAsked) {
         if (!NoSyncIfAskedRequested() && !NatNoSyncRequested()) {
+            Drain(Address);
+        }
+        return false;
+    } else if constexpr (kind == Kind::NoSyncIfSealDefer) {
+        if (!SealDeferRequested()) {
+            Drain(Address);
+        }
+        return false;
+    } else if constexpr (kind == Kind::NoSyncIfSealPending) {
+        if (!SealPendingAtMark()) {
             Drain(Address);
         }
         return false;

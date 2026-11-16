@@ -168,4 +168,17 @@ GX_WORKER_KIND(0x8026D860u, NoSync);     // DCFlushRangeNoSync
 // the whole frame's records on the game thread at every frame end.
 GX_WORKER_KIND(0x8028DFA0u, NoSync);     // GXCopyDisp
 
+// sealdefer (gx_worker.h): with the seal deferred, the guest's frame end runs straight on from
+// GXCopyDisp (DEMODoneRender: GXDrawDone, VISetNextFrameBuffer, VISetBlack, VIFlush,
+// VIWaitForRetrace). GXDrawDone right after the copy skips its drain only while the seal is
+// pending and nothing has been recorded since the copy (its body then writes the guest's flags
+// and leaves Aurora's GXDrawDone to the seal's own sync); the VI calls touch only g_vi under
+// g_viMutex, guest memory and the guest scheduler (vi.cpp), so they skip the drain while the
+// switch is on. All five are Inline exactly as before while sealdefer is off.
+GX_WORKER_KIND(0x8028CD50u, NoSyncIfSealPending);  // GXDrawDone
+GX_WORKER_KIND(0x80281EA4u, NoSyncIfSealDefer);    // VISetNextFrameBuffer
+GX_WORKER_KIND(0x80281F10u, NoSyncIfSealDefer);    // VISetBlack
+GX_WORKER_KIND(0x80281D90u, NoSyncIfSealDefer);    // VIFlush
+GX_WORKER_KIND(0x80280E0Cu, NoSyncIfSealDefer);    // VIWaitForRetrace
+
 #undef GX_WORKER_KIND

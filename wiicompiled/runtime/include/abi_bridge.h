@@ -857,6 +857,10 @@ inline bool GxWorkerDispatchCpu(CpuContext* cpu) {
             GxWorker::Drain(Address);
         }
         return false;
+    } else if constexpr (kind == GxWorker::Kind::NoSyncIfSealDefer ||
+                         kind == GxWorker::Kind::NoSyncIfSealPending) {
+        GxWorker::NativeSyncPoint<Address, GxLayer>();  // honours both kinds' predicates
+        return false;
     } else {
         static_assert(!std::is_invocable_v<decltype(Target), CpuContext*>,
                       "only typed overrides can be queued or defer themselves");
