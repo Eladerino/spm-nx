@@ -2,6 +2,7 @@ extern "C" unsigned g_spmAudit[8];
 #include <filesystem>
 #include <cstdlib>
 #include "gx.hpp"
+#include "spm_zfreezelazy.h"
 
 #include "pipeline.hpp"
 #include "texture_bind_group_cache_key.hpp"
@@ -1941,6 +1942,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   }
   config.shaderConfig.tevStageCount = g_gxState.numTevStages;
   config.shaderConfig.numTexGens = g_gxState.numTexGens;
+  aurora_zfl_materialize();  // zfreeze Tier 2: a pending lazy reference must be the plane this read sees
   config.shaderConfig.zFreeze = g_gxState.zFreeze && g_gxState.zFreezePlane.w() != 0.f;
   if (g_gxState.zTextureOp != GX_ZT_DISABLE && !g_gxState.zCompLocBeforeTex) {
     config.shaderConfig.zTexture = (g_gxState.zTextureBias & 0x00FFFFFFu) |
@@ -2199,6 +2201,7 @@ void shutdown() noexcept {
   // Device resources and logical copy/viewport state belong to one content session.
   // Retaining the previous game's display-copy rectangle crops the next boot.
   g_gxState = make_default_gx_state();
+  aurora_zfl_clear();  // zfreeze Tier 2: the reset plane supersedes any pending lazy reference
 }
 } // namespace aurora::gx
 

@@ -1,4 +1,5 @@
 #include "shader_info.hpp"
+#include "spm_zfreezelazy.h"
 
 #include <algorithm>
 #include <array>
@@ -857,6 +858,7 @@ UniformRanges build_uniform(const ShaderInfo& info, u32 vtxStart, const BindGrou
     buf.append(sizeBias);
   }
   if (info.zFreeze) {
+    aurora_zfl_materialize();  // zfreeze Tier 2: the bake reads the plane; materialize any pending reference first
     // Same z correction effective_projection() folds into ubuf.proj, applied to the reference plane.
     const auto& vp = g_gxState.renderViewport;
     const bool flip = (vp.znear <= vp.zfar) == UseReversedZ;

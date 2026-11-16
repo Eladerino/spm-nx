@@ -16,6 +16,7 @@
 // a few dozen times a frame, so each thread's writes are visible to the other when it takes over.
 
 #include "gx_worker.h"
+#include "spm_zfreezelazy.h"
 
 #include <dolphin/gx/GXAurora.h>  // AuroraGxSetSink: the gxskip spike's Aurora-side sink
 
@@ -1608,6 +1609,37 @@ void PrintPerfWindow(uint64_t firstFrame, uint64_t lastFrame, const char* (*name
                          static_cast<unsigned long long>(sdRetraces[0][2]), static_cast<unsigned long long>(sdRetraces[0][3]),
                          static_cast<unsigned long long>(sdRetraces[1][0]), static_cast<unsigned long long>(sdRetraces[1][1]),
                          static_cast<unsigned long long>(sdRetraces[1][2]), static_cast<unsigned long long>(sdRetraces[1][3]));
+        }
+    }
+    {
+        // [zfreezelazy]: lazy materialization of the zfreeze reference plane: records are the
+        // draws that deferred; mat solves + collapse solves are the eager computations that
+        // still ran
+        uint64_t zlRecords, zlResFailures, zlMats, zlMatSolves, zlCollapses, zlCollapseSolves, zlWrites,
+            zlHighWater;
+        aurora_zfl_snapshot(&zlRecords, &zlResFailures, &zlMats, &zlMatSolves, &zlCollapses, &zlCollapseSolves,
+                            &zlWrites, &zlHighWater);
+        static uint64_t zlPrevRecords = 0, zlPrevResFailures = 0, zlPrevMats = 0, zlPrevMatSolves = 0,
+                        zlPrevCollapses = 0, zlPrevCollapseSolves = 0, zlPrevWrites = 0;
+        const uint64_t wRecords = zlRecords - zlPrevRecords, wResFailures = zlResFailures - zlPrevResFailures;
+        const uint64_t wMats = zlMats - zlPrevMats, wMatSolves = zlMatSolves - zlPrevMatSolves;
+        const uint64_t wCollapses = zlCollapses - zlPrevCollapses,
+                       wCollapseSolves = zlCollapseSolves - zlPrevCollapseSolves;
+        const uint64_t wWrites = zlWrites - zlPrevWrites;
+        zlPrevRecords = zlRecords; zlPrevResFailures = zlResFailures; zlPrevMats = zlMats;
+        zlPrevMatSolves = zlMatSolves; zlPrevCollapses = zlCollapses; zlPrevCollapseSolves = zlCollapseSolves;
+        zlPrevWrites = zlWrites;
+        if (wRecords != 0 || wMats != 0 || wCollapses != 0) {
+            std::fprintf(stderr,
+                         "[zfreezelazy] frames %llu-%llu: records %llu (%.0f a frame), resfail %llu, "
+                         "materializations %llu, mat solves %llu, collapses %llu, collapse solves %llu, "
+                         "writes %llu, ring high %llu\n",
+                         static_cast<unsigned long long>(firstFrame), static_cast<unsigned long long>(lastFrame),
+                         static_cast<unsigned long long>(wRecords), static_cast<double>(wRecords) / frames,
+                         static_cast<unsigned long long>(wResFailures), static_cast<unsigned long long>(wMats),
+                         static_cast<unsigned long long>(wMatSolves), static_cast<unsigned long long>(wCollapses),
+                         static_cast<unsigned long long>(wCollapseSolves), static_cast<unsigned long long>(wWrites),
+                         static_cast<unsigned long long>(zlHighWater));
         }
     }
     if (natSkips != 0) {

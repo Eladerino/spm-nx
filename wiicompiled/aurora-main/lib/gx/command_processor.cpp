@@ -18,6 +18,7 @@
 #include "pipeline.hpp"
 #include "shader_info.hpp"
 #include "../internal.hpp"
+#include "spm_zfreezelazy.h"
 
 #include <absl/container/flat_hash_map.h>
 #include <tracy/Tracy.hpp>
@@ -2665,6 +2666,34 @@ static bool spm_draw_ndc_extent(GXVtxFmt fmt, const u8* verts, u32 count, u32 vt
 
 // GX coplanar ("zfreeze"): the depth plane of the last triangle of a draw made with zfreeze off, in the game's NDC
 // with x scaled into the widened projection the GPU uses. Frozen draws take their depth from it (shader.cpp).
+// The transform half of gx_vertex_ndc, factored out so the zfreeze lazy
+// materialization further down can run the identical math from inputs that
+// were resolved and copied at record time: decode the position components
+// from raw bytes, apply the position matrix, project, widen. Every float
+// operation is the one gx_vertex_ndc performed, in the original order.
+static bool gx_vertex_ndc_tail(const u8* pp, GXCompType type, u8 frac, u32 comps, u32 compSize, bool cbe,
+                               const float m[12], const float P[6], GXProjectionType projType, float widen,
+                               float out[3]) {
+  float pos[3] = {0.f, 0.f, 0.f};
+  for (u32 c = 0; c < comps; ++c) pos[c] = spm_bbox_comp(pp + c * compSize, type, frac, cbe);
+  const float vx = m[0] * pos[0] + m[1] * pos[1] + m[2] * pos[2] + m[3];
+  const float vy = m[4] * pos[0] + m[5] * pos[1] + m[6] * pos[2] + m[7];
+  const float vz = m[8] * pos[0] + m[9] * pos[1] + m[10] * pos[2] + m[11];
+  if (projType == GX_PERSPECTIVE) {
+    const float w = -vz;
+    if (w <= 1e-6f) return false;
+    out[0] = (P[0] * vx + P[1] * vz) / w;
+    out[1] = (P[2] * vy + P[3] * vz) / w;
+    out[2] = (P[4] * vz + P[5]) / w;
+  } else {
+    out[0] = P[0] * vx + P[1];
+    out[1] = P[2] * vy + P[3];
+    out[2] = P[4] * vz + P[5];
+  }
+  out[0] *= widen;
+  return true;
+}
+
 static bool gx_vertex_ndc(GXVtxFmt fmt, const u8* v, bool be, float out[3]) {
   const auto& pf = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
   const GXAttrType pd = g_gxState.vtxDesc[GX_VA_POS];
@@ -2679,65 +2708,276 @@ static bool gx_vertex_ndc(GXVtxFmt fmt, const u8* v, bool be, float out[3]) {
     pp = static_cast<const u8*>(arr.data) + idx * arr.stride;
   }
   const bool cbe = (pd == GX_DIRECT) ? be : !arr.le;
-  float pos[3] = {0.f, 0.f, 0.f};
-  for (u32 c = 0; c < comps; ++c) pos[c] = spm_bbox_comp(pp + c * compSize, pf.type, pf.frac, cbe);
   const u32 mi = (g_gxState.vtxDesc[GX_VA_PNMTXIDX] == GX_DIRECT ? v[0] : g_gxState.currentPnMtx) / 3u;
   if (mi >= MaxPnMtx) return false;
   float m[12];
   std::memcpy(m, &g_gxState.pnMtx[mi].pos, sizeof(m));
-  const float vx = m[0] * pos[0] + m[1] * pos[1] + m[2] * pos[2] + m[3];
-  const float vy = m[4] * pos[0] + m[5] * pos[1] + m[6] * pos[2] + m[7];
-  const float vz = m[8] * pos[0] + m[9] * pos[1] + m[10] * pos[2] + m[11];
-  const auto& P = g_gxState.xfProjection;
-  if (g_gxState.projType == GX_PERSPECTIVE) {
-    const float w = -vz;
-    if (w <= 1e-6f) return false;
-    out[0] = (P[0] * vx + P[1] * vz) / w;
-    out[1] = (P[2] * vy + P[3] * vz) / w;
-    out[2] = (P[4] * vz + P[5]) / w;
-  } else {
-    out[0] = P[0] * vx + P[1];
-    out[1] = P[2] * vy + P[3];
-    out[2] = P[4] * vz + P[5];
-  }
-  out[0] *= g_spmProjWiden;
-  return true;
+  return gx_vertex_ndc_tail(pp, pf.type, pf.frac, comps, compSize, cbe, m, g_gxState.xfProjection.data(),
+                            g_gxState.projType, g_spmProjWiden, out);
 }
 
-static void update_zfreeze_reference(GXPrimitive prim, GXVtxFmt fmt, const u8* verts, u32 count, u32 vtxSize, bool be) {
-  u32 i0, i1, i2;  // the draw's last triangle
+// The last-triangle selection from the original update_zfreeze_reference:
+// fills i0/i1/i2 with the draw's last triangle and returns true, or returns
+// false for the shapes and counts that never set the reference (lines,
+// points, truncated runs).
+static bool zfreeze_last_triangle(GXPrimitive prim, u32 count, u32& i0, u32& i1, u32& i2) {
   switch (prim) {
   case GX_TRIANGLES: {
     const u32 n = count - count % 3;
-    if (n < 3) return;
+    if (n < 3) return false;
     i0 = n - 3; i1 = n - 2; i2 = n - 1;
   } break;
   case GX_TRIANGLESTRIP:
-    if (count < 3) return;
+    if (count < 3) return false;
     i0 = count - 3; i1 = count - 2; i2 = count - 1;
     break;
   case GX_TRIANGLEFAN:
-    if (count < 3) return;
+    if (count < 3) return false;
     i0 = 0; i1 = count - 2; i2 = count - 1;
     break;
   case GX_QUADS: {
     const u32 n = count - count % 4;
-    if (n < 4) return;
+    if (n < 4) return false;
     i0 = n - 4; i1 = n - 2; i2 = n - 1;
   } break;
   default:
-    return;  // lines and points never set the reference
+    return false;  // lines and points never set the reference
   }
+  return true;
+}
+
+// The plane solve from the original update_zfreeze_reference, verbatim:
+// given the last triangle's three NDC points, write the coplanar depth
+// plane to out and return true; an edge-on triangle returns false and
+// leaves out untouched (the caller keeps the previous plane).
+static bool zfreeze_solve(const float a[3], const float b[3], const float c[3], Vec4<float>& out) {
+  const float det = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+  if (std::fabs(det) < 1e-12f) return false;  // edge-on triangle: keep the previous plane
+  const float A = ((b[2] - a[2]) * (c[1] - a[1]) - (c[2] - a[2]) * (b[1] - a[1])) / det;
+  const float B = ((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2])) / det;
+  out = {A, B, a[2] - A * a[0] - B * a[1], 1.f};
+  return true;
+}
+
+// The eager update as a pure computation: true (and out = the plane) iff
+// the original update_zfreeze_reference would have written the plane.
+static bool zfreeze_try_compute(GXPrimitive prim, GXVtxFmt fmt, const u8* verts, u32 count, u32 vtxSize, bool be,
+                                Vec4<float>& out) {
+  u32 i0, i1, i2;
+  if (!zfreeze_last_triangle(prim, count, i0, i1, i2)) return false;
   float a[3], b[3], c[3];
   if (!verts || !gx_vertex_ndc(fmt, verts + i0 * vtxSize, be, a) || !gx_vertex_ndc(fmt, verts + i1 * vtxSize, be, b) ||
       !gx_vertex_ndc(fmt, verts + i2 * vtxSize, be, c))
-    return;
-  const float det = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
-  if (std::fabs(det) < 1e-12f) return;  // edge-on triangle: keep the previous plane
-  const float A = ((b[2] - a[2]) * (c[1] - a[1]) - (c[2] - a[2]) * (b[1] - a[1])) / det;
-  const float B = ((b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2])) / det;
-  g_gxState.zFreezePlane = {A, B, a[2] - A * a[0] - B * a[1], 1.f};
+    return false;
+  return zfreeze_solve(a, b, c, out);
 }
+
+// ---- zfreeze Tier 2: lazy materialization (dk_diag zfreezelazy, default on) ----
+// The counter build priced this: the eager transform runs on every
+// zfreeze-off draw (~3,400 a frame in 3D scenes) and its product was read
+// zero times in the measured scenes. While lazy is on, a zfreeze-off draw
+// does not transform: it resolves its last triangle's inputs (pointer
+// arithmetic and bounds checks only, the same tests gx_vertex_ndc makes)
+// and appends a copy of them to a pending ring. The plane is computed only
+// when a consumer actually reads it (the frozen-draw pipeline config and
+// uniform bake, the vcache digest and end capture), by materializing the
+// ring: the newest stash whose solve succeeds is exactly the eager plane,
+// because eager applies updates in order, a success overwrites, and a
+// failure (perspective w, edge-on det) keeps the previous value; if no
+// stash in the ring succeeds, the plane is the value that was current when
+// the ring's oldest stash was recorded, which is what g_gxState still
+// holds. A single pending slot cannot reproduce that: a det-failing update
+// that superseded a succeeding one's stash would fall back to a plane from
+// before the succeeding update. Every input the transform reads is copied
+// into the stash or consumed during resolution, so state changed between
+// record and read (matrices, projection, array contents) cannot move the
+// result. The ring is bounded: when full, the oldest stash is collapsed
+// into the pending base plane (one solve per 1024 records in an endless
+// no-read run) instead of being dropped unevaluated.
+// The vcache replay restore and the state reset clear the ring where they
+// write the plane: the value they install supersedes anything pending.
+// All of this state sits on the CP decode path beside g_gxState, under the
+// same discipline; the switches are atomics only because the diag channel
+// flips them from another thread.
+struct ZflStash {
+  u8 posBytes[3][12];  // each vertex's resolved raw position bytes (comps * compSize of them are valid)
+  float mtx[3][12];    // each vertex's pnMtx[mi].pos at record time
+  float proj[6];       // xfProjection at record time
+  float widen;         // g_spmProjWiden at record time
+  GXCompType posType;
+  GXProjectionType projType;
+  u8 posFrac;
+  u8 comps;
+  u8 compSize;
+  bool cbe;  // the component endianness gx_vertex_ndc would decode with
+};
+
+static constexpr u32 kZflRingSize = 1024;
+static ZflStash s_zflRing[kZflRingSize];
+static u32 s_zflRingHead = 0;   // index of the oldest pending stash
+static u32 s_zflRingCount = 0;  // stashes pending
+static Vec4<float> s_zflPendingBase{0.f, 0.f, 0.f, 0.f};  // the plane current when the oldest stash was recorded
+static std::atomic<bool> s_zflLazy{true};
+static std::atomic<uint64_t> s_zflRecords{0};
+static std::atomic<uint64_t> s_zflResFailures{0};
+static std::atomic<uint64_t> s_zflMaterializations{0};
+static std::atomic<uint64_t> s_zflMatSolves{0};
+static std::atomic<uint64_t> s_zflCollapses{0};
+static std::atomic<uint64_t> s_zflCollapseSolves{0};
+static std::atomic<uint64_t> s_zflWrites{0};
+static std::atomic<uint64_t> s_zflRingHighWater{0};
+
+// The transform + solve for one recorded stash: true (and out = the plane)
+// iff the eager update for that draw would have written the plane.
+static bool zfl_solve_stash(const ZflStash& s, Vec4<float>& out) {
+  float a[3], b[3], c[3];
+  if (!gx_vertex_ndc_tail(s.posBytes[0], s.posType, s.posFrac, s.comps, s.compSize, s.cbe, s.mtx[0], s.proj,
+                          s.projType, s.widen, a) ||
+      !gx_vertex_ndc_tail(s.posBytes[1], s.posType, s.posFrac, s.comps, s.compSize, s.cbe, s.mtx[1], s.proj,
+                          s.projType, s.widen, b) ||
+      !gx_vertex_ndc_tail(s.posBytes[2], s.posType, s.posFrac, s.comps, s.compSize, s.cbe, s.mtx[2], s.proj,
+                          s.projType, s.widen, c))
+    return false;
+  return zfreeze_solve(a, b, c, out);
+}
+
+// Ring overflow: solve the oldest stash into the pending base plane rather
+// than dropping it unevaluated.
+static void zfl_collapse_oldest() {
+  const ZflStash& s = s_zflRing[s_zflRingHead];
+  Vec4<float> plane{};
+  const bool writes = zfl_solve_stash(s, plane);
+  s_zflCollapseSolves.fetch_add(1, std::memory_order_relaxed);
+  if (writes) s_zflPendingBase = plane;
+  s_zflRingHead = (s_zflRingHead + 1) % kZflRingSize;
+  --s_zflRingCount;
+  s_zflCollapses.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Run the deferred updates: the plane becomes the newest succeeding
+// stash's plane, or stays what it is when none succeeds. The plane's
+// consumers call this (through aurora_zfl_materialize, or directly inside
+// this file) before they read.
+static void zfl_materialize() {
+  if (s_zflRingCount == 0) return;
+  s_zflMaterializations.fetch_add(1, std::memory_order_relaxed);
+  for (u32 n = 0; n < s_zflRingCount; ++n) {
+    const ZflStash& s = s_zflRing[(s_zflRingHead + s_zflRingCount - 1 - n) % kZflRingSize];
+    Vec4<float> plane{};
+    const bool writes = zfl_solve_stash(s, plane);
+    s_zflMatSolves.fetch_add(1, std::memory_order_relaxed);
+    if (writes) {
+      g_gxState.zFreezePlane = plane;
+      s_zflWrites.fetch_add(1, std::memory_order_relaxed);
+      break;
+    }
+  }
+  s_zflRingHead = 0;
+  s_zflRingCount = 0;
+}
+
+static void zfl_clear() {
+  s_zflRingHead = 0;
+  s_zflRingCount = 0;
+}
+
+// The lazy half of update_zfreeze_reference: resolve the draw's last
+// triangle and record its inputs; no transform runs. An update whose
+// vertices fail resolution (no position attribute, an out-of-bounds index,
+// a bad matrix index) is a proven no-op in the eager path, so it records
+// nothing and leaves the pending ring untouched, exactly as eager leaves
+// the plane.
+static void zfl_record(GXPrimitive prim, GXVtxFmt fmt, const u8* verts, u32 count, u32 vtxSize, bool be) {
+  u32 i0, i1, i2;
+  if (!zfreeze_last_triangle(prim, count, i0, i1, i2)) return;  // never an update; pending untouched
+  if (!verts) {
+    s_zflResFailures.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  const auto& pf = g_gxState.vtxFmts[fmt].attrs[GX_VA_POS];
+  const GXAttrType pd = g_gxState.vtxDesc[GX_VA_POS];
+  if (pd == GX_NONE) {
+    s_zflResFailures.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  const u32 compSize = (pf.type == GX_F32) ? 4u : (pf.type >= GX_U16 ? 2u : 1u);
+  const u32 comps = pf.cnt == GX_POS_XY ? 2u : 3u;
+  const u32 prefix = matrix_index_prefix_size(fmt);
+  const auto& arr = g_gxState.arrays[GX_VA_POS];
+  const bool indexed = pd == GX_INDEX8 || pd == GX_INDEX16;
+  ZflStash s{};
+  s.posType = pf.type;
+  s.posFrac = static_cast<u8>(pf.frac);
+  s.comps = static_cast<u8>(comps);
+  s.compSize = static_cast<u8>(compSize);
+  s.cbe = (pd == GX_DIRECT) ? be : !arr.le;
+  std::memcpy(s.proj, g_gxState.xfProjection.data(), sizeof(s.proj));
+  s.projType = g_gxState.projType;
+  s.widen = g_spmProjWiden;
+  const u32 tri[3] = {i0, i1, i2};
+  for (int k = 0; k < 3; ++k) {
+    const u8* v = verts + tri[k] * vtxSize;
+    const u8* pp = v + prefix;
+    if (indexed) {
+      const u32 idx = pd == GX_INDEX8 ? pp[0] : (be ? u32((pp[0] << 8) | pp[1]) : u32(pp[0] | (pp[1] << 8)));
+      if (!arr.data || u64(idx) * arr.stride + comps * compSize > arr.size) {
+        s_zflResFailures.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+      pp = static_cast<const u8*>(arr.data) + idx * arr.stride;
+    }
+    const u32 mi = (g_gxState.vtxDesc[GX_VA_PNMTXIDX] == GX_DIRECT ? v[0] : g_gxState.currentPnMtx) / 3u;
+    if (mi >= MaxPnMtx) {
+      s_zflResFailures.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    std::memcpy(s.posBytes[k], pp, comps * compSize);
+    std::memcpy(s.mtx[k], &g_gxState.pnMtx[mi].pos, sizeof(s.mtx[k]));
+  }
+  if (s_zflRingCount == 0) {
+    s_zflPendingBase = g_gxState.zFreezePlane;
+  } else if (s_zflRingCount == kZflRingSize) {
+    zfl_collapse_oldest();
+  }
+  s_zflRing[(s_zflRingHead + s_zflRingCount) % kZflRingSize] = s;
+  ++s_zflRingCount;
+  s_zflRecords.fetch_add(1, std::memory_order_relaxed);
+  if (s_zflRingCount > s_zflRingHighWater.load(std::memory_order_relaxed))
+    s_zflRingHighWater.store(s_zflRingCount, std::memory_order_relaxed);
+}
+
+static void update_zfreeze_reference(GXPrimitive prim, GXVtxFmt fmt, const u8* verts, u32 count, u32 vtxSize, bool be) {
+  if (s_zflLazy.load(std::memory_order_relaxed)) {
+    zfl_record(prim, fmt, verts, count, vtxSize, be);
+    return;
+  }
+  Vec4<float> plane;
+  if (!zfreeze_try_compute(prim, fmt, verts, count, vtxSize, be, plane)) return;
+  g_gxState.zFreezePlane = plane;
+}
+
+#if defined(__SWITCH__)
+extern "C" void aurora_zfl_set_lazy(bool on) {
+  // Turning lazy off mid-run: the eager path resumes from the live plane,
+  // so any pending ring is materialized first.
+  if (!on) zfl_materialize();
+  s_zflLazy.store(on, std::memory_order_relaxed);
+}
+extern "C" void aurora_zfl_materialize() { zfl_materialize(); }
+extern "C" void aurora_zfl_clear() { zfl_clear(); }
+extern "C" void aurora_zfl_snapshot(uint64_t* records, uint64_t* resFailures, uint64_t* materializations,
+                                    uint64_t* matSolves, uint64_t* collapses, uint64_t* collapseSolves,
+                                    uint64_t* writes, uint64_t* ringHighWater) {
+  *records = s_zflRecords.load(std::memory_order_relaxed);
+  *resFailures = s_zflResFailures.load(std::memory_order_relaxed);
+  *materializations = s_zflMaterializations.load(std::memory_order_relaxed);
+  *matSolves = s_zflMatSolves.load(std::memory_order_relaxed);
+  *collapses = s_zflCollapses.load(std::memory_order_relaxed);
+  *collapseSolves = s_zflCollapseSolves.load(std::memory_order_relaxed);
+  *writes = s_zflWrites.load(std::memory_order_relaxed);
+  *ringHighWater = s_zflRingHighWater.load(std::memory_order_relaxed);
+}
+#endif
 
 static void spm_log_draw_extent(u8 prim, GXVtxFmt fmt, const u8* verts, u32 count, u32 vtxSize, bool be) {
   static int logged = 0;
@@ -3481,6 +3721,7 @@ bool vcache_generations_current(const std::array<uint64_t, 26>& stored, uint32_t
 // only cost a hit, never cause a wrong one, because every field that decides the
 // output is in here by value.
 uint64_t vcache_state_digest() {
+  zfl_materialize();  // zfreeze Tier 2: the digest keys the plane; a pending lazy reference must be it
   const GXState& s = g_gxState;
   HashType h = 0;
   const auto addBytes = [&h](const void* p, size_t n) { h = hash_combine(h, xxh3_hash_s(p, n)); };
@@ -3746,6 +3987,7 @@ bool vcache_try_replay(const uint8_t* data, uint32_t nbytes, bool bigEndian) {
   g_gxState.lastVtxFmt = entry->endLastVtxFmt;
   g_gxState.lastVtxSize = entry->endLastVtxSize;
   g_gxState.zFreezePlane = entry->endZFreezePlane;
+  zfl_clear();  // zfreeze Tier 2: the restored plane supersedes any pending lazy reference
   s_lastDrawRecordedInterpolation = entry->endLastDrawRecordedInterpolation;
   g_spmAudit[0] += entry->auditDraws;
   g_statDraws.fetch_add(entry->statDraws, std::memory_order_relaxed);
@@ -3951,6 +4193,7 @@ void vcache_end(VCacheRecording& rec, bool splitOccurred) {
   entry.endStateDirty = g_gxState.stateDirty;
   entry.endLastVtxFmt = g_gxState.lastVtxFmt;
   entry.endLastVtxSize = g_gxState.lastVtxSize;
+  zfl_materialize();  // zfreeze Tier 2: the end capture records the plane; materialize any pending reference first
   entry.endZFreezePlane = g_gxState.zFreezePlane;
   entry.endLastDrawRecordedInterpolation = s_lastDrawRecordedInterpolation;
   entry.auditDraws = g_spmAudit[0] - rec.audit0;
