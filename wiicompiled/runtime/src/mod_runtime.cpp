@@ -337,9 +337,7 @@ int ApiHook(uint32_t fn, SpmHookFn cb, void* user) {
     g_hooks[fn].push_back({cb, user});
     const uint32_t slot = (fn - 0x80000000u) >> 2;
     if (slot < g_hookBits.size() * 64) g_hookBits[slot >> 6] |= uint64_t(1) << (slot & 63);
-#if !defined(__SWITCH__)
     ModHooks::g_active = true;
-#endif
     return 1;
 }
 
@@ -442,9 +440,7 @@ void WriteSafe(uint32_t at, uint32_t size, uint32_t value) {
 } // namespace
 
 namespace ModHooks {
-#if !defined(__SWITCH__)
 bool g_active = false;
-#endif
 bool Run(uint32_t target, CpuContext* ctx) {
     // Most calls are to functions no mod hooked: one bit per 4-byte address of MEM1 answers that.
     const uint32_t slot = (target - 0x80000000u) >> 2;
@@ -465,24 +461,26 @@ namespace ModRuntime {
 
 void Load() {
     AddDolTextRanges();
-    // Built in (issue #57): extdrv.c:364 `anim_ext_tex_size < 1024*1024` panicked at King Sammer's "Vassals to me!"
-    // in 6-1. The frame's animation textures are frame-buffer copies the recomp keeps on the GPU, not in that
-    // 1 MB of game memory, so going past it is harmless here: that one assert continues instead of crashing.
+    // Built in (issue #57): at King Sammer's "Vassals to me!" in 6-1 the frame's animation ("ext") textures add up
+    // past 1 MB, and extdrv.c asserts twice about it: :364 `anim_ext_tex_size < 1024*1024` (their image buffer) and
+    // :839 `bank_adr+size < 2*512*1024` (the Wii's 1 MB texture cache, TMEM). The recomp keeps those frame-buffer
+    // copies on the GPU and never uses TMEM (textures are read from RAM), so going past either is harmless here.
     g_loading = true;
-    const int hooked = ApiHook(0x8019B6C8u, [](SpmCpu* cpu, void*) -> int {  // __assert2(file, line, expression, message)
+    const int hooked = ApiHook(0x8019B6C8u, [](SpmCpu* cpu, void*) -> int {  // __assert2(file, line, ..., expression)
         const uint32_t* r = Ctx(cpu)->gpr;
-        if (r[4] != 364) return 0;
+        if (r[4] != 364 && r[4] != 839) return 0;
         bool match = false;
-        for (const uint32_t at : {r[5], r[6]}) {  // the expression, then the message
+        for (const uint32_t at : {r[5], r[6]}) {  // the expression is in one of these, depending on the call
             char text[48] = {};
             for (uint32_t i = 0; i + 1 < sizeof text && Memory::Contains(at + i, 1); ++i)
                 if (!(text[i] = char(Memory::Read8(at + i)))) break;
-            match |= std::strstr(text, "anim_ext_tex_size") != nullptr;
+            match |= std::strstr(text, "anim_ext_tex_size") != nullptr || std::strstr(text, "bank_adr+size") != nullptr;
         }
         if (!match) return 0;
-        static bool logged = false;
-        if (!logged) RT_LOGF(RT_TAG_RUNTIME, "extdrv.c:364 anim_ext_tex_size over 1 MB: continuing (issue #57)\n");
-        logged = true;
+        static uint32_t logged = 0;
+        if (!(logged & (r[4] == 364 ? 1u : 2u)))
+            RT_LOGF(RT_TAG_RUNTIME, "extdrv.c:%u animation textures over 1 MB: continuing (issue #57)\n", r[4]);
+        logged |= r[4] == 364 ? 1u : 2u;
         return 1;
     }, nullptr);
     g_loading = false;
